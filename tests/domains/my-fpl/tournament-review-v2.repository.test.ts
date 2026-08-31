@@ -59,8 +59,15 @@ const publicationRow = (overrides: Record<string, unknown> = {}) => {
 		content_sha256: postgresJsonbContentHash(payload),
 		published_at: "2026-08-20T00:00:03.000Z",
 		payload,
+		obligation_state: "READY",
+		active_revision: 8,
 		...overrides,
 	};
+	// The Gameweek metadata query returns the same immutable head identity plus
+	// its single-snapshot obligation state. Keeping these fields on the shared
+	// fixture lets publication and metadata mocks exercise the exact same row.
+	row.obligation_state ??= "READY";
+	row.active_revision ??= row.revision;
 	if (!("content_sha256" in overrides)) {
 		row.content_sha256 = postgresJsonbContentHash(row.payload);
 	}
@@ -198,6 +205,9 @@ describe("My Tournament Review V2 repository", () => {
 		);
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("tournament.setup_status = 'ready'");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT 500");
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
+			"head_obligation.ready_revision = review_head.revision"
+		);
 	});
 
 	it("reads a publication through the captured immutable identity", () => {
@@ -224,6 +234,9 @@ describe("My Tournament Review V2 repository", () => {
 			"publication.event_data_checked_at = event.data_checked_at"
 		);
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("publication.format = obligation.format");
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
+			"obligation.ready_revision = review_head.revision"
+		);
 	});
 
 	it("reads status rows and finalized checkpoint from one database snapshot", async () => {
@@ -406,10 +419,23 @@ describe("My Tournament Review V2 repository", () => {
 	it("keeps a pending obligation visible when its publication is not ready", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async (query: unknown) => {
-				if (String(query).includes("FROM competition.tournament_review_publications")) {
-					return { rows: [] };
+				if (String(query) === MY_TOURNAMENT_REVIEW_HEAD_SQL) {
+					return {
+						rows: [
+							{
+								event_id: null,
+								revision: null,
+								format: null,
+								content_sha256: null,
+								event_data_checked_at: null,
+								published_at: null,
+								obligation_state: "WAITING_SOURCE",
+								active_revision: null,
+							},
+						],
+					};
 				}
-				return { rows: [{ state: "WAITING_SOURCE" }] };
+				throw new Error(`unexpected query: ${String(query)}`);
 			},
 		});
 		const repository = createMyTournamentReviewRepository();
@@ -427,20 +453,19 @@ describe("My Tournament Review V2 repository", () => {
 	});
 
 	it("rejects a revision pin that no longer matches the active head", async () => {
-		let calls = 0;
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => {
-				calls += 1;
-				if (calls === 1) return { rows: [] };
 				return {
 					rows: [
 						{
-							event_id: 4,
-							revision: 8,
-							format: "POINTS",
-							content_sha256: "a".repeat(64),
-							event_data_checked_at: "2026-08-20T00:00:00.000Z",
-							published_at: "2026-08-20T00:00:03.000Z",
+							event_id: null,
+							revision: null,
+							format: null,
+							content_sha256: null,
+							event_data_checked_at: null,
+							published_at: null,
+							obligation_state: "READY",
+							active_revision: 8,
 						},
 					],
 				};
@@ -453,6 +478,41 @@ describe("My Tournament Review V2 repository", () => {
 			message: "Review revision does not match the active publication head",
 			extensions: { code: "BAD_USER_INPUT" },
 		});
+	});
+
+	it("does not pair a missing Gameweek head with a READY obligation from another snapshot", async () => {
+		let metadataReads = 0;
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				metadataReads += 1;
+				if (String(query) !== MY_TOURNAMENT_REVIEW_HEAD_SQL) {
+					throw new Error(`unexpected query: ${String(query)}`);
+				}
+				return {
+					rows: [
+						{
+							event_id: null,
+							revision: null,
+							format: null,
+							content_sha256: null,
+							event_data_checked_at: null,
+							published_at: null,
+							obligation_state: "READY",
+							active_revision: null,
+						},
+					],
+				};
+			},
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({
+			extensions: { code: "DATA_INTEGRITY_ERROR" },
+		});
+		expect(metadataReads).toBe(1);
 	});
 
 	it("keeps Season pending while the latest finalized scope is being rebuilt", async () => {
@@ -525,6 +585,42 @@ describe("My Tournament Review V2 repository", () => {
 			state: "WAITING_SOURCE",
 			latestEventId: null,
 			finalizedEventIds: [3, 4],
+		});
+	});
+
+	it("fails closed when any missing finalized Season event still claims READY", async () => {
+		const latest = publicationRow({ event_id: 4, revision: 8 });
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				if (String(query) !== MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					throw new Error(`unexpected query: ${String(query)}`);
+				}
+				return {
+					rows: [
+						seasonMetadataRow(latest, [3, 4]),
+						seasonMetadataRow(
+							{
+								event_id: 3,
+								revision: null,
+								format: null,
+								content_sha256: null,
+								event_data_checked_at: null,
+								published_at: null,
+							},
+							[3, 4],
+							"READY"
+						),
+					],
+				};
+			},
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadSeasonReview(context, {
+				tournamentId: 6953,
+				throughEventId: 4,
+			})
+		).rejects.toMatchObject({
+			extensions: { code: "DATA_INTEGRITY_ERROR" },
 		});
 	});
 
@@ -1131,6 +1227,38 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
+	it("fails closed when distinct knockout entry coverage exceeds subject metadata", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const knockout = payload.knockout as Record<string, unknown>;
+		const matches = knockout.matches as Array<Record<string, unknown>>;
+		matches.push({
+			...matches[0],
+			matchId: 102,
+			playAgainstId: 103,
+			away: {
+				...(matches[0]!.away as Record<string, unknown>),
+				entryId: 6955,
+				entryName: "Third XI",
+			},
+		});
+		const row = {
+			...base,
+			row_count: 2,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		};
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
 	it("fails closed when a knockout match pairs an entry with itself", async () => {
 		const match = {
 			round: 1,
@@ -1675,8 +1803,8 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async (query: unknown) => {
-				if (String(query).includes("FROM competition.tournament_review_obligations")) {
-					return { rows: [{ event_id: 4, state: "READY" }] };
+				if (String(query) === MY_TOURNAMENT_REVIEW_HEAD_SQL) {
+					return { rows: [publicationRow()] };
 				}
 				return { rows: [row] };
 			},

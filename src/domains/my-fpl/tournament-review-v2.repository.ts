@@ -138,6 +138,8 @@ export type MyTournamentReviewH2H = {
 export type MyTournamentReviewKnockoutSide = {
 	entryId: number;
 	entryName: string;
+	/** Internal publication coverage marker; GraphQL does not expose it. */
+	applicable?: boolean;
 	grossPoints: number | null;
 	transferCost: number | null;
 	netPoints: number | null;
@@ -304,6 +306,8 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		 AND head_obligation.tournament_id = review_head.tournament_id
 		 AND head_obligation.event_id = review_head.event_id
 		 AND head_obligation.format = publication.format
+		 AND head_obligation.state = 'READY'
+		 AND head_obligation.ready_revision = review_head.revision
 		JOIN fpl.events head_event
 		  ON head_event.season_id = publication.season_id
 		 AND head_event.event_id = publication.event_id
@@ -456,6 +460,17 @@ export const MY_TOURNAMENT_REVIEW_SEASON_SQL = `
 `;
 
 type ReviewHeadRow = {
+	event_id: number | null;
+	revision: number | string | null;
+	format: string | null;
+	content_sha256: string | null;
+	event_data_checked_at: Date | string | null;
+	published_at: Date | string | null;
+	obligation_state?: string | null;
+	active_revision?: number | string | null;
+};
+
+type ValidReviewHeadRow = {
 	event_id: number;
 	revision: number | string;
 	format: string;
@@ -482,38 +497,66 @@ type SeasonMetadataRow = {
  * transferring or decoding a full immutable publication.
  */
 export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
-	SELECT head.event_id,
-	       head.revision,
-	       head.content_sha256,
-	       publication.format,
-	       publication.event_data_checked_at,
-	       publication.published_at
-	FROM competition.tournament_review_publications publication
-	JOIN competition.tournament_review_heads head
-	  ON publication.season_id = head.season_id
-	 AND publication.tournament_id = head.tournament_id
-	 AND publication.event_id = head.event_id
-	 AND publication.revision = head.revision
-	 AND publication.content_sha256 = head.content_sha256
-	JOIN competition.tournament_review_obligations obligation
-	  ON obligation.season_id = publication.season_id
-	 AND obligation.tournament_id = publication.tournament_id
-	 AND obligation.event_id = publication.event_id
-	 AND obligation.format = publication.format
-	JOIN fpl.events event
-	  ON event.season_id = publication.season_id
-	 AND event.event_id = publication.event_id
-	WHERE head.season_id = $1
-	  AND head.tournament_id = $2
-	  AND head.event_id = $3
-	  AND event.finished = true
-	  AND event.data_checked = true
-	  AND event.data_checked_at IS NOT NULL
-	  AND publication.event_data_checked_at = event.data_checked_at
-	  AND obligation.state = 'READY'
-	  AND obligation.ready_revision = head.revision
-	  AND ($4::bigint IS NULL OR head.revision = $4::bigint)
-	LIMIT 1
+	WITH obligation AS (
+		SELECT state
+		FROM competition.tournament_review_obligations
+		WHERE season_id = $1
+		  AND tournament_id = $2
+		  AND event_id = $3
+		LIMIT 1
+	), coherent_heads AS (
+		SELECT head.event_id,
+		       head.revision,
+		       publication.format,
+		       head.content_sha256,
+		       publication.event_data_checked_at,
+		       publication.published_at
+		FROM competition.tournament_review_publications publication
+		JOIN competition.tournament_review_heads head
+		  ON publication.season_id = head.season_id
+		 AND publication.tournament_id = head.tournament_id
+		 AND publication.event_id = head.event_id
+		 AND publication.revision = head.revision
+		 AND publication.content_sha256 = head.content_sha256
+		JOIN competition.tournament_review_obligations head_obligation
+		  ON head_obligation.season_id = publication.season_id
+		 AND head_obligation.tournament_id = publication.tournament_id
+		 AND head_obligation.event_id = publication.event_id
+		 AND head_obligation.format = publication.format
+		 AND head_obligation.state = 'READY'
+		 AND head_obligation.ready_revision = head.revision
+		JOIN fpl.events event
+		  ON event.season_id = publication.season_id
+		 AND event.event_id = publication.event_id
+		 AND event.finished = true
+		 AND event.data_checked = true
+		 AND event.data_checked_at IS NOT NULL
+		 AND publication.event_data_checked_at = event.data_checked_at
+		WHERE head.season_id = $1
+		  AND head.tournament_id = $2
+		  AND head.event_id = $3
+	)
+	SELECT selected.event_id,
+	       selected.revision,
+	       selected.format,
+	       selected.content_sha256,
+	       selected.event_data_checked_at,
+	       selected.published_at,
+	       obligation.state AS obligation_state,
+	       active.revision AS active_revision
+	FROM (SELECT 1 AS present) present
+	LEFT JOIN obligation ON true
+	LEFT JOIN LATERAL (
+		SELECT *
+		FROM coherent_heads
+		WHERE $4::bigint IS NULL OR revision = $4::bigint
+		LIMIT 1
+	) selected ON true
+	LEFT JOIN LATERAL (
+		SELECT revision
+		FROM coherent_heads
+		LIMIT 1
+	) active ON true
 `;
 
 export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
@@ -679,6 +722,8 @@ export const MY_TOURNAMENT_REVIEW_STATUS_SQL = `
 			  AND review_head.tournament_id = obligation.tournament_id
 			  AND review_head.event_id = obligation.event_id
 			  AND publication.format = obligation.format
+			  AND obligation.state = 'READY'
+			  AND obligation.ready_revision = review_head.revision
 			LIMIT 1
 		) head ON true
 		WHERE obligation.season_id = $1
@@ -783,6 +828,24 @@ export const MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 		],
 	},
 	{
+		name: "my-tournament-review-v2.gameweek-head",
+		sql: MY_TOURNAMENT_REVIEW_HEAD_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 4, null],
+		resultTypes: [
+			{
+				relation: "competition.tournament_review_heads",
+				column: "revision",
+				pgType: "bigint",
+			},
+			{
+				relation: "competition.tournament_review_obligations",
+				column: "state",
+				pgType: "text",
+			},
+			{ relation: "fpl.events", column: "event_id", pgType: "integer" },
+		],
+	},
+	{
 		name: "my-tournament-review-v2.season",
 		sql: MY_TOURNAMENT_REVIEW_SEASON_SQL,
 		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 38, 38, 7, "0".repeat(64)],
@@ -848,15 +911,6 @@ export const MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 		resultTypes: [{ relation: "fpl.events", column: "event_id", pgType: "integer" }],
 	},
 ];
-
-const MY_TOURNAMENT_REVIEW_GAMEWEEK_STATE_SQL = `
-	SELECT state
-	FROM competition.tournament_review_obligations
-	WHERE season_id = $1
-	  AND tournament_id = $2
-	  AND event_id = $3
-	LIMIT 1
-`;
 
 const REVIEW_CACHE_TTL_SECONDS = 5 * 60;
 const REVIEW_CATALOG_CACHE_TTL_SECONDS = 60;
@@ -1281,12 +1335,58 @@ function knockoutSideCache(value: unknown): value is MyTournamentReviewKnockoutS
 	return (
 		positiveInt(value.entryId) !== null &&
 		nonEmptyString(value.entryName) &&
+		(value.applicable === undefined || typeof value.applicable === "boolean") &&
 		[value.grossPoints, value.transferCost, value.netPoints].every((candidate) =>
 			nullableSafeInteger(candidate)
 		) &&
 		[value.goalsScored, value.goalsConceded].every((candidate) =>
 			nullableNonNegativeSafeInteger(candidate)
 		)
+	);
+}
+
+/**
+ * A knockout publication contains fixture rows, not one row per roster
+ * subject: eliminated entries can disappear from the active bracket.  The
+ * distinct non-null side IDs therefore may be smaller than the ready count,
+ * but they can never exceed the roster/subject counts.  When Data includes
+ * its per-side applicability marker, reconcile both partitions as well.
+ */
+function knockoutEntryCoverageValid(
+	matches: readonly MyTournamentReviewKnockoutMatch[],
+	expectedSubjectCount: number,
+	readySubjectCount: number,
+	notApplicableSubjectCount: number
+): boolean {
+	const entryIds = new Set<number>();
+	const applicableEntryIds = new Set<number>();
+	const notApplicableEntryIds = new Set<number>();
+	let hasApplicabilityForEverySide = true;
+	for (const match of matches) {
+		for (const side of [match.home, match.away]) {
+			if (!side) continue;
+			entryIds.add(side.entryId);
+			if (side.applicable === true) applicableEntryIds.add(side.entryId);
+			else if (side.applicable === false) notApplicableEntryIds.add(side.entryId);
+			else hasApplicabilityForEverySide = false;
+		}
+	}
+	if (
+		entryIds.size > expectedSubjectCount ||
+		entryIds.size > readySubjectCount + notApplicableSubjectCount
+	) {
+		return false;
+	}
+	// Without a complete applicability partition we cannot safely attribute a
+	// side to the not-applicable bucket, so use the conservative ready bound.
+	// Data's V2 payload includes the marker on every side; the exact partition
+	// checks below then allow active brackets containing late entrants.
+	if (!hasApplicabilityForEverySide && entryIds.size > readySubjectCount) return false;
+	return (
+		!hasApplicabilityForEverySide ||
+		(applicableEntryIds.size <= readySubjectCount &&
+			notApplicableEntryIds.size <= notApplicableSubjectCount &&
+			applicableEntryIds.size + notApplicableEntryIds.size === entryIds.size)
 	);
 }
 
@@ -1400,7 +1500,17 @@ function gameweekCache(value: unknown): value is MyTournamentGameweekReview {
 	if (value.scope.format === "H2H") {
 		return h2hCache(value.h2h) && value.points === null && value.knockout === null;
 	}
-	return knockoutCache(value.knockout) && value.points === null && value.h2h === null;
+	return (
+		knockoutCache(value.knockout) &&
+		value.points === null &&
+		value.h2h === null &&
+		knockoutEntryCoverageValid(
+			value.knockout.matches,
+			value.scope.expectedSubjectCount,
+			value.scope.readySubjectCount,
+			value.scope.notApplicableSubjectCount
+		)
+	);
 }
 
 function seasonCache(value: unknown): value is MyTournamentSeasonReview {
@@ -1944,6 +2054,7 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 	];
 	if (
 		!entryName ||
+		(value.applicable !== undefined && typeof value.applicable !== "boolean") ||
 		numericValues
 			.slice(0, 3)
 			.some((number) => number !== null && number !== undefined && !nullableSafeInteger(number)) ||
@@ -1958,6 +2069,7 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 	return {
 		entryId,
 		entryName,
+		...(value.applicable === undefined ? {} : { applicable: value.applicable }),
 		grossPoints: nullableNumber(value.grossPoints),
 		transferCost: nullableNumber(value.transferCost),
 		netPoints: nullableNumber(value.netPoints),
@@ -2181,6 +2293,16 @@ function knockoutFromPayload(
 	if (matches.length !== Number(row.row_count)) {
 		throw integrityError("Review knockout row count does not match publication metadata");
 	}
+	if (
+		!knockoutEntryCoverageValid(
+			matches,
+			Number(row.expected_subject_count),
+			Number(row.ready_subject_count),
+			Number(row.not_applicable_subject_count)
+		)
+	) {
+		throw integrityError("Review knockout entry coverage does not match subject metadata");
+	}
 	const page = pageSlice(
 		matches,
 		first,
@@ -2271,21 +2393,45 @@ function parseFinalizedEventIds(value: unknown): number[] | null {
 	return eventIds as number[];
 }
 
-function validateReviewHeadRow(row: ReviewHeadRow): ReviewHeadRow {
+function validateReviewHeadRow(row: ReviewHeadRow): ValidReviewHeadRow {
 	if (
 		!positiveInt(row.event_id) ||
 		!positiveInt(row.revision) ||
 		!reviewFormat(row.format) ||
+		!row.content_sha256 ||
 		!/^[0-9a-f]{64}$/.test(row.content_sha256) ||
 		!iso(row.event_data_checked_at) ||
 		!iso(row.published_at)
 	) {
 		throw integrityError("Review head metadata is invalid");
 	}
-	return row;
+	return {
+		event_id: row.event_id!,
+		revision: row.revision!,
+		format: row.format!,
+		content_sha256: row.content_sha256!,
+		event_data_checked_at: row.event_data_checked_at!,
+		published_at: row.published_at!,
+	};
 }
 
-function reviewHeadKey(row: ReviewHeadRow): string {
+function optionalReviewHeadRow(row: ReviewHeadRow): ValidReviewHeadRow | null {
+	const headFields = [
+		row.event_id,
+		row.revision,
+		row.format,
+		row.content_sha256,
+		row.event_data_checked_at,
+		row.published_at,
+	];
+	if (headFields.every((value) => value === null || value === undefined)) return null;
+	if (headFields.some((value) => value === null || value === undefined)) {
+		throw integrityError("Review head metadata is incomplete");
+	}
+	return validateReviewHeadRow(row);
+}
+
+function reviewHeadKey(row: ValidReviewHeadRow): string {
 	return `${row.event_id}:${String(row.revision)}:${row.content_sha256}:${iso(row.published_at)}`;
 }
 
@@ -2378,34 +2524,33 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			args.eventId,
 			revision,
 		]);
-		const head = headResult.rows[0] ? validateReviewHeadRow(headResult.rows[0]) : null;
-		if (!head && revision !== null) {
+		const metadata = headResult.rows[0] ?? null;
+		const head = metadata ? optionalReviewHeadRow(metadata) : null;
+		const activeRevision =
+			metadata?.active_revision === null || metadata?.active_revision === undefined
+				? null
+				: positiveInt(metadata.active_revision);
+		if (
+			metadata?.active_revision !== null &&
+			metadata?.active_revision !== undefined &&
+			activeRevision === null
+		) {
+			throw integrityError("Review active head revision is invalid");
+		}
+		if (head && metadata?.obligation_state !== undefined && metadata.obligation_state !== "READY") {
+			throw integrityError("Review head is not backed by a READY obligation");
+		}
+		if (!head && revision !== null && activeRevision !== null) {
 			// A revision pin is an optimistic concurrency guard.  If the active
 			// head exists but has moved on, surface a client mismatch instead of
 			// silently returning an unavailable response for a stale pin.
-			const activeHeadResult = await context.database.query<ReviewHeadRow>(
-				MY_TOURNAMENT_REVIEW_HEAD_SQL,
-				[context.currentSeason.seasonId, args.tournamentId, args.eventId, null]
-			);
-			const activeHead = activeHeadResult.rows[0]
-				? validateReviewHeadRow(activeHeadResult.rows[0])
-				: null;
-			if (activeHead) {
-				throw new GraphQLError("Review revision does not match the active publication head", {
-					extensions: { code: "BAD_USER_INPUT" },
-				});
-			}
+			throw new GraphQLError("Review revision does not match the active publication head", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
 		}
 		const unavailableState = head
 			? "READY"
-			: requireNonReadyObligationState(
-					(
-						await context.database.query<{ state: string }>(
-							MY_TOURNAMENT_REVIEW_GAMEWEEK_STATE_SQL,
-							[context.currentSeason.seasonId, args.tournamentId, args.eventId]
-						)
-					).rows[0]?.state
-				);
+			: requireNonReadyObligationState(metadata?.obligation_state);
 		const key = gqlCacheKey(
 			context,
 			`my-tournament-review-v2:gameweek:${args.tournamentId}:${args.eventId}:${head ? reviewHeadKey(head) : `${revision ?? "none"}:${unavailableState}`}:${first}:${args.after ?? ""}`
@@ -2447,7 +2592,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		const metadataRows = metadataResult.rows;
 		let finalizedEventIds: number[] | null = null;
 		const rowsByEvent = new Map<number, SeasonMetadataRow>();
-		const headsByEvent = new Map<number, ReviewHeadRow>();
+		const headsByEvent = new Map<number, ValidReviewHeadRow>();
 		const obligationsByEvent = new Map<
 			number,
 			{ format: MyTournamentReviewFormat; state: MyTournamentReviewState }
@@ -2542,12 +2687,22 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		let unavailableState: MyTournamentReviewState = "UNAVAILABLE";
 		let ready = finalizedEventIds.length > 0;
 		if (missingFinalizedEventIds.length > 0) {
+			for (const eventId of missingFinalizedEventIds) {
+				const missingObligation = obligationsByEvent.get(eventId);
+				if (!missingObligation) {
+					throw integrityError("Review season finalized event is missing its obligation");
+				}
+				if (missingObligation.state === "READY") {
+					throw integrityError(
+						"Review season finalized event has a READY obligation without a coherent head"
+					);
+				}
+			}
 			ready = false;
 			const latestMissingEventId = missingFinalizedEventIds[0]!;
 			const missingObligation = obligationsByEvent.get(latestMissingEventId);
-			if (!missingObligation) {
+			if (!missingObligation)
 				throw integrityError("Review season finalized event is missing its obligation");
-			}
 			unavailableState = requireNonReadyObligationState(missingObligation.state);
 		}
 		if (
