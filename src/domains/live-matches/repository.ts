@@ -985,7 +985,12 @@ const compatibleDetail = (
 	)
 		return false;
 	const deskFixtures = new Set(desk.fixtures.map((fixture) => fixture.fixtureId));
-	return detail.fixtures.every((fixture) => deskFixtures.has(fixture.fixtureId));
+	if (!detail.fixtures.every((fixture) => deskFixtures.has(fixture.fixtureId))) return false;
+	const startedDeskFixtures = desk.fixtures
+		.filter((fixture) => fixture.started || fixture.finished || fixture.minutes > 0)
+		.map((fixture) => fixture.fixtureId);
+	const detailFixtures = new Set(detail.fixtures.map((fixture) => fixture.fixtureId));
+	return startedDeskFixtures.every((fixtureId) => detailFixtures.has(fixtureId));
 };
 
 const chooseDetail = (
@@ -994,7 +999,13 @@ const chooseDetail = (
 ): MatchDetailCandidate | null =>
 	candidates.find((candidate) => compatibleDetail(desk, candidate)) ?? null;
 
-const nullableTimestamp = (value: unknown): boolean => value === null || isIso(value);
+const sameTimestamp = (left: unknown, right: unknown): boolean => {
+	if (left === null || right === null) return left === right;
+	if (typeof left !== "string" || typeof right !== "string") return false;
+	const leftMs = Date.parse(left);
+	const rightMs = Date.parse(right);
+	return Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs === rightMs;
+};
 
 const checkpointPayload = (value: unknown): unknown => {
 	if (typeof value === "string") return parsedJson(value);
@@ -1036,14 +1047,12 @@ const buildPostgresDesk = (
 		bytes > LIVE_MATCH_MAX_DESK_BYTES ||
 		checksum === null ||
 		!/^[0-9a-f]{64}$/.test(checksum) ||
-		row.source_checked_at !== publication.sourceCheckedAt ||
-		row.published_at !== publication.publishedAt ||
+		!sameTimestamp(row.source_checked_at, publication.sourceCheckedAt) ||
+		!sameTimestamp(row.published_at, publication.publishedAt) ||
 		!isIso(row.checkpointed_at) ||
-		row.checkpointed_at !== publication.checkpointedAt ||
-		!nullableTimestamp(row.expected_next_check_at) ||
-		row.expected_next_check_at !== publication.expectedNextCheckAt ||
-		!nullableTimestamp(row.stale_at) ||
-		row.stale_at !== publication.staleAt ||
+		!sameTimestamp(row.checkpointed_at, publication.checkpointedAt) ||
+		!sameTimestamp(row.expected_next_check_at, publication.expectedNextCheckAt) ||
+		!sameTimestamp(row.stale_at, publication.staleAt) ||
 		publication.desk.count !== rowCount ||
 		publication.desk.bytes !== bytes ||
 		publication.desk.sha256 !== checksum
@@ -1088,14 +1097,12 @@ const buildPostgresDetail = (
 		fixtureIdentityRevision === null ||
 		fixtureIdentityRevision !== publication.fixtureIdentityRevision ||
 		stableJson(row.revisions) !== stableJson({ detail: publication.detail }) ||
-		row.source_checked_at !== publication.sourceCheckedAt ||
-		row.published_at !== publication.publishedAt ||
+		!sameTimestamp(row.source_checked_at, publication.sourceCheckedAt) ||
+		!sameTimestamp(row.published_at, publication.publishedAt) ||
 		!isIso(row.checkpointed_at) ||
-		row.checkpointed_at !== publication.checkpointedAt ||
-		!nullableTimestamp(row.expected_next_check_at) ||
-		row.expected_next_check_at !== publication.expectedNextCheckAt ||
-		!nullableTimestamp(row.stale_at) ||
-		row.stale_at !== publication.staleAt ||
+		!sameTimestamp(row.checkpointed_at, publication.checkpointedAt) ||
+		!sameTimestamp(row.expected_next_check_at, publication.expectedNextCheckAt) ||
+		!sameTimestamp(row.stale_at, publication.staleAt) ||
 		rowCount === null ||
 		rowCount < 0 ||
 		rowCount > LIVE_MATCH_MAX_FIXTURES ||
@@ -1251,7 +1258,11 @@ export const readLiveMatchday = async (
 	const redisReadFailed = redisBundle === null;
 	const selectedEventId =
 		requested ?? redisBundle?.eventId ?? processActiveEvent.get(season) ?? null;
-	if (redisBundle?.eventId !== null && redisBundle?.eventId !== undefined)
+	if (
+		requested === undefined &&
+		redisBundle?.eventId !== null &&
+		redisBundle?.eventId !== undefined
+	)
 		processActiveEvent.set(season, redisBundle.eventId);
 	if (selectedEventId === null) {
 		const postgres = await readPostgresCheckpoint(

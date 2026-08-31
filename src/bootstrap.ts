@@ -43,7 +43,7 @@ import {
 	LIVE_MATCHES_CONTRACT_HEADER,
 	LIVE_MATCHES_CONTRACT_VALUE,
 	requiresLiveMatchesV2Contract,
-	isLiveMatchesRootField,
+	isLiveMatchesHotPathOperation,
 } from "./http/live-matches-contract";
 import { GraphQLAdmissionOrder } from "./http/graphql-admission-order";
 import {
@@ -416,7 +416,7 @@ export const startServer = async (): Promise<void> => {
 					}
 					rootFields = limits.rootFields;
 					const livePointsHotPath = isLivePointsHotPathOperation(rootFields);
-					const liveMatchesHotPath = rootFields.some(isLiveMatchesRootField);
+					const liveMatchesHotPath = isLiveMatchesHotPathOperation(rootFields);
 					const requiresLivePointsContract = requiresLivePointsV2Contract(rootFields);
 					const requiresLiveMatchesContract = requiresLiveMatchesV2Contract(rootFields);
 					if (requiresLivePointsContract && requiresLiveMatchesContract) {

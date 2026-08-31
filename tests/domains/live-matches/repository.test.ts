@@ -320,6 +320,41 @@ describe("Live Matches V2 read path", () => {
 		});
 	});
 
+	it("does not let an explicit event read populate the active-event fallback", async () => {
+		const redis = new TestRedis();
+		const bundle = { ...buildBundle().bundle, eventId: 2 };
+		let available = true;
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async () => {
+			if (!available) throw new Error("redis unavailable");
+			return JSON.stringify(bundle);
+		};
+		const context = buildSnapshotContext(redis, { databaseQuery: async () => ({ rows: [] }) });
+
+		await readLiveMatchday(context, 2);
+		available = false;
+
+		const fallback = await readLiveMatchday(context);
+		expect(fallback.eventId).toBeNull();
+	});
+
+	it("requires detail coverage for every started fixture", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (!bundle.detail.active.publication) throw new Error("missing detail publication");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: unknown[];
+		};
+		publication.fixtures = publication.fixtures.slice(0, 1);
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		bundle.detail.active.items = bundle.detail.active.items.slice(0, 1);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("keeps a complete pre-kickoff desk fresh while detail is pending", async () => {
 		const redis = new TestRedis();
 		attachBundle(redis, buildBundle({ deskStarted: false, omitDetail: true }).bundle);
@@ -514,6 +549,33 @@ describe("Live Matches V2 read path", () => {
 		expect(result.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 		expect(result.desk?.fixtures).toHaveLength(2);
 		expect(result.detail?.fixtures).toHaveLength(2);
+	});
+
+	it("accepts PostgreSQL timestamps that represent the same instant", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const row = buildCheckpointRow();
+		const asPostgresTimestamp = (value: string): string => value.replace(".000Z", "+00:00");
+		for (const checkpoint of [row.desk, row.detail]) {
+			checkpoint.source_checked_at = asPostgresTimestamp(checkpoint.source_checked_at);
+			checkpoint.published_at = asPostgresTimestamp(checkpoint.published_at);
+			checkpoint.checkpointed_at =
+				checkpoint.checkpointed_at === null
+					? null
+					: asPostgresTimestamp(checkpoint.checkpointed_at);
+			checkpoint.expected_next_check_at = asPostgresTimestamp(checkpoint.expected_next_check_at);
+			checkpoint.stale_at = asPostgresTimestamp(checkpoint.stale_at);
+		}
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+
+		const result = await readLiveMatchday(context, 1);
+
+		expect(result.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(result.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 	});
 
 	it("rejects a PostgreSQL row whose manifest and columns are not the same publication", async () => {
