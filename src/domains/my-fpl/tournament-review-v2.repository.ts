@@ -306,6 +306,7 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		 AND head_event.data_checked_at IS NOT NULL
 		WHERE review_head.season_id = tournament.season_id
 		  AND review_head.tournament_id = tournament.tournament_id
+		  AND publication.event_data_checked_at = head_event.data_checked_at
 		ORDER BY review_head.event_id DESC
 		LIMIT 1
 	) head ON true
@@ -353,6 +354,8 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		)
 	  )
 	ORDER BY tournament.updated_at DESC, tournament.tournament_id DESC
+	-- Keep the administrator's ALL view bounded even if tournament volume grows.
+	LIMIT 500
 `;
 
 export const MY_TOURNAMENT_REVIEW_PUBLICATION_SQL = `
@@ -760,6 +763,12 @@ function nullableNumber(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
 	const number = Number(value);
 	return Number.isFinite(number) ? number : null;
+}
+
+function requiredSafeInteger(value: unknown): number | null {
+	if (value === null || value === undefined || value === "") return null;
+	const number = Number(value);
+	return Number.isSafeInteger(number) ? number : null;
 }
 
 function boundedFirst(value: number | null | undefined): number {
@@ -1509,20 +1518,29 @@ function mapH2H(value: unknown): {
 				const groupId = positiveInt(raw.groupId);
 				const entryId = positiveInt(raw.entryId);
 				if (!groupId || !entryId) throw integrityError("Review H2H standing payload is invalid");
-				const rank = Number(raw.rank);
-				const played = Number(raw.played);
-				const won = Number(raw.won);
-				const drawn = Number(raw.drawn);
-				const lost = Number(raw.lost);
-				const matchPoints = Number(raw.matchPoints);
-				const pointsFor = Number(raw.pointsFor);
-				const pointsAgainst = Number(raw.pointsAgainst);
+				const rank = requiredSafeInteger(raw.rank);
+				const played = requiredSafeInteger(raw.played);
+				const won = requiredSafeInteger(raw.won);
+				const drawn = requiredSafeInteger(raw.drawn);
+				const lost = requiredSafeInteger(raw.lost);
+				const matchPoints = requiredSafeInteger(raw.matchPoints);
+				const pointsFor = requiredSafeInteger(raw.pointsFor);
+				const pointsAgainst = requiredSafeInteger(raw.pointsAgainst);
 				if (
-					![rank, played, won, drawn, lost, matchPoints].every(
-						(number) => Number.isSafeInteger(number) && number >= 0
-					) ||
-					![pointsFor, pointsAgainst].every((number) => Number.isSafeInteger(number)) ||
-					rank < 1
+					rank === null ||
+					played === null ||
+					won === null ||
+					drawn === null ||
+					lost === null ||
+					matchPoints === null ||
+					pointsFor === null ||
+					pointsAgainst === null ||
+					rank < 1 ||
+					played < 0 ||
+					won < 0 ||
+					drawn < 0 ||
+					lost < 0 ||
+					matchPoints < 0
 				) {
 					throw integrityError("Review H2H standing payload is invalid");
 				}
@@ -1651,7 +1669,7 @@ function pointsFromPayload(
 	const payload = isRecord(row.payload) ? row.payload : {};
 	const source = isRecord(payload.points) ? payload.points : {};
 	const rows = mapPointsRows(source.rows);
-	if (rows.length !== Number(row.row_count)) {
+	if (rows.length !== Number(row.row_count) || rows.length !== Number(row.expected_subject_count)) {
 		throw integrityError("Review points row count does not match publication metadata");
 	}
 	const entryIds = new Set(rows.map((item) => item.entryId));
@@ -1723,11 +1741,12 @@ function h2hFromPayload(
 	}
 	const page = pageSlice(source.matches, first, after, String(row.revision));
 	const standingsPage = pageSlice(source.standings, first, after, String(row.revision));
+	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
 	return {
 		matches: page.items,
 		standings: standingsPage.items,
-		nextCursor: page.nextCursor,
-		hasNextPage: page.hasNextPage,
+		nextCursor: page.hasNextPage ? page.nextCursor : standingsPage.nextCursor,
+		hasNextPage,
 	};
 }
 
