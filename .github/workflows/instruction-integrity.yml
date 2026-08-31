@@ -1375,14 +1375,7 @@ jobs:
                           names.update(iterated_patterns)
                   if not names:
                       return set()
-                  has_placeholder_guard = any(
-                      isinstance(item, ast.Call)
-                      and isinstance(item.func, ast.Name)
-                      and item.func.id == "_looks_like_placeholder"
-                      for statement in loop.body
-                      for item in ast.walk(statement)
-                  )
-                  return names if has_placeholder_guard and returns_true(loop.body) else set()
+                  return names if reachable_placeholder_return(loop.body) else set()
 
               def returns_true(statements):
                   return any(
@@ -1392,6 +1385,53 @@ jobs:
                       for statement in statements
                       for item in ast.walk(statement)
                   )
+
+              def reachable_placeholder_return(statements):
+                  """Require a reachable placeholder guard that returns True."""
+
+                  def true_return(block):
+                      for statement in block:
+                          if isinstance(statement, ast.Return):
+                              return (
+                                  isinstance(statement.value, ast.Constant)
+                                  and statement.value.value is True
+                              )
+                          if isinstance(statement, (ast.Break, ast.Continue, ast.Raise)):
+                              return False
+                          if isinstance(statement, ast.If):
+                              if statically_false(statement.test):
+                                  continue
+                              if true_return(statement.body) or true_return(statement.orelse):
+                                  return True
+                          elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                              if true_return(statement.body) or true_return(statement.orelse):
+                                  return True
+                      return False
+
+                  for statement in statements:
+                      if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                          return False
+                      if isinstance(statement, ast.If):
+                          if statically_false(statement.test):
+                              continue
+                          has_placeholder_guard = any(
+                              isinstance(item, ast.Call)
+                              and isinstance(item.func, ast.Name)
+                              and item.func.id == "_looks_like_placeholder"
+                              for item in ast.walk(statement.test)
+                          )
+                          if has_placeholder_guard and true_return(statement.body):
+                              return True
+                          if reachable_placeholder_return(statement.body):
+                              return True
+                          if reachable_placeholder_return(statement.orelse):
+                              return True
+                      elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+                          if reachable_placeholder_return(statement.body):
+                              return True
+                          if reachable_placeholder_return(statement.orelse):
+                              return True
+                  return False
 
               positive_lines = []
               positive_patterns = set()
@@ -1470,6 +1510,22 @@ jobs:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               check_has_secret_shape(helper_nodes["has_secret"])
               check_locked_skill_secret_shape(helper_nodes["has_locked_skill_secret"])
+              locked_pattern_names = {
+                  "PEM_RE",
+                  "BASIC_AUTH_RE",
+                  "CLI_CREDENTIAL_RE",
+                  "AWS_CREDENTIAL_ARGUMENT_RE",
+                  "LOCKED_CREDENTIAL_KEY_RE",
+                  "SECRET_VALUE_RES",
+              }
+              shadowed_locked_patterns = sorted(
+                  locked_pattern_names & function_bindings(helper_nodes["has_locked_skill_secret"])
+              )
+              if shadowed_locked_patterns:
+                  raise SystemExit(
+                      "approved validator has_locked_skill_secret shadows protected patterns: "
+                      + ", ".join(shadowed_locked_patterns)
+                  )
               secret_value_res = [
                   statement.value
                   for statement in tree.body
