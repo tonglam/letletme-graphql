@@ -46,7 +46,7 @@ const publicationRow = (overrides: Record<string, unknown> = {}) => {
 		schema_version: "my-tournament-review-v2",
 		metric_version: "descriptive-v1",
 		event_data_checked_at: "2026-08-20T00:00:00.000Z",
-		source_min_checked_at: "2026-08-20T00:00:01.000Z",
+		source_min_checked_at: "2026-08-19T23:59:59.000Z",
 		source_max_checked_at: "2026-08-20T00:00:02.000Z",
 		expected_subject_count: 1,
 		ready_subject_count: 1,
@@ -255,6 +255,22 @@ describe("My Tournament Review V2 repository", () => {
 					publicationRow({
 						ready_subject_count: 0,
 						content_sha256: "A".repeat(64),
+					}),
+				],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when the source span starts after the event checkpoint", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					publicationRow({
+						source_min_checked_at: "2026-08-20T00:00:01.000Z",
 					}),
 				],
 			}),

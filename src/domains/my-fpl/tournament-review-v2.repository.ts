@@ -634,7 +634,7 @@ function freshnessCache(value: unknown): boolean {
 		Number.isFinite(sourceMinCheckedAt) &&
 		Number.isFinite(sourceMaxCheckedAt) &&
 		Number.isFinite(publishedAt) &&
-		eventDataCheckedAt <= sourceMinCheckedAt &&
+		sourceMinCheckedAt <= eventDataCheckedAt &&
 		sourceMinCheckedAt <= sourceMaxCheckedAt &&
 		sourceMaxCheckedAt <= publishedAt
 	);
@@ -1080,7 +1080,7 @@ function mapScopeMeta(row: PublicationRow, now = Date.now()): MyTournamentReview
 		!Number.isFinite(eventCheckedMs) ||
 		!Number.isFinite(sourceMinMs) ||
 		!Number.isFinite(sourceMaxMs) ||
-		eventCheckedMs > sourceMinMs ||
+		sourceMinMs > eventCheckedMs ||
 		sourceMinMs > sourceMaxMs ||
 		Date.parse(publishedAt) < sourceMaxMs ||
 		!/^[0-9a-f]{64}$/.test(row.content_sha256) ||
