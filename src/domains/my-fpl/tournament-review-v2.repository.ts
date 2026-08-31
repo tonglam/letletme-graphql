@@ -299,6 +299,11 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		 AND publication.event_id = review_head.event_id
 		 AND publication.revision = review_head.revision
 		 AND publication.content_sha256 = review_head.content_sha256
+		JOIN competition.tournament_review_obligations head_obligation
+		  ON head_obligation.season_id = review_head.season_id
+		 AND head_obligation.tournament_id = review_head.tournament_id
+		 AND head_obligation.event_id = review_head.event_id
+		 AND head_obligation.format = publication.format
 		JOIN fpl.events head_event
 		  ON head_event.season_id = publication.season_id
 		 AND head_event.event_id = publication.event_id
@@ -385,6 +390,11 @@ export const MY_TOURNAMENT_REVIEW_PUBLICATION_SQL = `
 	 AND head.event_id = publication.event_id
 	 AND head.revision = publication.revision
 	 AND head.content_sha256 = publication.content_sha256
+	JOIN competition.tournament_review_obligations obligation
+	  ON obligation.season_id = publication.season_id
+	 AND obligation.tournament_id = publication.tournament_id
+	 AND obligation.event_id = publication.event_id
+	 AND obligation.format = publication.format
 	JOIN fpl.events event
 	  ON event.season_id = publication.season_id
 	 AND event.event_id = publication.event_id
@@ -430,6 +440,11 @@ export const MY_TOURNAMENT_REVIEW_SEASON_SQL = `
 		 AND head.event_id = publication.event_id
 		 AND head.revision = publication.revision
 		 AND head.content_sha256 = publication.content_sha256
+		JOIN competition.tournament_review_obligations obligation
+		  ON obligation.season_id = publication.season_id
+		 AND obligation.tournament_id = publication.tournament_id
+		 AND obligation.event_id = publication.event_id
+		 AND obligation.format = publication.format
 		JOIN fpl.events event
 		  ON event.season_id = publication.season_id
 		 AND event.event_id = publication.event_id
@@ -500,6 +515,11 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 	 AND publication.event_id = head.event_id
 	 AND publication.revision = head.revision
 	 AND publication.content_sha256 = head.content_sha256
+	JOIN competition.tournament_review_obligations obligation
+	  ON obligation.season_id = publication.season_id
+	 AND obligation.tournament_id = publication.tournament_id
+	 AND obligation.event_id = publication.event_id
+	 AND obligation.format = publication.format
 	JOIN fpl.events event
 	  ON event.season_id = publication.season_id
 	 AND event.event_id = publication.event_id
@@ -528,6 +548,11 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 	 AND publication.event_id = head.event_id
 	 AND publication.revision = head.revision
 	 AND publication.content_sha256 = head.content_sha256
+	JOIN competition.tournament_review_obligations obligation
+	  ON obligation.season_id = publication.season_id
+	 AND obligation.tournament_id = publication.tournament_id
+	 AND obligation.event_id = publication.event_id
+	 AND obligation.format = publication.format
 	JOIN fpl.events event
 	  ON event.season_id = publication.season_id
 	 AND event.event_id = publication.event_id
@@ -772,6 +797,10 @@ const MY_TOURNAMENT_REVIEW_SEASON_STATE_SQL = `
 
 const REVIEW_CACHE_TTL_SECONDS = 5 * 60;
 const REVIEW_CATALOG_CACHE_TTL_SECONDS = 60;
+// GraphQL's built-in Int scalar is a signed 32-bit integer. PostgreSQL and
+// JSON numbers can be wider, so values mapped to Int fields are bounded here.
+const GRAPHQL_INT_MIN = -2147483648;
+const GRAPHQL_INT_MAX = 2147483647;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -820,7 +849,7 @@ function requiredNumber(value: unknown, label: string): number {
 
 function requiredInteger(value: unknown, label: string): number {
 	const number = requiredNumber(value, label);
-	if (!Number.isSafeInteger(number)) {
+	if (!safeInteger(number)) {
 		throw integrityError(`Review points aggregate ${label} is not an integer`);
 	}
 	return number;
@@ -833,7 +862,7 @@ function roundedAverage(total: number, count: number): number {
 function seasonTransferCost(row: MyTournamentReviewPointsRow): number | null {
 	if (row.seasonGrossPoints === null || row.seasonNetPoints === null) return null;
 	const transferCost = row.seasonGrossPoints - row.seasonNetPoints;
-	if (!Number.isSafeInteger(transferCost) || transferCost < 0) {
+	if (!safeInteger(transferCost) || transferCost < 0) {
 		throw integrityError("Review Season transfer cost is inconsistent with cumulative points");
 	}
 	return transferCost;
@@ -858,7 +887,7 @@ function nullableNumber(value: unknown): number | null {
 
 function requiredSafeInteger(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
-	return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+	return safeInteger(value) ? value : null;
 }
 
 function boundedFirst(value: number | null | undefined, defaultValue = 50): number {
@@ -931,11 +960,20 @@ export function postgresJsonbContentHash(value: unknown): string {
 }
 
 function nullableSafeInteger(value: unknown): boolean {
-	return value === null || (typeof value === "number" && Number.isSafeInteger(value));
+	return value === null || safeInteger(value);
 }
 
 function safeInteger(value: unknown): value is number {
-	return typeof value === "number" && Number.isSafeInteger(value);
+	return (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= GRAPHQL_INT_MIN &&
+		value <= GRAPHQL_INT_MAX
+	);
+}
+
+function nullableNonNegativeSafeInteger(value: unknown): boolean {
+	return value === null || (safeInteger(value) && value >= 0);
 }
 
 function nonEmptyString(value: unknown): value is string {
@@ -1179,13 +1217,12 @@ function knockoutSideCache(value: unknown): value is MyTournamentReviewKnockoutS
 	return (
 		positiveInt(value.entryId) !== null &&
 		nonEmptyString(value.entryName) &&
-		[
-			value.grossPoints,
-			value.transferCost,
-			value.netPoints,
-			value.goalsScored,
-			value.goalsConceded,
-		].every((candidate) => nullableSafeInteger(candidate))
+		[value.grossPoints, value.transferCost, value.netPoints].every((candidate) =>
+			nullableSafeInteger(candidate)
+		) &&
+		[value.goalsScored, value.goalsConceded].every((candidate) =>
+			nullableNonNegativeSafeInteger(candidate)
+		)
 	);
 }
 
@@ -1846,9 +1883,14 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 	];
 	if (
 		!entryName ||
-		numericValues.some(
-			(number) => number !== null && number !== undefined && !nullableSafeInteger(number)
-		)
+		numericValues
+			.slice(0, 3)
+			.some((number) => number !== null && number !== undefined && !nullableSafeInteger(number)) ||
+		numericValues
+			.slice(3)
+			.some(
+				(number) => number !== null && number !== undefined && !(safeInteger(number) && number >= 0)
+			)
 	) {
 		return null;
 	}
@@ -2525,8 +2567,11 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			latestFinalizedEventId === null || latestFinalizedEventId === undefined
 				? null
 				: positiveInt(latestFinalizedEventId);
-		if (finalizedEventId !== null && events.some((event) => event.eventId > finalizedEventId)) {
-			throw integrityError("Review status contains an event beyond the finalized window");
+		if (
+			finalizedEventId !== null &&
+			events.some((event) => event.eventId > finalizedEventId && event.state === "READY")
+		) {
+			throw integrityError("Review status contains a READY event beyond the finalized window");
 		}
 		const revisionKey = events
 			.map(
