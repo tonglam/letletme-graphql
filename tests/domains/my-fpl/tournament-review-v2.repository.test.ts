@@ -177,6 +177,30 @@ describe("My Tournament Review V2 repository", () => {
 		});
 	});
 
+	it("invalidates the catalog cache when the finalized scope advances", async () => {
+		const redis = new TestRedis();
+		let current = catalogRow({ latest_available_event_id: 4, latest_state: "READY" });
+		let queries = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				queries += 1;
+				return { rows: [current] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		const ready = await repository.loadCatalog(context, "ACCESSIBLE");
+		expect(ready.tournaments[0]).toMatchObject({ state: "READY", latestFinalizedEventId: 4 });
+
+		current = catalogRow({
+			latest_finalized_event_id: 5,
+			latest_available_event_id: 4,
+			latest_state: "PENDING",
+		});
+		const pending = await repository.loadCatalog(context, "ACCESSIBLE");
+		expect(pending.tournaments[0]).toMatchObject({ state: "PENDING", latestFinalizedEventId: 5 });
+		expect(queries).toBe(2);
+	});
+
 	it("fails closed when a catalog claims READY without a product-visible head", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => ({
@@ -1078,6 +1102,52 @@ describe("My Tournament Review V2 repository", () => {
 			first: 2,
 		});
 		expect(result.points?.rows.map((row) => row.transferCost)).toEqual([4, 4]);
+	});
+
+	it("fails closed when an invalid cumulative cost is beyond the first Season page", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		const rows = points.rows as Array<Record<string, unknown>>;
+		rows.push({
+			...rows[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			playerName: "Second Manager",
+			grossPoints: 45,
+			transferCost: 2,
+			netPoints: 43,
+			seasonGrossPoints: 90,
+			seasonNetPoints: 95,
+		});
+		points.grossPointsTotal = 100;
+		points.grossPointsAverage = 50;
+		points.netPointsTotal = 94;
+		points.seasonGrossPointsTotal = 190;
+		points.seasonGrossPointsAverage = 95;
+		points.seasonNetPointsTotal = 191;
+		const latest = publicationRow({
+			payload,
+			row_count: 2,
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				if (String(query).includes("FROM competition.tournament_review_obligations")) {
+					return { rows: [{ event_id: 4, state: "READY" }] };
+				}
+				return { rows: [latest] };
+			},
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadSeasonReview(context, {
+				tournamentId: 6953,
+				throughEventId: 4,
+				first: 1,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
 	it("accepts H2H pages whose independent match and standings slices are ordered differently", async () => {

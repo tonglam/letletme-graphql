@@ -1914,6 +1914,12 @@ function pointsFromPayload(
 		seasonNetPointsTotal: requiredInteger(source.seasonNetPointsTotal, "seasonNetPointsTotal"),
 	};
 	const applicableRows = rows.filter((item) => item.applicable);
+	const seasonTransferCosts = new Map<number, number | null>();
+	if (view === "SEASON") {
+		for (const item of applicableRows) {
+			seasonTransferCosts.set(item.entryId, seasonTransferCost(item));
+		}
+	}
 	const grossPointsTotal = applicableRows.reduce((sum, item) => sum + (item.grossPoints ?? 0), 0);
 	const netPointsTotal = applicableRows.reduce((sum, item) => sum + (item.netPoints ?? 0), 0);
 	const seasonGrossPointsTotal = applicableRows.reduce(
@@ -1961,7 +1967,7 @@ function pointsFromPayload(
 				? page.items.map((item) => ({
 						...item,
 						grossPoints: item.seasonGrossPoints,
-						transferCost: seasonTransferCost(item),
+						transferCost: seasonTransferCosts.get(item.entryId) ?? null,
 						netPoints: item.seasonNetPoints,
 					}))
 				: page.items,
@@ -2164,7 +2170,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		const revisionKey = rows
 			.map(
 				(row) =>
-					`${row.tournamentId}:${row.latestAvailableEventId ?? 0}:${row.latestRevision ?? "0"}`
+					`${row.tournamentId}:${row.latestFinalizedEventId ?? 0}:${row.latestAvailableEventId ?? 0}:${row.latestRevision ?? "0"}:${row.state}`
 			)
 			.join(",");
 		const adminReadAll = Boolean(context.principal && hasPlatformAdminAccess(context.principal));

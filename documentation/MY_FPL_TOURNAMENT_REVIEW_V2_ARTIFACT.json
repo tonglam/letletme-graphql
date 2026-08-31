@@ -11,7 +11,7 @@
         "id": "audit_report",
         "label": "6953 V2 链路审查报告",
         "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
-        "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md"
+        "href": "https://github.com/tonglam/letletme-graphql/blob/main/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md"
       },
       {
         "id": "gate_evidence",
@@ -31,7 +31,7 @@
         "id": "timing_evidence",
         "label": "复盘时效契约快照",
         "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
-        "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+        "href": "https://github.com/tonglam/letletme-graphql/blob/main/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
         "query": {
           "engine": "duckdb",
           "language": "sql",
@@ -187,7 +187,7 @@
       "id": "audit_report",
       "label": "6953 V2 链路审查报告",
       "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
-      "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md"
+      "href": "https://github.com/tonglam/letletme-graphql/blob/main/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md"
     },
     {
       "id": "gate_evidence",
@@ -207,7 +207,7 @@
       "id": "timing_evidence",
       "label": "复盘时效契约快照",
       "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
-      "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+      "href": "https://github.com/tonglam/letletme-graphql/blob/main/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
       "query": {
         "engine": "duckdb",
         "language": "sql",
