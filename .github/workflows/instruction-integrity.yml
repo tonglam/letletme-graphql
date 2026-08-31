@@ -1305,6 +1305,12 @@ jobs:
                   return static_truth(expression) is False
 
               def secret_search_names(expression):
+                  direct_pattern_names = {
+                      "PEM_RE",
+                      "BASIC_AUTH_RE",
+                      "CLI_CREDENTIAL_RE",
+                      "AWS_CREDENTIAL_ARGUMENT_RE",
+                  }
                   names = set()
                   for item in ast.walk(expression):
                       if not (
@@ -1314,12 +1320,7 @@ jobs:
                       ):
                           continue
                       receiver = item.func.value
-                      if isinstance(receiver, ast.Name) and receiver.id in {
-                          "PEM_RE",
-                          "BASIC_AUTH_RE",
-                          "CLI_CREDENTIAL_RE",
-                          "AWS_CREDENTIAL_ARGUMENT_RE",
-                      }:
+                      if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
                           names.add(receiver.id)
                       elif (
                           isinstance(receiver, ast.Subscript)
@@ -1328,6 +1329,51 @@ jobs:
                       ):
                           names.add("SECRET_VALUE_RES")
                   return names
+
+              def loop_search_names(loop):
+                  """Recognize placeholder-aware searches through a pattern loop."""
+
+                  if not isinstance(loop, ast.For):
+                      return set()
+                  direct_pattern_names = {
+                      "BASIC_AUTH_RE",
+                      "CLI_CREDENTIAL_RE",
+                      "AWS_CREDENTIAL_ARGUMENT_RE",
+                  }
+                  iterated_patterns = set()
+                  if isinstance(loop.iter, (ast.Tuple, ast.List)):
+                      iterated_patterns = {
+                          item.id
+                          for item in loop.iter.elts
+                          if isinstance(item, ast.Name) and item.id in direct_pattern_names
+                      }
+                  names = set()
+                  for item in ast.walk(loop):
+                      if not (
+                          isinstance(item, ast.Call)
+                          and isinstance(item.func, ast.Attribute)
+                          and item.func.attr == "finditer"
+                      ):
+                          continue
+                      receiver = item.func.value
+                      if isinstance(receiver, ast.Name) and receiver.id in direct_pattern_names:
+                          names.add(receiver.id)
+                      elif (
+                          isinstance(receiver, ast.Name)
+                          and isinstance(loop.target, ast.Name)
+                          and receiver.id == loop.target.id
+                      ):
+                          names.update(iterated_patterns)
+                  if not names:
+                      return set()
+                  has_placeholder_guard = any(
+                      isinstance(item, ast.Call)
+                      and isinstance(item.func, ast.Name)
+                      and item.func.id == "_looks_like_placeholder"
+                      for statement in loop.body
+                      for item in ast.walk(statement)
+                  )
+                  return names if has_placeholder_guard and returns_true(loop.body) else set()
 
               def returns_true(statements):
                   return any(
@@ -1341,12 +1387,11 @@ jobs:
               positive_lines = []
               positive_patterns = set()
               for branch in ast.walk(node):
-                  patterns = secret_search_names(branch.test) if isinstance(branch, ast.If) else set()
+                  patterns = secret_search_names(branch.test) if isinstance(branch, ast.If) else loop_search_names(branch)
                   if (
-                      isinstance(branch, ast.If)
-                      and not statically_false(branch.test)
+                      ((isinstance(branch, ast.If) and not statically_false(branch.test)) or isinstance(branch, ast.For))
                       and patterns
-                      and returns_true(branch.body)
+                      and (returns_true(branch.body) if isinstance(branch, ast.If) else True)
                   ):
                       positive_lines.append(branch.lineno)
                       positive_patterns.update(patterns)
