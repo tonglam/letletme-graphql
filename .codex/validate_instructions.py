@@ -38,8 +38,11 @@ URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:", re.IGNORECASE)
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
 BASIC_AUTH_RE = re.compile(r"(?i)\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]{8,}={0,2})")
 CLI_CREDENTIAL_RE = re.compile(
-    r"(?ix)(?<![A-Za-z0-9_-])(?:--(?:password|pass|token|api[-_]?key|access[-_]?token)"
-    r"|-[aA])(?:=|\s+)([^\s`<>#]+)"
+    r"(?ix)(?<![A-Za-z0-9_-])(?:"
+    r"(?:--(?:password|pass|token|api[-_]?key|access[-_]?token)(?:=|\s+))"
+    r"|(?:redis-cli)(?:[^\n;&|`]*?)\s+-a(?:=|\s+|(?=[^\s`<>#]))"
+    r"|(?:mysql(?:dump|admin|sh)?)(?:[^\n;&|`]*?)\s+-p(?:=|\s+|(?=[^\s`<>#]))"
+    r")(?!-)([^\s`<>#]+)"
 )
 AWS_CREDENTIAL_ARGUMENT_RE = re.compile(
     r"(?ix)\baws\s+configure\s+set\s+(?:aws[_-])?(?:secret[_-]?access[_-]?key|access[_-]?key|session[_-]?token)"
@@ -1072,6 +1075,26 @@ def has_locked_skill_secret(text: str) -> bool:
     return False
 
 
+def _json_pairs_to_json(value: Any) -> str:
+    """Serialize decoded JSON pairs while retaining duplicate object keys."""
+
+    if isinstance(value, tuple):
+        return "{" + ",".join(
+            json.dumps(key, ensure_ascii=False) + ":" + _json_pairs_to_json(child)
+            for key, child in value
+        ) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_json_pairs_to_json(child) for child in value) + "]"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _json_field_has_secret(field: str, *, locked: bool = False) -> bool:
+    """Check whether a decoded JSON field name is a credential-bearing key."""
+
+    probe = f'"{field}": "credential-probe-value"'
+    return has_locked_skill_secret(probe) if locked else has_secret(probe)
+
+
 def has_secret_bytes(raw: bytes) -> bool:
     """Scan binary/text references without losing UTF-16/UTF-32 credentials."""
 
@@ -1100,6 +1123,13 @@ def has_secret_bytes(raw: bytes) -> bool:
                 pending = [(parsed, None)]
                 while pending:
                     current, field = pending.pop()
+                    if (
+                        field is not None
+                        and isinstance(current, (tuple, list))
+                        and _json_field_has_secret(field)
+                        and has_secret(f'"{field}": {_json_pairs_to_json(current)}')
+                    ):
+                        return True
                     if isinstance(current, tuple):
                         for key, value in reversed(current):
                             pending.append((value, key))
@@ -1135,6 +1165,13 @@ def has_locked_skill_secret_bytes(raw: bytes) -> bool:
         pending = [(parsed, None)]
         while pending:
             current, field = pending.pop()
+            if (
+                field is not None
+                and isinstance(current, (tuple, list))
+                and _json_field_has_secret(field, locked=True)
+                and has_locked_skill_secret(f'"{field}": {_json_pairs_to_json(current)}')
+            ):
+                return True
             if isinstance(current, tuple):
                 for key, value in reversed(current):
                     pending.append((value, key))
