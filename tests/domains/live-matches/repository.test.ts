@@ -15,8 +15,11 @@ import {
 } from "../../../src/domains/live-matches/repository";
 import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
 
-const now = "2026-08-31T10:00:00.000Z";
-const later = "2026-08-31T10:01:00.000Z";
+const testClock = Date.now();
+const now = new Date(testClock - 60_000).toISOString();
+const later = new Date(testClock - 30_000).toISOString();
+const expectedNextCheckAt = new Date(testClock + 30_000).toISOString();
+const staleAt = new Date(testClock + 37_500).toISOString();
 
 const canonical = (value: unknown): unknown => {
 	if (Array.isArray(value)) return value.map(canonical);
@@ -172,8 +175,8 @@ const buildBundle = (
 		sourceCheckedAt: later,
 		publishedAt: later,
 		checkpointedAt,
-		expectedNextCheckAt: "2026-08-31T10:01:30.000Z",
-		staleAt: "2026-08-31T10:02:15.000Z",
+		expectedNextCheckAt,
+		staleAt,
 		revisions,
 		desk: {
 			name: "desk",
@@ -216,8 +219,8 @@ const buildBundle = (
 		sourceCheckedAt: later,
 		publishedAt: later,
 		checkpointedAt,
-		expectedNextCheckAt: "2026-08-31T10:01:30.000Z",
-		staleAt: "2026-08-31T10:02:15.000Z",
+		expectedNextCheckAt,
+		staleAt,
 		detail: { revision: digest(detailFixtures), contentUpdatedAt: later },
 		fixtures: detailItems.map(({ payload: _payload, metadata: _metadata, ...item }) => item),
 	};
