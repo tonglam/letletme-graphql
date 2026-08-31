@@ -29,14 +29,16 @@ publication consistency 均为 true。
    staging-publication quiescence 安全拦截；`0082_tournament_review_source_floor_requeue.sql`
    尚未 apply，生产仍是 `#366` 的镜像/数据状态。
 2. GraphQL `#193` tested code exact head 是
-	`9a12d9b33ac1b0a56fabbaa42a47096948ea6b92`，verify 与 database-contract CI
-	已通过；该 head 包含 H2H 结果、POINTS tournament score 和累计成本的
-	fail-closed 校验，并进一步固定 review event `1..38` 边界、淘汰赛非平局胜者与
-	权威平局 tiebreak。它也修复了此前针对 `4dca17f…` exact-head review 返回的 5 个 P2、
-	随后发现的 1 个 P1 和 1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 2 个 P2。
-	当前报告/artefact 位于该 tested code head 之后的 docs commit；其 exact artifact
-	head 必须单独取得 clean signal，不能把 CI green 当作 review clean。Web/Mini 仍
-	pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
+	`e4c85f7893d5f5ef73984242b2dfc371817e3fa9`，verify 与 database-contract CI
+	两组 push/PR runs（`33420076551`、`33420080929`）均已通过；该 head 包含 H2H
+	结果、POINTS tournament score 和累计成本的 fail-closed 校验，并进一步固定
+	review event `1..38` 边界、淘汰赛非平局胜者与权威平局 tiebreak。它也修复了此前
+	针对 `4dca17f…` exact-head review 返回的 5 个 P2、随后发现的 1 个 P1 和 1 个
+	P2、最终 review 的 3 个 P2，以及最新 review 的 5 个 P2（bye award、READY
+	identity、KO winner、H2H rank、POINTS aggregate witness），5 个线程均已回复并
+	resolved。当前报告/artefact 位于该 tested code head 之后的 docs commit；其 exact
+	artifact head 必须单独取得 clean signal，不能把 CI green 当作 review clean。Web/Mini
+	仍 pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
 3. 还没有带受保护凭证的 6953 publication/status 样本，因此真实 row count、
    head parity、Season 全历史窗口和端到端消费结果仍属于未验证项。
 
@@ -282,6 +284,12 @@ llm:gql:* query cache (TTL 60s/300s)
 一致性证明：请求先知道当前 scope 的 head，再允许使用对应的 cache key。这样
 不会因为 Redis 保留了旧 sibling revision 而把旧数据误标为最新。
 
+POINTS 的分页 cache 还携带 full-scope aggregate witness：原始 Gameweek 指标、
+Season 投影、页 offset/length、适用行数和三组聚合都会在 cache decode 时重算并
+对齐；页行与 witness 不一致、旧格式缺 witness 或 witness 行损坏都会 miss 并从
+同一 immutable publication 重建。代价是 cache payload 随赛事规模增加（大赛事仍
+受 `first ≤ 100` 与 worker scope 上限约束），换来分页期间可审计的聚合一致性。
+
 ## 7. 已实现的跨仓库改动
 
 ### Data
@@ -310,8 +318,9 @@ llm:gql:* query cache (TTL 60s/300s)
 ### GraphQL
 
 - `src/domains/my-fpl/tournament-review-v2.repository.ts`：scope SQL、active
-  head join、obligation-format binding、format typed mapping、fail-closed
-  integrity checks、分页和 query cache；POINTS 逐行对账 Gross/cost/Net，KO
+	head join、obligation-format binding、format typed mapping、fail-closed
+	integrity checks、分页和 query cache；POINTS 逐行对账 Gross/cost/Net，revisioned
+	POINTS cache 通过 full-scope witness 重算 raw/Season/selected 聚合；KO
   goals 只接受非负 GraphQL Int，所有 GraphQL Int aggregate 使用 32 位边界；
   Gameweek cache miss 按已观察的 immutable `(revision, content_sha256)` 读取，
   不因并发 active-head 切换把同一请求拼到另一版本；Season 通过单条 CTE 同时
@@ -358,7 +367,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI test/integration 通过；部署因两个 staging publication 的 quiescence gate 停止在 migration 前 |
 | Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；`/health/deploy`、`/health/ready`、`/health/live` | 已证明 #366 部署 identity、scheduler、worker、publicationConsistency 为 true；#368 尚未生效，且尚未证明 6953 受保护 publication 消费样本 |
-| GraphQL | PR `#193` tested code head `9a12d9b33ac1b0a56fabbaa42a47096948ea6b92`；focused 90 / 0 fail；完整 1053 pass、7 skip、0 fail、1 snapshot、3518 expect；typecheck、lint、format、layers、docs、deprecation、Bun build；CI verify/database-contract `33415701328`、`33415700382` 均通过 | 此前 `4dca17f…` exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 2 个 P2 已修复并 disposition/resolve；当前报告/artefact 位于其后 docs commit，仍待该 exact artifact head review；不得把 CI green 当作 clean review |
+| GraphQL | PR `#193` tested code head `e4c85f7893d5f5ef73984242b2dfc371817e3fa9`；focused 100 / 0 fail / 213 expect；完整 1063 pass、7 skip、0 fail、1 snapshot、3542 expect；typecheck、lint、format、layers、docs、deprecation、Bun build；CI verify/database-contract `33420076551`、`33420080929` 两组均通过 | 此前 `4dca17f…` exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 5 个 P2 已修复并 disposition/resolve；当前报告/artefact 位于其后 docs commit，仍待该 exact artifact head review；不得把 CI green 当作 clean review |
 | Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
 | Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
@@ -373,7 +382,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data producer source floor | 已合并、未生效 | `#368` merge `530118af...`、CI test/integration 通过；deploy `33382095955`/`33382453786` 因 `Database has 2 staging publication(s)` 停在 migration 前；`0082` apply/reconcile/backfill 未验证 |
 | Data runtime deployment | #366 已通过；#368 阻塞 | #366 有 exact deploy SHA、health probes、scheduler/worker/publication consistency；#368 尚未切 slot，`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
-| GraphQL schema/read path | CI/local gate 通过，待最终 exact-head review | tested code head `9a12d9b33ac1b0a56fabbaa42a47096948ea6b92`；focused 90、完整 1053、CI 4 项通过；此前 `4dca17f…` exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 2 个 P2 已修复并 disposition/resolve；当前报告/artefact 位于其后 docs commit，必须再取得 clean signal |
+| GraphQL schema/read path | CI/local gate 通过，待最终 exact-head review | tested code head `e4c85f7893d5f5ef73984242b2dfc371817e3fa9`；focused 100、完整 1063、CI 4 项通过；此前 `4dca17f…` exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 5 个 P2 已修复并 disposition/resolve；当前报告/artefact 位于其后 docs commit，必须再取得 clean signal |
 | Web/Mini consumer contract | 未通过 | 两个客户端仍 pin 旧 GraphQL ref，Mini PR 还有 merge conflict；必须在 GraphQL merge SHA 后更新 pin、跑 contract 与消费者路径 |
 | 6953 end-to-end publication | 未验证 | 缺少带保护凭证的 head/publication/count/hash/source span/Redis-cache 对账；不能从 health 200 推断 |
 | V1 retirement | 设计已决定，执行未完成 | V1 不再是 fallback/alias/double-read；客户端切流完成后删除遗留 roots、loader、markup、queries 与文档 |
