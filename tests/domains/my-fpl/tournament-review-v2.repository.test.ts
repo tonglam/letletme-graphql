@@ -3442,4 +3442,73 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		expect(result.points).toMatchObject({ grossPointsTotal: 95, hasNextPage: true });
 	});
+
+	it("rejects a cached points page row that disagrees with its full-scope witness", async () => {
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: { rows: Array<{ grossPoints: number; netPoints: number }> };
+		};
+		// Keep the row internally arithmetically valid while diverging from the
+		// immutable full-scope witness.
+		cached.points.rows[0]!.grossPoints = 56;
+		cached.points.rows[0]!.netPoints = 52;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		expect(result.points?.rows[0]).toMatchObject({ grossPoints: 55, netPoints: 51 });
+		expect(databaseReads).toBe(4);
+	});
+
+	it("fails closed instead of throwing for a malformed points witness row", async () => {
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: { aggregateWitness: { rows: unknown[] } };
+		};
+		cached.points.aggregateWitness.rows[0] = null;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		expect(result.points?.grossPointsTotal).toBe(55);
+		expect(databaseReads).toBe(4);
+	});
 });

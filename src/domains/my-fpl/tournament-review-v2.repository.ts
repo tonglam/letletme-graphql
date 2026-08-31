@@ -83,6 +83,7 @@ export type MyTournamentReviewPointsRow = {
 };
 
 type MyTournamentReviewPointsAggregateWitness = {
+	view: "GAMEWEEK" | "SEASON";
 	rowCount: number;
 	applicableRowCount: number;
 	pageOffset: number;
@@ -96,6 +97,22 @@ type MyTournamentReviewPointsAggregateWitness = {
 	selectedGrossPointsTotal: number;
 	selectedGrossPointsAverage: number;
 	selectedNetPointsTotal: number;
+	rows: MyTournamentReviewPointsAggregateRow[];
+};
+
+type MyTournamentReviewPointsAggregateRow = {
+	entryId: number;
+	applicable: boolean;
+	/** Source Gameweek metrics, retained so Season caches can still witness both views. */
+	sourceGrossPoints: number | null;
+	sourceTransferCost: number | null;
+	sourceNetPoints: number | null;
+	/** Metrics returned by this cached view (Gameweek or Season projection). */
+	grossPoints: number | null;
+	transferCost: number | null;
+	netPoints: number | null;
+	seasonGrossPoints: number | null;
+	seasonNetPoints: number | null;
 };
 
 export type MyTournamentReviewPoints = {
@@ -1334,6 +1351,7 @@ function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 	if (!Array.isArray(value.rows)) return false;
 	const witness = value.aggregateWitness;
 	if (!isRecord(witness)) return false;
+	if (witness.view !== "GAMEWEEK" && witness.view !== "SEASON") return false;
 	const witnessIntegers = [
 		witness.rowCount,
 		witness.applicableRowCount,
@@ -1372,6 +1390,128 @@ function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 	) {
 		return false;
 	}
+	if (
+		!Array.isArray(typedWitness.rows) ||
+		typedWitness.rows.length !== typedWitness.rowCount ||
+		!typedWitness.rows.every((row) => {
+			if (!isRecord(row)) return false;
+			const metrics = [
+				row.grossPoints,
+				row.transferCost,
+				row.netPoints,
+				row.seasonGrossPoints,
+				row.seasonNetPoints,
+			];
+			const sourceMetrics = [row.sourceGrossPoints, row.sourceTransferCost, row.sourceNetPoints];
+			if (
+				positiveInt(row.entryId) === null ||
+				typeof row.applicable !== "boolean" ||
+				metrics.some((candidate) => !nullableSafeInteger(candidate)) ||
+				sourceMetrics.some((candidate) => !nullableSafeInteger(candidate))
+			) {
+				return false;
+			}
+			if (!row.applicable) {
+				return [...metrics, ...sourceMetrics].every((candidate) => candidate === null);
+			}
+			if (
+				!pointsRowMetricsValid({
+					grossPoints: row.sourceGrossPoints,
+					transferCost: row.sourceTransferCost,
+					netPoints: row.sourceNetPoints,
+				}) ||
+				!pointsRowMetricsValid({
+					grossPoints: row.grossPoints,
+					transferCost: row.transferCost,
+					netPoints: row.netPoints,
+				}) ||
+				!seasonPointsMetricsValid({
+					seasonGrossPoints: row.seasonGrossPoints,
+					seasonNetPoints: row.seasonNetPoints,
+				})
+			) {
+				return false;
+			}
+			if (typedWitness.view === "GAMEWEEK") {
+				return (
+					row.grossPoints === row.sourceGrossPoints &&
+					row.transferCost === row.sourceTransferCost &&
+					row.netPoints === row.sourceNetPoints
+				);
+			}
+			const expectedSeasonTransferCost =
+				row.seasonGrossPoints !== null && row.seasonNetPoints !== null
+					? row.seasonGrossPoints - row.seasonNetPoints
+					: null;
+			return (
+				row.grossPoints === row.seasonGrossPoints &&
+				row.transferCost === expectedSeasonTransferCost &&
+				row.netPoints === row.seasonNetPoints
+			);
+		})
+	) {
+		return false;
+	}
+	const aggregateRows = typedWitness.rows as unknown as MyTournamentReviewPointsAggregateRow[];
+	if (new Set(aggregateRows.map((row) => row.entryId)).size !== aggregateRows.length) {
+		return false;
+	}
+	const applicableRows = aggregateRows.filter((row) => row.applicable);
+	if (applicableRows.length !== typedWitness.applicableRowCount) return false;
+	if (
+		value.rows.some((row, index) => {
+			if (!isRecord(row)) return true;
+			const aggregateRow = aggregateRows[typedWitness.pageOffset + index];
+			return (
+				!aggregateRow ||
+				row.entryId !== aggregateRow.entryId ||
+				row.applicable !== aggregateRow.applicable ||
+				row.grossPoints !== aggregateRow.grossPoints ||
+				row.transferCost !== aggregateRow.transferCost ||
+				row.netPoints !== aggregateRow.netPoints ||
+				row.seasonGrossPoints !== aggregateRow.seasonGrossPoints ||
+				row.seasonNetPoints !== aggregateRow.seasonNetPoints
+			);
+		})
+	) {
+		return false;
+	}
+	const rawApplicableRows = aggregateRows.filter((row) => row.applicable);
+	const rawGrossPointsTotal = rawApplicableRows.reduce(
+		(sum, row) => sum + (row.sourceGrossPoints ?? 0),
+		0
+	);
+	const rawNetPointsTotal = rawApplicableRows.reduce(
+		(sum, row) => sum + (row.sourceNetPoints ?? 0),
+		0
+	);
+	const grossPointsTotal = applicableRows.reduce((sum, row) => sum + (row.grossPoints ?? 0), 0);
+	const netPointsTotal = applicableRows.reduce((sum, row) => sum + (row.netPoints ?? 0), 0);
+	const seasonGrossPointsTotal = applicableRows.reduce(
+		(sum, row) => sum + (row.seasonGrossPoints ?? 0),
+		0
+	);
+	const seasonNetPointsTotal = applicableRows.reduce(
+		(sum, row) => sum + (row.seasonNetPoints ?? 0),
+		0
+	);
+	const rawGrossPointsAverage = roundedAverage(rawGrossPointsTotal, rawApplicableRows.length);
+	const rawSeasonGrossPointsTotal = seasonGrossPointsTotal;
+	const rawSeasonNetPointsTotal = seasonNetPointsTotal;
+	const rawSeasonGrossPointsAverage = roundedAverage(
+		rawSeasonGrossPointsTotal,
+		rawApplicableRows.length
+	);
+	if (
+		typedWitness.grossPointsTotal !== rawGrossPointsTotal ||
+		typedWitness.grossPointsAverage !== rawGrossPointsAverage ||
+		typedWitness.netPointsTotal !== rawNetPointsTotal ||
+		typedWitness.seasonGrossPointsTotal !== rawSeasonGrossPointsTotal ||
+		typedWitness.seasonGrossPointsAverage !== rawSeasonGrossPointsAverage ||
+		typedWitness.seasonNetPointsTotal !== rawSeasonNetPointsTotal
+	) {
+		return false;
+	}
 	return (
 		value.headlineMetric === "gross" &&
 		safeInteger(value.grossPointsTotal) &&
@@ -1382,15 +1522,26 @@ function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 		typeof value.seasonGrossPointsAverage === "number" &&
 		Number.isFinite(value.seasonGrossPointsAverage) &&
 		safeInteger(value.seasonNetPointsTotal) &&
-		Array.isArray(value.rows) &&
 		value.rows.length > 0 &&
 		value.rows.every(pointsRowCache) &&
+		value.grossPointsTotal === grossPointsTotal &&
+		value.grossPointsAverage === roundedAverage(grossPointsTotal, applicableRows.length) &&
+		value.netPointsTotal === netPointsTotal &&
+		value.seasonGrossPointsTotal === seasonGrossPointsTotal &&
+		value.seasonGrossPointsAverage ===
+			roundedAverage(seasonGrossPointsTotal, applicableRows.length) &&
+		value.seasonNetPointsTotal === seasonNetPointsTotal &&
 		value.grossPointsTotal === typedWitness.selectedGrossPointsTotal &&
 		value.grossPointsAverage === typedWitness.selectedGrossPointsAverage &&
 		value.netPointsTotal === typedWitness.selectedNetPointsTotal &&
 		value.seasonGrossPointsTotal === typedWitness.seasonGrossPointsTotal &&
 		value.seasonGrossPointsAverage === typedWitness.seasonGrossPointsAverage &&
 		value.seasonNetPointsTotal === typedWitness.seasonNetPointsTotal &&
+		(typedWitness.view === "GAMEWEEK"
+			? typedWitness.grossPointsTotal === value.grossPointsTotal &&
+				typedWitness.grossPointsAverage === value.grossPointsAverage &&
+				typedWitness.netPointsTotal === value.netPointsTotal
+			: true) &&
 		(value.nextCursor === null || typeof value.nextCursor === "string") &&
 		typeof value.hasNextPage === "boolean"
 	);
@@ -2503,8 +2654,17 @@ function pointsFromPayload(
 		view === "SEASON" ? aggregates.seasonGrossPointsAverage : aggregates.grossPointsAverage;
 	const selectedNetPointsTotal =
 		view === "SEASON" ? aggregates.seasonNetPointsTotal : aggregates.netPointsTotal;
+	const outputRows: MyTournamentReviewPointsRow[] =
+		view === "SEASON"
+			? rows.map((item) => ({
+					...item,
+					grossPoints: item.seasonGrossPoints,
+					transferCost: seasonTransferCosts.get(item.entryId) ?? null,
+					netPoints: item.seasonNetPoints,
+				}))
+			: rows;
 	const page = pageSlice(
-		rows,
+		outputRows,
 		first,
 		cursor,
 		String(row.revision),
@@ -2518,18 +2678,11 @@ function pointsFromPayload(
 		seasonGrossPointsTotal: aggregates.seasonGrossPointsTotal,
 		seasonGrossPointsAverage: aggregates.seasonGrossPointsAverage,
 		seasonNetPointsTotal: aggregates.seasonNetPointsTotal,
-		rows:
-			view === "SEASON"
-				? page.items.map((item) => ({
-						...item,
-						grossPoints: item.seasonGrossPoints,
-						transferCost: seasonTransferCosts.get(item.entryId) ?? null,
-						netPoints: item.seasonNetPoints,
-					}))
-				: page.items,
+		rows: page.items,
 		nextCursor: page.nextCursor,
 		hasNextPage: page.hasNextPage,
 		aggregateWitness: {
+			view,
 			rowCount: rows.length,
 			applicableRowCount: applicableRows.length,
 			pageOffset: cursor?.offset ?? 0,
@@ -2543,6 +2696,21 @@ function pointsFromPayload(
 			selectedGrossPointsTotal,
 			selectedGrossPointsAverage,
 			selectedNetPointsTotal,
+			rows: rows.map((source, index) => {
+				const item = outputRows[index]!;
+				return {
+					entryId: item.entryId,
+					applicable: item.applicable,
+					sourceGrossPoints: source.grossPoints,
+					sourceTransferCost: source.transferCost,
+					sourceNetPoints: source.netPoints,
+					grossPoints: item.grossPoints,
+					transferCost: item.transferCost,
+					netPoints: item.netPoints,
+					seasonGrossPoints: item.seasonGrossPoints,
+					seasonNetPoints: item.seasonNetPoints,
+				};
+			}),
 		},
 	};
 }
