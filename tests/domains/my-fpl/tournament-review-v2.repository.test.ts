@@ -160,6 +160,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
 			"publication.event_data_checked_at = event.data_checked_at"
 		);
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("publication.format = obligation.format");
 	});
 
 	it("surfaces the latest obligation state when a newer settled event is pending", async () => {
@@ -234,7 +235,7 @@ describe("My Tournament Review V2 repository", () => {
 				if (String(query).includes("FROM competition.tournament_review_publications")) {
 					return { rows: [] };
 				}
-				return { rows: [{ state: "PENDING" }] };
+				return { rows: [{ event_id: 4, state: "PENDING" }] };
 			},
 		});
 		const repository = createMyTournamentReviewRepository();
@@ -247,6 +248,32 @@ describe("My Tournament Review V2 repository", () => {
 			latestEventId: null,
 			finalizedEventIds: [],
 		});
+	});
+
+	it("fails closed when a newer READY obligation has no matching Season head", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				if (String(query).includes("FROM competition.tournament_review_publications")) {
+					return {
+						rows: [
+							{
+								event_id: 3,
+								revision: 7,
+								content_sha256: "a".repeat(64),
+								format: "POINTS",
+								event_data_checked_at: "2026-08-19T00:00:00.000Z",
+								published_at: "2026-08-19T00:00:03.000Z",
+							},
+						],
+					};
+				}
+				return { rows: [{ event_id: 4, state: "READY" }] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
 	it("maps gross headline and keeps transfer cost/net separate", async () => {
@@ -386,6 +413,47 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
+	it("fails closed when an optional points metric is a numeric string", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		points.rows = [
+			{
+				...((points.rows as Array<Record<string, unknown>>)[0] ?? {}),
+				applicable: false,
+				groupId: null,
+				rank: null,
+				grossPoints: "55",
+				transferCost: null,
+				netPoints: null,
+				tournamentScore: null,
+				seasonGrossPoints: null,
+				seasonNetPoints: null,
+				eventRank: null,
+				overallPoints: null,
+				overallRank: null,
+			},
+		];
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						...base,
+						expected_subject_count: 1,
+						ready_subject_count: 0,
+						not_applicable_subject_count: 1,
+						payload,
+						content_sha256: postgresJsonbContentHash(payload),
+					},
+				],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
 	it("fails closed when points rows duplicate an entry or omit the expected roster", async () => {
 		const base = publicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -484,6 +552,62 @@ describe("My Tournament Review V2 repository", () => {
 		});
 	});
 
+	it("fails closed when a bye is represented by an Average Team", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		matches[0] = {
+			...matches[0],
+			home: {
+				entryId: null,
+				entryName: "Average Team",
+				isAverage: true,
+				netPoints: 38,
+				matchPoints: 0,
+				rank: null,
+			},
+			away: null,
+			isBye: true,
+		};
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [{ ...base, payload, content_sha256: postgresJsonbContentHash(payload) }],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when an H2H match participant is absent from standings", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		matches[0] = {
+			...matches[0],
+			home: {
+				entryId: 6954,
+				entryName: "Other XI",
+				isAverage: false,
+				netPoints: 42,
+				matchPoints: 3,
+				rank: 1,
+			},
+		};
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [{ ...base, payload, content_sha256: postgresJsonbContentHash(payload) }],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
 	it("fails closed when a non-bye H2H match pairs an entry with itself", async () => {
 		const base = h2hPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -548,6 +672,39 @@ describe("My Tournament Review V2 repository", () => {
 			expected_subject_count: 2,
 			ready_subject_count: 2,
 			row_count: 2,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when a knockout match pairs an entry with itself", async () => {
+		const match = {
+			round: 1,
+			name: "Round 1",
+			matchId: 101,
+			playAgainstId: 102,
+			home: { entryId: 6953, entryName: "Example XI" },
+			away: { entryId: 6953, entryName: "Example XI" },
+			winnerEntryId: 6953,
+		};
+		const payload = {
+			schemaVersion: "my-tournament-review-v2",
+			metricVersion: "descriptive-v1",
+			format: "KNOCKOUT",
+			knockout: { matches: [match] },
+		};
+		const row = publicationRow({
+			format: "KNOCKOUT",
+			expected_subject_count: 1,
+			ready_subject_count: 1,
+			row_count: 1,
 			payload,
 			content_sha256: postgresJsonbContentHash(payload),
 		});
@@ -658,6 +815,9 @@ describe("My Tournament Review V2 repository", () => {
 			databaseQuery: async (query: unknown) => {
 				if (String(query).includes("FROM competition.tournament_review_publications")) {
 					return { rows: [latest, older] };
+				}
+				if (String(query).includes("FROM competition.tournament_review_obligations")) {
+					return { rows: [{ event_id: 4, state: "READY" }] };
 				}
 				throw new Error(`unexpected query: ${String(query)}`);
 			},

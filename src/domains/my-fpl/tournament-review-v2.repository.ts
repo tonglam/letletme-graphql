@@ -569,6 +569,7 @@ export const MY_TOURNAMENT_REVIEW_STATUS_SQL = `
 		WHERE review_head.season_id = obligation.season_id
 		  AND review_head.tournament_id = obligation.tournament_id
 		  AND review_head.event_id = obligation.event_id
+		  AND publication.format = obligation.format
 		LIMIT 1
 	) head ON true
 	WHERE obligation.season_id = $1
@@ -716,7 +717,7 @@ const MY_TOURNAMENT_REVIEW_GAMEWEEK_STATE_SQL = `
 `;
 
 const MY_TOURNAMENT_REVIEW_SEASON_STATE_SQL = `
-	SELECT state
+	SELECT event_id, state
 	FROM competition.tournament_review_obligations
 	WHERE season_id = $1
 	  AND tournament_id = $2
@@ -743,6 +744,10 @@ function positiveInt(value: unknown): number | null {
 	return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
+function strictPositiveInt(value: unknown): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 function reviewFormat(value: unknown): MyTournamentReviewFormat | null {
 	return value === "POINTS" || value === "H2H" || value === "KNOCKOUT" ? value : null;
 }
@@ -763,11 +768,10 @@ function requiredNumber(value: unknown, label: string): number {
 	if (value === null || value === undefined || value === "") {
 		throw integrityError(`Review points aggregate ${label} is missing`);
 	}
-	const number = Number(value);
-	if (!Number.isFinite(number)) {
+	if (typeof value !== "number" || !Number.isFinite(value)) {
 		throw integrityError(`Review points aggregate ${label} is invalid`);
 	}
-	return number;
+	return value;
 }
 
 function requiredInteger(value: unknown, label: string): number {
@@ -780,14 +784,12 @@ function requiredInteger(value: unknown, label: string): number {
 
 function nullableNumber(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
-	const number = Number(value);
-	return Number.isFinite(number) ? number : null;
+	return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function requiredSafeInteger(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
-	const number = Number(value);
-	return Number.isSafeInteger(number) ? number : null;
+	return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 }
 
 function boundedFirst(value: number | null | undefined): number {
@@ -973,7 +975,9 @@ function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 function h2hSideCache(value: unknown): value is MyTournamentReviewH2HSide {
 	if (!isRecord(value)) return false;
 	return (
-		(value.isAverage === true ? value.entryId === null : positiveInt(value.entryId) !== null) &&
+		(value.isAverage === true
+			? value.entryId === null
+			: strictPositiveInt(value.entryId) !== null) &&
 		nonEmptyString(value.entryName) &&
 		typeof value.isAverage === "boolean" &&
 		[value.grossPoints, value.transferCost, value.netPoints, value.matchPoints, value.rank].every(
@@ -987,23 +991,54 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 		return false;
 	}
 	if (value.matches.length === 0) return false;
+	const matchIdentities = new Set<string>();
+	const standingIdentities = new Set<string>();
+	for (const standing of value.standings) {
+		if (!isRecord(standing)) continue;
+		const groupId = strictPositiveInt(standing.groupId);
+		const entryId = strictPositiveInt(standing.entryId);
+		if (groupId !== null && entryId !== null) {
+			standingIdentities.add(`${groupId}:${entryId}`);
+		}
+	}
 	const matchesValid = value.matches.every((match) => {
 		if (!isRecord(match)) return false;
+		const groupId = strictPositiveInt(match.groupId);
+		const identity =
+			groupId !== null && typeof match.matchId === "string" ? `${groupId}:${match.matchId}` : null;
+		if (identity === null || matchIdentities.has(identity)) return false;
+		matchIdentities.add(identity);
+		const home = match.home;
+		const away = match.away;
+		const homeIsAverage = isRecord(home) && home.isAverage === true;
+		const awayIsAverage = isRecord(away) && away.isAverage === true;
+		const homeEntryId = isRecord(home) ? strictPositiveInt(home.entryId) : null;
+		const awayEntryId = isRecord(away) ? strictPositiveInt(away.entryId) : null;
+		const sidesValid = match.isBye
+			? (home === null) !== (away === null) && !(homeIsAverage || awayIsAverage)
+			: home !== null &&
+				away !== null &&
+				!(homeIsAverage && awayIsAverage) &&
+				(homeIsAverage || awayIsAverage || homeEntryId !== awayEntryId);
+		const participantsValid = [home, away].every((side) => {
+			if (!isRecord(side) || side.isAverage === true) return true;
+			const entryId = strictPositiveInt(side.entryId);
+			return entryId !== null && standingIdentities.has(`${groupId}:${entryId}`);
+		});
 		return (
 			nonEmptyString(match.matchId) &&
-			positiveInt(match.groupId) !== null &&
+			groupId !== null &&
 			typeof match.isBye === "boolean" &&
 			(match.home === null || h2hSideCache(match.home)) &&
 			(match.away === null || h2hSideCache(match.away)) &&
-			(match.isBye
-				? (match.home === null) !== (match.away === null)
-				: match.home !== null && match.away !== null)
+			sidesValid &&
+			participantsValid
 		);
 	});
 	const standingIds = new Set<number>();
 	const standingsValid = value.standings.every((standing) => {
 		if (!isRecord(standing)) return false;
-		const entryId = positiveInt(standing.entryId);
+		const entryId = strictPositiveInt(standing.entryId);
 		if (entryId === null || standingIds.has(entryId) || !nonEmptyString(standing.entryName)) {
 			return false;
 		}
@@ -1047,18 +1082,30 @@ function knockoutSideCache(value: unknown): value is MyTournamentReviewKnockoutS
 function knockoutCache(value: unknown): value is MyTournamentReviewKnockout {
 	if (!isRecord(value) || !Array.isArray(value.matches)) return false;
 	if (value.matches.length === 0) return false;
+	const matchIdentities = new Set<string>();
 	return (
 		value.matches.every((match) => {
 			if (!isRecord(match)) return false;
+			const matchId = strictPositiveInt(match.matchId);
+			const playAgainstId = strictPositiveInt(match.playAgainstId);
+			const identity =
+				matchId !== null && playAgainstId !== null ? `${matchId}:${playAgainstId}` : null;
+			if (identity === null || matchIdentities.has(identity)) return false;
+			matchIdentities.add(identity);
+			const home = match.home;
+			const away = match.away;
+			const homeEntryId = isRecord(home) ? strictPositiveInt(home.entryId) : null;
+			const awayEntryId = isRecord(away) ? strictPositiveInt(away.entryId) : null;
 			return (
-				positiveInt(match.matchId) !== null &&
-				positiveInt(match.playAgainstId) !== null &&
-				(match.round === null || positiveInt(match.round) !== null) &&
+				matchId !== null &&
+				playAgainstId !== null &&
+				(match.round === null || strictPositiveInt(match.round) !== null) &&
 				(match.name === null || typeof match.name === "string") &&
-				(match.winnerEntryId === null || positiveInt(match.winnerEntryId) !== null) &&
+				(match.winnerEntryId === null || strictPositiveInt(match.winnerEntryId) !== null) &&
 				(match.home === null || knockoutSideCache(match.home)) &&
 				(match.away === null || knockoutSideCache(match.away)) &&
 				(match.home !== null || match.away !== null) &&
+				(home === null || away === null || homeEntryId !== awayEntryId) &&
 				(match.winnerEntryId === null ||
 					match.winnerEntryId === match.home?.entryId ||
 					match.winnerEntryId === match.away?.entryId)
@@ -1409,7 +1456,7 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 	if (!Array.isArray(value)) throw integrityError("Review points rows are invalid");
 	return value.map((raw) => {
 		if (!isRecord(raw)) throw integrityError("Review points row is invalid");
-		const entryId = positiveInt(raw.entryId);
+		const entryId = strictPositiveInt(raw.entryId);
 		const integerValues = [
 			raw.groupId,
 			raw.rank,
@@ -1432,7 +1479,7 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 			!raw.playerName.trim() ||
 			typeof raw.applicable !== "boolean" ||
 			integerValues.some(
-				(number) => number !== null && number !== undefined && !Number.isSafeInteger(Number(number))
+				(number) => number !== null && number !== undefined && !nullableSafeInteger(number)
 			)
 		) {
 			throw integrityError("Review points row is invalid");
@@ -1476,7 +1523,7 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 function mapH2HSide(value: unknown): MyTournamentReviewH2HSide | null {
 	if (!isRecord(value)) return null;
 	if (typeof value.isAverage !== "boolean") return null;
-	const entryId = value.entryId === null ? null : positiveInt(value.entryId);
+	const entryId = value.entryId === null ? null : strictPositiveInt(value.entryId);
 	if (!value.isAverage && !entryId) return null;
 	if (value.isAverage && value.entryId !== null) return null;
 	const entryName = typeof value.entryName === "string" ? value.entryName.trim() : "";
@@ -1490,7 +1537,7 @@ function mapH2HSide(value: unknown): MyTournamentReviewH2HSide | null {
 	if (
 		!entryName ||
 		numericValues.some(
-			(number) => number !== null && number !== undefined && !Number.isSafeInteger(Number(number))
+			(number) => number !== null && number !== undefined && !nullableSafeInteger(number)
 		)
 	) {
 		return null;
@@ -1516,14 +1563,13 @@ function mapH2H(value: unknown): {
 	const matches = Array.isArray(value.matches)
 		? value.matches.map((raw) => {
 				if (!isRecord(raw)) throw integrityError("Review H2H match payload is invalid");
-				const groupId = Number(raw.groupId);
+				const groupId = strictPositiveInt(raw.groupId);
 				const home = raw.home === null ? null : mapH2HSide(raw.home);
 				const away = raw.away === null ? null : mapH2HSide(raw.away);
 				if (
 					typeof raw.matchId !== "string" ||
 					raw.matchId.length === 0 ||
-					!Number.isSafeInteger(groupId) ||
-					groupId <= 0 ||
+					groupId === null ||
 					typeof raw.isBye !== "boolean" ||
 					(raw.home !== null && !home) ||
 					(raw.away !== null && !away) ||
@@ -1532,6 +1578,9 @@ function mapH2H(value: unknown): {
 						: raw.home === null || raw.away === null)
 				) {
 					throw integrityError("Review H2H match payload is invalid");
+				}
+				if (raw.isBye && (home?.isAverage === true || away?.isAverage === true)) {
+					throw integrityError("Review H2H bye cannot use an Average Team side");
 				}
 				if (
 					!raw.isBye &&
@@ -1559,8 +1608,8 @@ function mapH2H(value: unknown): {
 	const standings = Array.isArray(value.standings)
 		? value.standings.map((raw) => {
 				if (!isRecord(raw)) throw integrityError("Review H2H standing payload is invalid");
-				const groupId = positiveInt(raw.groupId);
-				const entryId = positiveInt(raw.entryId);
+				const groupId = strictPositiveInt(raw.groupId);
+				const entryId = strictPositiveInt(raw.entryId);
 				if (!groupId || !entryId) throw integrityError("Review H2H standing payload is invalid");
 				const rank = requiredSafeInteger(raw.rank);
 				const played = requiredSafeInteger(raw.played);
@@ -1611,12 +1660,22 @@ function mapH2H(value: unknown): {
 	if (new Set(standings.map((standing) => standing.entryId)).size !== standings.length) {
 		throw integrityError("Review H2H standings contain duplicate entries");
 	}
+	const standingIdentities = new Set(
+		standings.map((standing) => `${standing.groupId}:${standing.entryId}`)
+	);
+	for (const match of matches) {
+		for (const side of [match.home, match.away]) {
+			if (side && !side.isAverage && !standingIdentities.has(`${match.groupId}:${side.entryId}`)) {
+				throw integrityError("Review H2H match participants do not match standings");
+			}
+		}
+	}
 	return { matches, standings };
 }
 
 function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null {
 	if (!isRecord(value)) return null;
-	const entryId = positiveInt(value.entryId);
+	const entryId = strictPositiveInt(value.entryId);
 	if (!entryId) return null;
 	const entryName = typeof value.entryName === "string" ? value.entryName.trim() : "";
 	const numericValues = [
@@ -1629,7 +1688,7 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 	if (
 		!entryName ||
 		numericValues.some(
-			(number) => number !== null && number !== undefined && !Number.isSafeInteger(Number(number))
+			(number) => number !== null && number !== undefined && !nullableSafeInteger(number)
 		)
 	) {
 		return null;
@@ -1650,15 +1709,16 @@ function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 	const matchIdentities = new Set<string>();
 	return value.matches.map((raw) => {
 		if (!isRecord(raw)) throw integrityError("Review knockout match payload is invalid");
-		const matchId = positiveInt(raw.matchId);
-		const playAgainstId = positiveInt(raw.playAgainstId);
+		const matchId = strictPositiveInt(raw.matchId);
+		const playAgainstId = strictPositiveInt(raw.playAgainstId);
 		if (!matchId || !playAgainstId)
 			throw integrityError("Review knockout match payload is invalid");
-		const round = raw.round === null || raw.round === undefined ? null : positiveInt(raw.round);
+		const round =
+			raw.round === null || raw.round === undefined ? null : strictPositiveInt(raw.round);
 		const winnerEntryId =
 			raw.winnerEntryId === null || raw.winnerEntryId === undefined
 				? null
-				: positiveInt(raw.winnerEntryId);
+				: strictPositiveInt(raw.winnerEntryId);
 		const home = mapKnockoutSide(raw.home);
 		const away = mapKnockoutSide(raw.away);
 		if (
@@ -1669,6 +1729,7 @@ function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 			raw.away === undefined ||
 			(raw.away !== null && !away) ||
 			(home === null && away === null) ||
+			(home !== null && away !== null && home.entryId === away.entryId) ||
 			(winnerEntryId !== null && winnerEntryId !== home?.entryId && winnerEntryId !== away?.entryId)
 		) {
 			throw integrityError("Review knockout match payload is invalid");
@@ -2048,17 +2109,32 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		const headFinalizedEventIds = [...new Set(heads.map((row) => positiveInt(row.event_id)!))].sort(
 			(a, b) => a - b
 		);
-		const unavailableState = heads.length
-			? "READY"
-			: requireNonReadyObligationState(
-					(
-						await context.database.query<{ state: string }>(MY_TOURNAMENT_REVIEW_SEASON_STATE_SQL, [
-							context.currentSeason.seasonId,
-							args.tournamentId,
-							args.throughEventId,
-						])
-					).rows[0]?.state
-				);
+		const obligationResult = await context.database.query<{ event_id: number; state: string }>(
+			MY_TOURNAMENT_REVIEW_SEASON_STATE_SQL,
+			[context.currentSeason.seasonId, args.tournamentId, args.throughEventId]
+		);
+		const latestObligation = obligationResult.rows[0] ?? null;
+		const latestObligationEventId = latestObligation
+			? positiveInt(latestObligation.event_id)
+			: null;
+		if (latestObligation && latestObligationEventId === null) {
+			throw integrityError("Review season obligation event metadata is invalid");
+		}
+		const latestObligationState = latestObligation
+			? unavailableReviewState(latestObligation.state)
+			: null;
+		const latestHeadEventId = heads[0] ? positiveInt(heads[0].event_id) : null;
+		const latestObligationNeedsHead =
+			latestObligationEventId !== null &&
+			(latestHeadEventId === null || latestHeadEventId < latestObligationEventId);
+		if (latestObligationNeedsHead && latestObligationState === "READY") {
+			throw integrityError("Review season obligation is READY without its latest publication head");
+		}
+		const unavailableState = latestObligationNeedsHead
+			? requireNonReadyObligationState(latestObligationState)
+			: heads.length
+				? "READY"
+				: requireNonReadyObligationState(latestObligationState);
 		const key = gqlCacheKey(
 			context,
 			`my-tournament-review-v2:season:${args.tournamentId}:${args.throughEventId}:${first}:${args.after ?? ""}:${unavailableState}:${heads.map(reviewHeadKey).join(",")}`
@@ -2067,6 +2143,23 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			cacheDecoder<MyTournamentSeasonReview>(value, seasonCache)
 		);
 		if (cached) return refreshSeasonAge(cached);
+		if (latestObligationNeedsHead) {
+			const unavailable: MyTournamentSeasonReview = {
+				state: unavailableState,
+				tournamentId: args.tournamentId,
+				throughEventId: args.throughEventId,
+				latestEventId: null,
+				latestRevision: null,
+				format: null,
+				freshness: null,
+				finalizedEventIds: headFinalizedEventIds,
+				points: null,
+				h2h: null,
+				knockout: null,
+			};
+			await writeJsonQueryCache(context, key, unavailable, REVIEW_CACHE_TTL_SECONDS);
+			return unavailable;
+		}
 		const result = await context.database.query<PublicationRow>(MY_TOURNAMENT_REVIEW_SEASON_SQL, [
 			context.currentSeason.seasonId,
 			args.tournamentId,
