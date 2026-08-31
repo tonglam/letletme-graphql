@@ -69,6 +69,7 @@ export type MatchDetailPlayer = Readonly<{
 	webName: string;
 	position: number;
 	teamId: number;
+	price: number;
 	totalPoints: number;
 	stats: readonly MatchDetailStat[];
 }>;
@@ -808,6 +809,7 @@ const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 	const id = safeInteger(value.id);
 	const position = safeInteger(value.position);
 	const teamId = safeInteger(value.teamId);
+	const price = safeInteger(value.price);
 	const totalPoints = safeInteger(value.totalPoints);
 	return (
 		id !== null &&
@@ -818,6 +820,8 @@ const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 		position <= 4 &&
 		teamId !== null &&
 		teamId > 0 &&
+		price !== null &&
+		price >= 0 &&
 		totalPoints !== null &&
 		Array.isArray(value.stats) &&
 		value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&

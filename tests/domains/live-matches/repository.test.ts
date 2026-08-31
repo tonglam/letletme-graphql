@@ -117,6 +117,7 @@ const player = (totalPoints: number) => ({
 	webName: "DGW Player",
 	position: 3,
 	teamId: 1,
+	price: 55,
 	totalPoints,
 	stats: [
 		{ identifier: "bps", value: totalPoints * 10, points: totalPoints, pointsModification: null },
@@ -339,7 +340,7 @@ describe("Live Matches V2 read path", () => {
 					throw new Error("warm Live Matches reads must not touch PostgreSQL");
 				},
 			}),
-			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id totalPoints stats { identifier points } } } } } }`,
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id price totalPoints stats { identifier points } } } } } }`,
 		});
 
 		expect(result.errors).toBeUndefined();
@@ -349,8 +350,8 @@ describe("Live Matches V2 read path", () => {
 			snapshot: {
 				eventId: 1,
 				matches: [
-					{ fixtureId: 101, players: [{ id: 9001, totalPoints: 3 }] },
-					{ fixtureId: 102, players: [{ id: 9001, totalPoints: 8 }] },
+					{ fixtureId: 101, players: [{ id: 9001, price: 55, totalPoints: 3 }] },
+					{ fixtureId: 102, players: [{ id: 9001, price: 55, totalPoints: 8 }] },
 				],
 			},
 		});
@@ -1095,6 +1096,7 @@ describe("Live Matches V2 read path", () => {
 					webName: "x".repeat(232_000),
 					position: 3,
 					teamId: 1,
+					price: 55,
 					totalPoints: 0,
 					stats: [],
 				},

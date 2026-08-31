@@ -78,6 +78,7 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 		webName: String!
 		position: ElementPosition!
 		teamId: Int!
+		price: Int!
 		totalPoints: Int!
 		stats: [LiveMatchPlayerStat!]!
 	}

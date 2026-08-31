@@ -163,6 +163,7 @@ const toPlayer = (player: MatchDetailCandidate["fixtures"][number]["players"][nu
 	webName: player.webName,
 	position: positionName(player.position),
 	teamId: player.teamId,
+	price: player.price,
 	totalPoints: player.totalPoints,
 	stats: player.stats,
 });
