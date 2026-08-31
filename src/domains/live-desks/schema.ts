@@ -76,49 +76,6 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		delivery: LiveDelivery!
 	}
 
-	type LiveMatchSummary {
-		fixtureId: Int!
-		eventId: Int!
-		homeTeamId: Int!
-		homeTeamName: String!
-		awayTeamId: Int!
-		awayTeamName: String!
-		homeScore: Int
-		awayScore: Int
-		kickoffTime: DateTime
-		minutes: Int!
-		started: Boolean!
-		finished: Boolean!
-		finishedProvisional: Boolean!
-	}
-
-	type LiveMatchdayDesk {
-		season: String!
-		eventId: Int!
-		scoreCoreRevision: String!
-		state: LiveSnapshotState!
-		windowState: LiveWindowState!
-		dataAvailability: LiveDataAvailability!
-		sourceCheckedAt: DateTime!
-		publishedAt: DateTime!
-		source: LiveSnapshotSource!
-		stale: Boolean!
-		nextRefreshAt: DateTime
-		revisions: LiveRevisionVector!
-		times: LiveTimes!
-		delivery: LiveDelivery!
-		matches: [LiveMatchSummary!]!
-		highlights: [LivePerformance!]!
-	}
-
-	type LiveFixturePlayers {
-		season: String!
-		eventId: Int!
-		scoreCoreRevision: String!
-		fixtureId: Int!
-		players: [LivePerformance!]!
-	}
-
 	type EntryLiveCompetitionsDesk {
 		season: String!
 		eventId: Int!
@@ -269,8 +226,6 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		liveContext: LiveContext!
-		liveMatchdayDesk(ref: LivePublicationRefInput): LiveMatchdayDesk!
-		liveFixturePlayers(ref: LivePublicationRefInput!, fixtureId: Int!): LiveFixturePlayers!
 		entryLiveCompetitionsDesk(
 			entryId: Int!
 			selectedTournamentId: Int

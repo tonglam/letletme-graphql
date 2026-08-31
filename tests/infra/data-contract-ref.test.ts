@@ -58,6 +58,7 @@ describe("Data Platform contract pin", () => {
 		expect(directSqlContract).toContain("PLAYER_STATE_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("PUBLIC_LEAGUE_TRENDS_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("TRENDS_DATA_SQL_CONTRACT");
+		expect(directSqlContract).toContain("LIVE_MATCHES_DATA_SQL_CONTRACT");
 		expect(directSqlContract).toContain("EXPLAIN (FORMAT JSON, COSTS OFF)");
 		expect(compatibilityProbe).not.toContain("to_regclass");
 		expect(contractFixture).toContain("GRANT letletme_graphql_reader TO graphql_ci");

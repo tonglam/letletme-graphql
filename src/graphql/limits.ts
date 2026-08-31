@@ -1139,6 +1139,7 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["trendCohortSnapshot", 10],
 	["calcLivePointsByEntry", 10],
 	["calcLivePointsForEntries", 10],
+	["liveMatchday", 5],
 	["searchEntries", 10],
 	["entryLookup", 5],
 	["entryNameUsage", 5],
@@ -1163,6 +1164,7 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 export const BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR = 5;
 
 export const BOUNDED_PUBLIC_DESK_ROOTS: ReadonlySet<string> = new Set([
+	"liveMatchday",
 	"playersForPicker",
 	"playerStatsBootstrap",
 	"marketAvailabilityPage",

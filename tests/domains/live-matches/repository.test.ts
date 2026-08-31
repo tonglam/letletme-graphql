@@ -1,0 +1,1274 @@
+import { beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
+import { graphql } from "graphql";
+
+import { schema } from "../../../src/graphql/schema";
+import {
+	LIVE_MATCHES_READ_BUNDLE_LUA,
+	LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS,
+	LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET,
+	LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT,
+	LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES,
+	LIVE_MATCH_MAX_FIXTURES,
+	readLiveMatchday,
+	resetLiveMatchProcessStateForTests,
+} from "../../../src/domains/live-matches/repository";
+import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
+
+const now = "2026-08-31T10:00:00.000Z";
+const later = "2026-08-31T10:01:00.000Z";
+
+const canonical = (value: unknown): unknown => {
+	if (Array.isArray(value)) return value.map(canonical);
+	if (value && typeof value === "object") {
+		return Object.fromEntries(
+			Object.keys(value as Record<string, unknown>)
+				.sort()
+				.map((key) => [key, canonical((value as Record<string, unknown>)[key])])
+		);
+	}
+	return value;
+};
+
+const encode = (value: unknown): string => JSON.stringify(canonical(value));
+const digest = (value: unknown): string =>
+	createHash("sha256").update(encode(value), "utf8").digest("hex");
+const itemMeta = (value: unknown): string =>
+	`${Array.isArray(value) ? value.length : 0}|${Buffer.byteLength(encode(value), "utf8")}|${digest(value)}`;
+
+type DeskBundleSlot = {
+	publication: string | null;
+	payload: string | null;
+	metadata: string | null;
+};
+
+type DetailBundleItem = {
+	fixtureId: number;
+	key: string;
+	payload: string;
+	metadata: string;
+};
+
+type DetailBundleSlot = {
+	publication: string | null;
+	manifest: string | null;
+	items: DetailBundleItem[];
+};
+
+type LiveMatchTestBundle = {
+	eventId: number;
+	desk: { active: DeskBundleSlot; previous: DeskBundleSlot };
+	detail: { active: DetailBundleSlot; previous: DetailBundleSlot };
+};
+
+const emptyDesk: DeskBundleSlot = { publication: null, payload: null, metadata: null };
+const emptyDetail: DetailBundleSlot = { publication: null, manifest: null, items: [] };
+
+const fixture = (fixtureId: number, awayTeamId: number, started = true, eventId = 1) => ({
+	fixtureId,
+	eventId,
+	homeTeamId: 1,
+	homeTeamName: "Home",
+	homeTeamShortName: "HOM",
+	awayTeamId,
+	awayTeamName: `Away ${awayTeamId}`,
+	awayTeamShortName: `A${awayTeamId}`,
+	homeScore: started ? 1 : null,
+	awayScore: started ? 0 : null,
+	kickoffTime: now,
+	minutes: started ? 45 : 0,
+	started,
+	finished: false,
+	finishedProvisional: false,
+});
+
+const deskLifecycleDigest = (state: "LIVE_ACTIVE" | "FINALIZED"): string => digest({ state });
+
+const deskFixtureIdentityDigest = (fixtures: readonly ReturnType<typeof fixture>[]): string =>
+	digest(
+		fixtures.map((value) => ({
+			fixtureId: value.fixtureId,
+			eventId: value.eventId,
+			homeTeamId: value.homeTeamId,
+			homeTeamName: value.homeTeamName,
+			homeTeamShortName: value.homeTeamShortName,
+			awayTeamId: value.awayTeamId,
+			awayTeamName: value.awayTeamName,
+			awayTeamShortName: value.awayTeamShortName,
+			kickoffTime: value.kickoffTime,
+		}))
+	);
+
+const deskScoreStateDigest = (fixtures: readonly ReturnType<typeof fixture>[]): string =>
+	digest(
+		fixtures.map((value) => ({
+			fixtureId: value.fixtureId,
+			homeScore: value.homeScore,
+			awayScore: value.awayScore,
+			minutes: value.minutes,
+			started: value.started,
+			finished: value.finished,
+			finishedProvisional: value.finishedProvisional,
+		}))
+	);
+
+const player = (totalPoints: number) => ({
+	id: 9001,
+	webName: "DGW Player",
+	position: 3,
+	teamId: 1,
+	totalPoints,
+	stats: [
+		{ identifier: "bps", value: totalPoints * 10, points: totalPoints, pointsModification: null },
+	],
+});
+
+const publicationId = (generation: number): string =>
+	`00000000-0000-4000-8000-${String(generation).padStart(12, "0")}`;
+
+const buildBundle = (
+	options: {
+		deskGeneration?: number;
+		deskState?: "LIVE_ACTIVE" | "FINALIZED";
+		detailDeskGeneration?: number;
+		detailGeneration?: number;
+		detailItemGeneration?: number;
+		corruptDesk?: boolean;
+		checkpointed?: boolean;
+		omitDetail?: boolean;
+		detailFinalized?: boolean;
+		deskStarted?: boolean;
+		eventId?: number;
+	} = {}
+) => {
+	const eventId = options.eventId ?? 1;
+	const deskGeneration = options.deskGeneration ?? 2;
+	const deskState = options.deskState ?? "LIVE_ACTIVE";
+	const checkpointedAt = options.checkpointed ? later : null;
+	const detailDeskGeneration = options.detailDeskGeneration ?? deskGeneration;
+	const detailGeneration = options.detailGeneration ?? deskGeneration + 10;
+	const deskFixtures = [
+		fixture(101, 2, options.deskStarted ?? true, eventId),
+		fixture(102, 3, options.deskStarted ?? true, eventId),
+	];
+	const deskPayload = encode(deskFixtures);
+	const fixtureIdentityRevision = deskFixtureIdentityDigest(deskFixtures);
+	const revisions = {
+		lifecycle: { revision: deskLifecycleDigest(deskState), contentUpdatedAt: now },
+		fixtureIdentity: { revision: fixtureIdentityRevision, contentUpdatedAt: now },
+		scoreState: {
+			revision: deskScoreStateDigest(deskFixtures),
+			contentUpdatedAt: later,
+		},
+	};
+	const deskPublication = {
+		contractVersion: "live-matches-v2",
+		publicationId: publicationId(deskGeneration),
+		generation: deskGeneration,
+		season: "2627",
+		eventId,
+		state: deskState,
+		sourceCheckedAt: later,
+		publishedAt: later,
+		checkpointedAt,
+		expectedNextCheckAt: "2026-08-31T10:01:30.000Z",
+		staleAt: "2026-08-31T10:02:15.000Z",
+		revisions,
+		desk: {
+			name: "desk",
+			key: `llm:data:v2:fpl:live-match:desk:2627:${eventId}:${deskGeneration}:desk`,
+			type: "string",
+			count: deskFixtures.length,
+			bytes: Buffer.byteLength(deskPayload, "utf8"),
+			sha256: digest(deskFixtures),
+		},
+	};
+
+	const detailFixtures = [
+		{ fixtureId: 101, players: [player(3)] },
+		{ fixtureId: 102, players: [player(8)] },
+	];
+	const detailItemGeneration = options.detailItemGeneration ?? detailGeneration;
+	const detailItems = detailFixtures.map((detail) => {
+		const payload = detail.players;
+		const sha = digest(payload);
+		return {
+			fixtureId: detail.fixtureId,
+			key: `llm:data:v2:fpl:live-match:detail:2627:${eventId}:${detailItemGeneration}:${detail.fixtureId}:${sha}`,
+			type: "string",
+			count: payload.length,
+			bytes: Buffer.byteLength(encode(payload), "utf8"),
+			sha256: sha,
+			payload: encode(payload),
+			metadata: itemMeta(payload),
+		};
+	});
+	const detailPublication = {
+		contractVersion: "live-matches-v2",
+		publicationId: publicationId(detailGeneration),
+		generation: detailGeneration,
+		season: "2627",
+		eventId,
+		finalized: options.detailFinalized ?? false,
+		observedDeskGeneration: detailDeskGeneration,
+		fixtureIdentityRevision,
+		sourceCheckedAt: later,
+		publishedAt: later,
+		checkpointedAt,
+		expectedNextCheckAt: "2026-08-31T10:01:30.000Z",
+		staleAt: "2026-08-31T10:02:15.000Z",
+		detail: { revision: digest(detailFixtures), contentUpdatedAt: later },
+		fixtures: detailItems.map(({ payload: _payload, metadata: _metadata, ...item }) => item),
+	};
+	const detailRaw = JSON.stringify(detailPublication);
+	const bundle: LiveMatchTestBundle = {
+		eventId: 1,
+		desk: {
+			active: options.corruptDesk
+				? {
+						publication: JSON.stringify({
+							...deskPublication,
+							desk: { ...deskPublication.desk, sha256: "0".repeat(64) },
+						}),
+						payload: deskPayload,
+						metadata: itemMeta(deskFixtures),
+					}
+				: {
+						publication: JSON.stringify(deskPublication),
+						payload: deskPayload,
+						metadata: itemMeta(deskFixtures),
+					},
+			previous: emptyDesk,
+		},
+		detail: {
+			active: options.omitDetail
+				? emptyDetail
+				: {
+						publication: detailRaw,
+						manifest: detailRaw,
+						items: detailItems.map(({ payload, metadata, ...item }) => ({
+							fixtureId: item.fixtureId,
+							key: item.key,
+							payload,
+							metadata,
+						})),
+					},
+			previous: emptyDetail,
+		},
+	};
+	return { bundle, deskPublication, detailPublication, deskFixtures, detailFixtures };
+};
+
+const buildCheckpointRow = (
+	options: { eventId?: number; deskGeneration?: number; detailGeneration?: number } = {}
+) => {
+	const built = buildBundle({
+		checkpointed: true,
+		eventId: options.eventId,
+		deskGeneration: options.deskGeneration,
+		detailGeneration: options.detailGeneration,
+	});
+	return {
+		event_id: built.deskPublication.eventId,
+		desk: {
+			publication_id: built.deskPublication.publicationId,
+			generation: built.deskPublication.generation,
+			state: built.deskPublication.state,
+			manifest: built.deskPublication,
+			revisions: built.deskPublication.revisions,
+			payload: built.deskFixtures,
+			row_count: built.deskFixtures.length,
+			payload_bytes: Buffer.byteLength(encode(built.deskFixtures), "utf8"),
+			payload_sha256: digest(built.deskFixtures),
+			source_checked_at: built.deskPublication.sourceCheckedAt,
+			published_at: built.deskPublication.publishedAt,
+			checkpointed_at: built.deskPublication.checkpointedAt,
+			expected_next_check_at: built.deskPublication.expectedNextCheckAt,
+			stale_at: built.deskPublication.staleAt,
+		},
+		detail: {
+			publication_id: built.detailPublication.publicationId,
+			generation: built.detailPublication.generation,
+			state: built.detailPublication.finalized ? "FINALIZED" : "PROVISIONAL",
+			observed_desk_generation: built.detailPublication.observedDeskGeneration,
+			fixture_identity_revision: built.detailPublication.fixtureIdentityRevision,
+			manifest: built.detailPublication,
+			revisions: { detail: built.detailPublication.detail },
+			payload: built.detailFixtures,
+			row_count: built.detailFixtures.length,
+			payload_bytes: Buffer.byteLength(encode(built.detailFixtures), "utf8"),
+			payload_sha256: digest(built.detailFixtures),
+			source_checked_at: built.detailPublication.sourceCheckedAt,
+			published_at: built.detailPublication.publishedAt,
+			checkpointed_at: built.detailPublication.checkpointedAt,
+			expected_next_check_at: built.detailPublication.expectedNextCheckAt,
+			stale_at: built.detailPublication.staleAt,
+		},
+	};
+};
+
+const attachBundle = (redis: TestRedis, bundle: unknown): { set: (value: unknown) => void } => {
+	let current = bundle;
+	(redis as unknown as { eval: () => Promise<string> }).eval = async () => JSON.stringify(current);
+	return {
+		set: (value: unknown) => {
+			current = value;
+		},
+	};
+};
+
+describe("Live Matches V2 read path", () => {
+	beforeEach(() => resetLiveMatchProcessStateForTests());
+
+	it("does not expose lifecycle context as a fabricated match-publication field", () => {
+		const snapshot = schema.getType("LiveMatchdaySnapshot");
+		expect(
+			snapshot && "getFields" in snapshot ? snapshot.getFields().nextEventId : undefined
+		).toBeUndefined();
+	});
+
+	it("serves one root with fixture-specific DGW detail", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+		let databaseReads = 0;
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseReads += 1;
+					throw new Error("warm Live Matches reads must not touch PostgreSQL");
+				},
+			}),
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id totalPoints stats { identifier points } } } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			availability: "READY",
+			delivery: { state: "FRESH", servedFrom: "REDIS_CURRENT" },
+			snapshot: {
+				eventId: 1,
+				matches: [
+					{ fixtureId: 101, players: [{ id: 9001, totalPoints: 3 }] },
+					{ fixtureId: 102, players: [{ id: 9001, totalPoints: 8 }] },
+				],
+			},
+		});
+		expect(databaseReads).toBe(0);
+	});
+
+	it("rejects a publication with an invalid V2 identity", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+		const publication = JSON.parse(bundle.desk.active.publication) as { publicationId: string };
+		publication.publicationId = "not-a-publication";
+		bundle.desk.active.publication = JSON.stringify(publication);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects publication timestamps that GraphQL DateTime cannot serialize", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+		const publication = JSON.parse(bundle.desk.active.publication) as {
+			sourceCheckedAt: string;
+		};
+		publication.sourceCheckedAt = "2026-08-31";
+		bundle.desk.active.publication = JSON.stringify(publication);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("does not let an explicit event read populate the active-event fallback", async () => {
+		const redis = new TestRedis();
+		const bundle = { ...buildBundle().bundle, eventId: 2 };
+		let available = true;
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async () => {
+			if (!available) throw new Error("redis unavailable");
+			return JSON.stringify(bundle);
+		};
+		const context = buildSnapshotContext(redis, { databaseQuery: async () => ({ rows: [] }) });
+
+		await readLiveMatchday(context, 2);
+		available = false;
+
+		const fallback = await readLiveMatchday(context);
+		expect(fallback.eventId).toBeNull();
+	});
+
+	it("requires detail coverage for every started fixture", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (!bundle.detail.active.publication) throw new Error("missing detail publication");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: unknown[];
+		};
+		publication.fixtures = publication.fixtures.slice(0, 1);
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		bundle.detail.active.items = bundle.detail.active.items.slice(0, 1);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects an empty detail fixture after its desk has started", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null || active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const first = publication.fixtures[0];
+		if (!first) throw new Error("missing first detail descriptor");
+		const emptyPlayers: unknown[] = [];
+		const emptyPayload = encode(emptyPlayers);
+		const emptySha = digest(emptyPlayers);
+		const emptyKey = first.key.replace(/:[0-9a-f]{64}$/, `:${emptySha}`);
+		publication.fixtures[0] = {
+			...first,
+			key: emptyKey,
+			count: 0,
+			bytes: Buffer.byteLength(emptyPayload, "utf8"),
+			sha256: emptySha,
+		};
+		active.items[0] = {
+			...active.items[0],
+			key: emptyKey,
+			payload: emptyPayload,
+			metadata: itemMeta(emptyPlayers),
+		};
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: emptyPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects a desk whose stream revisions do not match its payload", async () => {
+		for (const revisionName of ["lifecycle", "fixtureIdentity", "scoreState"] as const) {
+			const redis = new TestRedis();
+			const bundle = structuredClone(buildBundle().bundle);
+			if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+			const publication = JSON.parse(bundle.desk.active.publication) as {
+				revisions: Record<string, { revision: string; contentUpdatedAt: string }>;
+			};
+			publication.revisions[revisionName] = {
+				...publication.revisions[revisionName],
+				revision: digest({ invalid: revisionName }),
+			};
+			bundle.desk.active.publication = JSON.stringify(publication);
+			attachBundle(redis, bundle);
+
+			const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+			expect(result.desk).toBeNull();
+			expect(result.detail).toBeNull();
+		}
+	});
+
+	it("keeps a complete pre-kickoff desk fresh while detail is pending", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle({ deskStarted: false, omitDetail: true }).bundle);
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state reasonCodes } matches { started players { id } } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			availability: "READY",
+			delivery: {
+				state: "FRESH",
+				reasonCodes: ["REDIS_CURRENT", "DETAIL_PENDING"],
+			},
+			snapshot: {
+				detailDelivery: { state: "PENDING", reasonCodes: ["DETAIL_PENDING"] },
+				matches: [
+					{ started: false, players: [] },
+					{ started: false, players: [] },
+				],
+			},
+		});
+		expect(JSON.stringify(result.data?.liveMatchday)).not.toContain("DETAIL_OR_DESK_DEGRADED");
+	});
+
+	it("falls back to the previous desk when active exceeds the fixture cap", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.desk.previous = structuredClone(bundle.desk.active);
+		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+		const activePublication = JSON.parse(bundle.desk.active.publication) as unknown as {
+			desk: { count: number };
+		};
+		activePublication.desk.count = LIVE_MATCH_MAX_FIXTURES + 1;
+		bundle.desk.active.publication = JSON.stringify(activePublication);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.desk?.fixtures).toHaveLength(2);
+	});
+
+	it("falls back to previous detail when active points outside its namespace", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		if (bundle.detail.active.publication === null) throw new Error("missing active detail");
+		const activePublication = JSON.parse(bundle.detail.active.publication) as unknown as {
+			fixtures: Array<{ key: string; sha256: string }>;
+		};
+		activePublication.fixtures[0].key = `llm:data:v2:fpl:other:${activePublication.fixtures[0].sha256}`;
+		bundle.detail.active.publication = JSON.stringify(activePublication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		bundle.detail.active.items[0].key = activePublication.fixtures[0].key;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detail?.fixtures).toHaveLength(2);
+	});
+
+	it("labels a previous detail fallback independently from the desk", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		if (bundle.detail.active.publication === null)
+			throw new Error("missing active detail publication");
+		const activePublication = JSON.parse(bundle.detail.active.publication) as unknown as {
+			fixtures: Array<{ key: string; sha256: string }>;
+		};
+		activePublication.fixtures[0].key = `llm:data:v2:fpl:other:${activePublication.fixtures[0].sha256}`;
+		bundle.detail.active.publication = JSON.stringify(activePublication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		bundle.detail.active.items[0].key = activePublication.fixtures[0].key;
+		attachBundle(redis, bundle);
+
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { snapshot { detailDelivery { servedFrom reasonCodes } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			snapshot: {
+				detailDelivery: { servedFrom: "REDIS_PREVIOUS", reasonCodes: ["DETAIL_PREVIOUS"] },
+			},
+		});
+	});
+
+	it("caps Redis detail fan-out before reading immutable item keys", () => {
+		expect(LIVE_MATCHES_READ_BUNDLE_LUA).toContain(
+			`#decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES}`
+		);
+		expect(LIVE_MATCHES_READ_BUNDLE_LUA).toContain(`total_bytes > ${2 * 1024 * 1024}`);
+		expect(LIVE_MATCHES_READ_BUNDLE_LUA).not.toContain("manifest_decoded.fixtures");
+		const detailScript = LIVE_MATCHES_READ_BUNDLE_LUA.slice(
+			LIVE_MATCHES_READ_BUNDLE_LUA.indexOf("local function detail_candidate")
+		);
+		expect(detailScript.indexOf("local prefix =")).toBeLessThan(
+			detailScript.indexOf("payload = read_string(item.key)")
+		);
+	});
+
+	it("rejects a leading detail publication and keeps the desk available", async () => {
+		const redis = new TestRedis();
+		const built = buildBundle({ detailDeskGeneration: 3 });
+		attachBundle(redis, built.bundle);
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects detail players outside the served fixture teams", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null || active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const invalidPlayers = [{ ...player(3), teamId: 999 }];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = publication.fixtures[0];
+		if (!item) throw new Error("missing first detail descriptor");
+		const nextKey = item.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`);
+		publication.fixtures[0] = {
+			...item,
+			key: nextKey,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+		};
+		active.items[0] = {
+			...active.items[0],
+			key: nextKey,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects detail that does not cover every desk fixture", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null) throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{ fixtureId: number }>;
+			detail: { revision: string };
+		};
+		publication.fixtures.pop();
+		active.items.pop();
+		publication.detail.revision = digest([{ fixtureId: 101, players: [player(3)] }]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("accepts an immutable fixture item reused from an older detail generation", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle({ detailItemGeneration: 4 }).bundle);
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.detail?.publication.generation).toBe(12);
+		expect(result.detail?.fixtures).toHaveLength(2);
+	});
+
+	it("bounds a missing detail checkpoint lookup for the same desk publication", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ omitDetail: true }).bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		const first = await readLiveMatchday(context, 1);
+		const second = await readLiveMatchday(context, 1);
+
+		expect(first.desk).not.toBeNull();
+		expect(first.detail).toBeNull();
+		expect(second.desk).not.toBeNull();
+		expect(second.detail).toBeNull();
+		expect(databaseReads).toBe(1);
+
+		control.set(buildBundle().bundle);
+		const refreshed = await readLiveMatchday(context, 1);
+		expect(refreshed.detail?.fixtures).toHaveLength(2);
+		expect(databaseReads).toBe(1);
+	});
+
+	it("uses the same-event process LKG when Redis becomes unavailable", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle().bundle);
+		const context = buildSnapshotContext(redis);
+		const warm = await readLiveMatchday(context, 1);
+		expect(warm.desk?.servedFrom).toBe("REDIS_CURRENT");
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const retained = await readLiveMatchday(context, 1);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.eventId).toBe(1);
+	});
+
+	it("revalidates an explicit event after Redis loses a complete active LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
+		const newerCheckpoint = buildCheckpointRow({ eventId: 1, deskGeneration: 3 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, 1]);
+				return { rows: [newerCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context, 1);
+		expect(warm.desk?.publication.generation).toBe(2);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context, 1);
+
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.desk?.publication.generation).toBe(3);
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.detail?.publication.generation).toBe(13);
+		expect(databaseReads).toBe(1);
+	});
+
+	it("revalidates the cached active event during a Redis outage", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		const nextCheckpoint = buildCheckpointRow({ eventId: 2 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [nextCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context);
+		const retained = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(2);
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(retained.eventId).toBe(2);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(1);
+		expect(LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS).toBeGreaterThan(0);
+	});
+
+	it("revalidates the active event when Redis returns no pointer", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		const nextCheckpoint = buildCheckpointRow({ eventId: 2 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [nextCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		control.set({ ...buildBundle({ eventId: 1 }).bundle, eventId: null });
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(2);
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseReads).toBe(1);
+	});
+
+	it("prefers a newer same-desk detail checkpoint over process LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(
+			redis,
+			buildBundle({ deskGeneration: 2, detailGeneration: 12 }).bundle
+		);
+		const newerCheckpoint = buildCheckpointRow({ deskGeneration: 2, detailGeneration: 13 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [newerCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.desk?.publication.generation).toBe(2);
+		expect(warm.detail?.publication.generation).toBe(12);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.desk?.publication.generation).toBe(2);
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.detail?.publication.generation).toBe(13);
+		expect(databaseReads).toBe(1);
+	});
+
+	it("prefers a newer same-event checkpoint over an older process LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
+		const newerCheckpoint = buildCheckpointRow({ deskGeneration: 3 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [newerCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.desk?.publication.generation).toBe(2);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.desk?.publication.generation).toBe(3);
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseReads).toBe(1);
+	});
+
+	it("reserves the active event LKG from explicit historical reads", async () => {
+		const redis = new TestRedis();
+		const bundles = new Map(
+			Array.from({ length: 10 }, (_, eventId) => {
+				const bundle = buildBundle({ eventId }).bundle;
+				return [eventId, { ...bundle, eventId }] as const;
+			})
+		);
+		let available = true;
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async (
+			...args
+		) => {
+			if (!available) throw new Error("redis unavailable");
+			const rawEventId = args[args.length - 1];
+			const eventId = rawEventId === "" ? 1 : Number(rawEventId);
+			return JSON.stringify(bundles.get(eventId) ?? bundles.get(1));
+		};
+		const context = buildSnapshotContext(redis, { databaseQuery: async () => ({ rows: [] }) });
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		for (let eventId = 2; eventId <= 9; eventId += 1) {
+			const historical = await readLiveMatchday(context, eventId);
+			expect(historical.eventId).toBe(eventId);
+		}
+		available = false;
+
+		const retained = await readLiveMatchday(context);
+
+		expect(retained.eventId).toBe(1);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.detail?.servedFrom).toBe("PROCESS_LKG");
+	});
+
+	it("uses the numeric season authority for PostgreSQL cold fallback", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let parameters: unknown[] | undefined;
+		const context = buildSnapshotContext(redis, {
+			seasonId: 2026,
+			seasonCode: "2627",
+			databaseQuery: async (_query, values) => {
+				parameters = values as unknown[];
+				return { rows: [] };
+			},
+		});
+
+		await readLiveMatchday(context, 1);
+
+		expect(parameters).toEqual([2026, 1]);
+	});
+
+	it("attempts a bounded checkpoint scope lookup when Redis has no active event", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let parameters: unknown[] | undefined;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				parameters = values as unknown[];
+				return { rows: [] };
+			},
+		});
+
+		await readLiveMatchday(context);
+
+		expect(parameters).toEqual([2026, null]);
+	});
+
+	it("bounds checkpoint reads for an explicit event with a healthy Redis miss", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle({ eventId: 999 }).bundle);
+		bundle.desk.active = emptyDesk;
+		bundle.desk.previous = emptyDesk;
+		bundle.detail.active = emptyDetail;
+		bundle.detail.previous = emptyDetail;
+		attachBundle(redis, bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		const first = await readLiveMatchday(context, 999);
+		const second = await readLiveMatchday(context, 999);
+
+		expect(first.desk).toBeNull();
+		expect(second.desk).toBeNull();
+		expect(databaseReads).toBe(1);
+	});
+
+	it("keeps explicit event checkpoint cooldown state bounded", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		for (let eventId = 1; eventId <= LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT + 1; eventId += 1) {
+			await readLiveMatchday(context, eventId);
+		}
+		await readLiveMatchday(context, 1);
+
+		expect(databaseReads).toBe(LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET);
+	});
+
+	it("reserves the explicit checkpoint budget before concurrent miss reads", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				await Promise.resolve();
+				return { rows: [] };
+			},
+		});
+
+		await Promise.all(
+			Array.from({ length: LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT + 1 }, (_, index) =>
+				readLiveMatchday(context, index + 1)
+			)
+		);
+
+		expect(databaseReads).toBe(LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET);
+	});
+
+	it("serves an exact self-contained PostgreSQL checkpoint when Redis is unavailable", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [buildCheckpointRow()] }),
+		});
+
+		const result = await readLiveMatchday(context, 1);
+
+		expect(result.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(result.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(result.desk?.fixtures).toHaveLength(2);
+		expect(result.detail?.fixtures).toHaveLength(2);
+	});
+
+	it("accepts PostgreSQL timestamps that represent the same instant", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const row = buildCheckpointRow();
+		const asPostgresTimestamp = (value: string): string => value.replace(".000Z", "+00:00");
+		for (const checkpoint of [row.desk, row.detail]) {
+			checkpoint.source_checked_at = asPostgresTimestamp(checkpoint.source_checked_at);
+			checkpoint.published_at = asPostgresTimestamp(checkpoint.published_at);
+			checkpoint.checkpointed_at =
+				checkpoint.checkpointed_at === null
+					? null
+					: asPostgresTimestamp(checkpoint.checkpointed_at);
+			checkpoint.expected_next_check_at = asPostgresTimestamp(checkpoint.expected_next_check_at);
+			checkpoint.stale_at = asPostgresTimestamp(checkpoint.stale_at);
+		}
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+
+		const result = await readLiveMatchday(context, 1);
+
+		expect(result.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(result.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+	});
+
+	it("rejects a PostgreSQL row whose manifest and columns are not the same publication", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const row = buildCheckpointRow();
+		row.desk.publication_id = publicationId(999);
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+
+		const result = await readLiveMatchday(context, 1);
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects detail when the durable fixture envelope exceeds the shared byte limit", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const row = buildCheckpointRow();
+		const detailFixtures = Array.from({ length: 9 }, (_, index) => ({
+			fixtureId: 500 + index,
+			players: [
+				{
+					id: 20_000 + index,
+					webName: "x".repeat(232_000),
+					position: 3,
+					teamId: 1,
+					totalPoints: 0,
+					stats: [],
+				},
+			],
+		}));
+		const growth =
+			LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES - Buffer.byteLength(encode(detailFixtures), "utf8") + 1;
+		if (growth <= 0) throw new Error("detail boundary fixture is invalid");
+		detailFixtures[0]!.players[0]!.webName += "x".repeat(growth);
+		const playerBytes = detailFixtures.reduce(
+			(total, detail) => total + Buffer.byteLength(encode(detail.players), "utf8"),
+			0
+		);
+		expect(playerBytes).toBeLessThanOrEqual(LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES);
+		expect(Buffer.byteLength(encode(detailFixtures), "utf8")).toBe(
+			LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES + 1
+		);
+
+		const deskFixtures = detailFixtures.map((detail, index) =>
+			fixture(detail.fixtureId, 20 + index)
+		);
+		const fixtureIdentityRevision = deskFixtureIdentityDigest(deskFixtures);
+		const deskManifest = {
+			...row.desk.manifest,
+			revisions: {
+				...row.desk.manifest.revisions,
+				fixtureIdentity: { revision: fixtureIdentityRevision, contentUpdatedAt: now },
+				scoreState: {
+					revision: deskScoreStateDigest(deskFixtures),
+					contentUpdatedAt: later,
+				},
+			},
+			desk: {
+				...row.desk.manifest.desk,
+				count: deskFixtures.length,
+				bytes: Buffer.byteLength(encode(deskFixtures), "utf8"),
+				sha256: digest(deskFixtures),
+			},
+		};
+		row.desk.manifest = deskManifest;
+		row.desk.revisions = deskManifest.revisions;
+		row.desk.payload = deskFixtures;
+		row.desk.row_count = deskFixtures.length;
+		row.desk.payload_bytes = Buffer.byteLength(encode(deskFixtures), "utf8");
+		row.desk.payload_sha256 = digest(deskFixtures);
+
+		const detailRevision = { revision: digest(detailFixtures), contentUpdatedAt: later };
+		const detailManifest = {
+			...row.detail.manifest,
+			fixtureIdentityRevision,
+			detail: detailRevision,
+			fixtures: detailFixtures.map((detail) => {
+				const checksum = digest(detail.players);
+				return {
+					fixtureId: detail.fixtureId,
+					key: `llm:data:v2:fpl:live-match:detail:2627:1:${row.detail.generation}:${detail.fixtureId}:${checksum}`,
+					type: "string",
+					count: detail.players.length,
+					bytes: Buffer.byteLength(encode(detail.players), "utf8"),
+					sha256: checksum,
+				};
+			}),
+		};
+		row.detail.fixture_identity_revision = fixtureIdentityRevision;
+		row.detail.manifest = detailManifest;
+		row.detail.revisions = { detail: detailRevision };
+		row.detail.payload = detailFixtures;
+		row.detail.row_count = detailFixtures.length;
+		row.detail.payload_bytes = Buffer.byteLength(encode(detailFixtures), "utf8");
+		row.detail.payload_sha256 = detailRevision.revision;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+
+		const result = await readLiveMatchday(context, 1);
+
+		expect(result.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("does not label a provisional detail checkpoint as final", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle({ deskState: "FINALIZED", checkpointed: true }).bundle);
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { delivery { state } snapshot { detailDelivery { state } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			delivery: { state: "DEGRADED" },
+			snapshot: { detailDelivery: { state: "DEGRADED" } },
+		});
+	});
+
+	it("degrades a final-marked publication until both exact checkpoints exist", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle({ deskState: "FINALIZED", detailFinalized: true }).bundle);
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state reasonCodes } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			availability: "READY",
+			delivery: { state: "DEGRADED" },
+			snapshot: {
+				detailDelivery: {
+					state: "DEGRADED",
+					reasonCodes: ["FINAL_CHECKPOINT_PENDING"],
+				},
+			},
+		});
+		expect(JSON.stringify(result.data?.liveMatchday)).toContain("FINAL_CHECKPOINT_PENDING");
+	});
+
+	it("reports FINAL only after desk and detail are exactly checkpointed", async () => {
+		const redis = new TestRedis();
+		attachBundle(
+			redis,
+			buildBundle({
+				deskState: "FINALIZED",
+				detailFinalized: true,
+				checkpointed: true,
+			}).bundle
+		);
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			availability: "READY",
+			delivery: { state: "FINAL" },
+			snapshot: { detailDelivery: { state: "FINAL" } },
+		});
+	});
+
+	it("keeps an older checkpointed final detail degraded behind the final desk", async () => {
+		const redis = new TestRedis();
+		attachBundle(
+			redis,
+			buildBundle({
+				deskGeneration: 4,
+				detailDeskGeneration: 3,
+				deskState: "FINALIZED",
+				detailFinalized: true,
+				checkpointed: true,
+			}).bundle
+		);
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state reasonCodes } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			availability: "READY",
+			delivery: {
+				state: "DEGRADED",
+				reasonCodes: ["REDIS_CURRENT", "DETAIL_OR_DESK_DEGRADED", "FINAL_CHECKPOINT_PENDING"],
+			},
+			snapshot: {
+				detailDelivery: {
+					state: "DEGRADED",
+					reasonCodes: ["FINAL_CHECKPOINT_PENDING"],
+				},
+			},
+		});
+	});
+});
