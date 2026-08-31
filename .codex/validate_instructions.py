@@ -1104,32 +1104,42 @@ def has_secret_bytes(raw: bytes) -> bool:
                 # visible without retaining or serializing every descendant
                 # subtree for every ancestor pair.
                 parsed = json.loads(decoded, object_pairs_hook=lambda items: tuple(items))
-                normalized = json.dumps(parsed, ensure_ascii=False)
             except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
-                pass
-            else:
-                if has_secret(normalized):
-                    return True
-                pending = [(parsed, None, None)]
-                while pending:
-                    current, field, inherited_field = pending.pop()
-                    sensitive_field = inherited_field
-                    if field is not None and _json_field_has_secret(field):
-                        sensitive_field = field
-                    if isinstance(current, tuple):
-                        for key, value in reversed(current):
-                            pending.append((value, key, sensitive_field))
-                    elif isinstance(current, list):
-                        for value in reversed(current):
-                            pending.append((value, field, sensitive_field))
-                    elif sensitive_field is not None:
-                        if has_secret(f'"{sensitive_field}": {json.dumps(current, ensure_ascii=False)}'):
-                            return True
-                    elif field is not None:
-                        if has_secret(f'"{field}": {json.dumps(current, ensure_ascii=False)}'):
-                            return True
-                    elif isinstance(current, str) and has_secret(current):
+                if "\\u" in decoded:
+                    escaped_key_normalized = re.sub(
+                        r"\\u([0-9a-fA-F]{4})",
+                        lambda match: chr(int(match.group(1), 16)),
+                        decoded,
+                    )
+                    if escaped_key_normalized != decoded and has_secret(escaped_key_normalized):
                         return True
+                continue
+            try:
+                normalized = json.dumps(parsed, ensure_ascii=False)
+            except (TypeError, ValueError, RecursionError):
+                normalized = None
+            if normalized is not None and has_secret(normalized):
+                return True
+            pending = [(parsed, None, None)]
+            while pending:
+                current, field, inherited_field = pending.pop()
+                sensitive_field = inherited_field
+                if field is not None and _json_field_has_secret(field):
+                    sensitive_field = field
+                if isinstance(current, tuple):
+                    for key, value in reversed(current):
+                        pending.append((value, key, sensitive_field))
+                elif isinstance(current, list):
+                    for value in reversed(current):
+                        pending.append((value, field, sensitive_field))
+                elif sensitive_field is not None:
+                    if has_secret(f'"{sensitive_field}": {json.dumps(current, ensure_ascii=False)}'):
+                        return True
+                elif field is not None:
+                    if has_secret(f'"{field}": {json.dumps(current, ensure_ascii=False)}'):
+                        return True
+                elif isinstance(current, str) and has_secret(current):
+                    return True
         except UnicodeDecodeError:
             continue
     return any(has_secret(candidate) for candidate in candidates)
@@ -1147,10 +1157,21 @@ def has_locked_skill_secret_bytes(raw: bytes) -> bool:
         candidates.append(decoded)
         try:
             parsed = json.loads(decoded, object_pairs_hook=lambda items: tuple(items))
-            normalized = json.dumps(parsed, ensure_ascii=False)
         except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
+            if "\\u" in decoded:
+                escaped_key_normalized = re.sub(
+                    r"\\u([0-9a-fA-F]{4})",
+                    lambda match: chr(int(match.group(1), 16)),
+                    decoded,
+                )
+                if escaped_key_normalized != decoded and has_locked_skill_secret(escaped_key_normalized):
+                    return True
             continue
-        if has_locked_skill_secret(normalized):
+        try:
+            normalized = json.dumps(parsed, ensure_ascii=False)
+        except (TypeError, ValueError, RecursionError):
+            normalized = None
+        if normalized is not None and has_locked_skill_secret(normalized):
             return True
         pending = [(parsed, None, None)]
         while pending:
