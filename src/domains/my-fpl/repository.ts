@@ -612,6 +612,7 @@ export type MyFplManagerCaptainReview = {
 	captainWebName: string | null;
 	captainTeamShortName: string | null;
 	captainBasePoints: number;
+	captainBlank: boolean;
 	captainContribution: number;
 	viceCaptainElement: number | null;
 	viceCaptainWebName: string | null;
@@ -1300,6 +1301,7 @@ const isManagerCaptainReview = (value: unknown): value is MyFplManagerCaptainRev
 		captainWebName: isNullableString,
 		captainTeamShortName: isNullableString,
 		captainBasePoints: isSafeInteger,
+		captainBlank: (candidate) => typeof candidate === "boolean",
 		captainContribution: isSafeInteger,
 		viceCaptainElement: isNullableSafeInteger,
 		viceCaptainWebName: isNullableString,
@@ -2143,6 +2145,16 @@ const parseLoadedSnapshotEntryCache = (value: unknown): LoadedSnapshotEntry | nu
 	if (!isRecord(value) || !isSnapshotPublicationCache(value.publication)) return null;
 	const payload = parseSnapshotEntryPayload(value.payload);
 	if (!payload || typeof value.isEmpty !== "boolean") return null;
+	if (
+		value.isEmpty !== (payload.gameweek.state === "EMPTY") ||
+		payload.gameweek.eventId !== payload.review.throughEventId ||
+		payload.gameweek.eventId !== value.publication.eventId ||
+		(value.isEmpty
+			? payload.review.timeline.length !== 0
+			: (payload.review.timeline.at(-1)?.eventId ?? null) !== payload.review.throughEventId)
+	) {
+		return null;
+	}
 	return { publication: value.publication, payload, isEmpty: value.isEmpty };
 };
 
@@ -2344,12 +2356,13 @@ const groupManagerTransfers = (snapshot: LoadedSnapshotEntry): MyFplTransferGame
 const emptyManagerReview = (
 	state: MyFplReviewState,
 	loadedContext: LoadedReviewContext,
-	rules: CoreSelectionRules | null
+	rules: CoreSelectionRules | null,
+	throughEventId: number | null = null
 ): MyFplManagerReview => ({
 	state,
 	context: loadedContext.value,
 	entry: null,
-	throughEventId: null,
+	throughEventId,
 	timeline: [],
 	summary: null,
 	holdings: [],
@@ -2380,10 +2393,10 @@ const loadManagerReview = async (
 		throughEventId,
 		snapshotRevision
 	);
-	if (!snapshot) return emptyManagerReview("PENDING", loadedContext, rules);
+	if (!snapshot) return emptyManagerReview("PENDING", loadedContext, rules, throughEventId);
 
 	const transfers = groupManagerTransfers(snapshot);
-	if (!transfers) return emptyManagerReview("PENDING", loadedContext, rules);
+	if (!transfers) return emptyManagerReview("PENDING", loadedContext, rules, throughEventId);
 	const entry = snapshot.payload.entry;
 	const pastSeasons = snapshot.payload.pastSeasons;
 	const pastSeasonsState: MyFplReviewState =
@@ -2404,11 +2417,7 @@ const loadManagerReview = async (
 		review: gameweekReviewFor(snapshot, throughEventId),
 		snapshotMeta: snapshot.publication,
 	};
-	const state: MyFplReviewState = snapshot.isEmpty
-		? "EMPTY"
-		: currentGameweek.state === "READY" && pastSeasonsState === "READY"
-			? "READY"
-			: "PENDING";
+	const state: MyFplReviewState = snapshot.isEmpty ? "EMPTY" : currentGameweek.state;
 	return {
 		state,
 		context: loadedContext.value,

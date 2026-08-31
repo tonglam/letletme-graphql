@@ -75,6 +75,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		captainWebName: String
 		captainTeamShortName: String
 		captainBasePoints: Int!
+		captainBlank: Boolean!
 		captainContribution: Int!
 		viceCaptainElement: Int
 		viceCaptainWebName: String

@@ -636,6 +636,7 @@ const snapshotPayload = () => ({
 						captainWebName: "Captain",
 						captainTeamShortName: "ARS",
 						captainBasePoints: 5,
+						captainBlank: false,
 						captainContribution: 10,
 						viceCaptainElement: 2,
 						viceCaptainWebName: "Player 2",
