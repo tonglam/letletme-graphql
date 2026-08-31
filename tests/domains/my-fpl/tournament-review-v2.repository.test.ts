@@ -315,6 +315,40 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(2);
 	});
 
+	it("rejects a cached status summary with an incorrect latest available event", async () => {
+		const redis = new TestRedis();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({
+				rows: [
+					{
+						event_id: 4,
+						format: "POINTS",
+						state: "READY",
+						next_attempt_at: null,
+						execution_attempts: 1,
+						source_rechecks: 0,
+						degraded_at: null,
+						revision: 8,
+						published_at: "2026-08-20T00:00:03.000Z",
+						latest_finalized_event_id: 4,
+					},
+				],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadStatus(context, 6953);
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			latestAvailableEventId: number | null;
+		};
+		cached.latestAvailableEventId = null;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadStatus(context, 6953);
+		expect(result.latestAvailableEventId).toBe(4);
+	});
+
 	it("preserves a finalized checkpoint when no obligation row exists", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => ({
@@ -487,6 +521,23 @@ describe("My Tournament Review V2 repository", () => {
 		const result = await repository.loadCatalog(context, "ACCESSIBLE");
 		expect(result.tournaments[0]?.latestRevision).toBe("8");
 		expect(databaseReads).toBe(2);
+	});
+
+	it("rejects a cached catalog root state that disagrees with its items", async () => {
+		const redis = new TestRedis();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [catalogRow()] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadCatalog(context, "ACCESSIBLE");
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as { state: string };
+		cached.state = "READY";
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadCatalog(context, "ACCESSIBLE");
+		expect(result.state).toBe("PENDING");
 	});
 
 	it("keeps a pending obligation visible when its publication is not ready", async () => {
@@ -757,6 +808,50 @@ describe("My Tournament Review V2 repository", () => {
 		await expect(
 			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 4 })
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects a cached Season with incomplete freshness or finalized identity", async () => {
+		const redis = new TestRedis();
+		const latest = publicationRow({ event_id: 4 });
+		const older = publicationRow({ event_id: 3, revision: 7 });
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return {
+						rows: [seasonMetadataRow(latest, [3, 4]), seasonMetadataRow(older, [3, 4])],
+					};
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+
+		const mismatchedIdentity = JSON.parse(redis.values.get(cacheKey!)!) as {
+			latestEventId: number;
+		};
+		mismatchedIdentity.latestEventId = 3;
+		redis.values.set(cacheKey!, JSON.stringify(mismatchedIdentity));
+		const identityResult = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+		});
+		expect(identityResult.latestEventId).toBe(4);
+
+		const incompleteFreshness = JSON.parse(redis.values.get(cacheKey!)!) as {
+			freshness: unknown;
+		};
+		incompleteFreshness.freshness = null;
+		redis.values.set(cacheKey!, JSON.stringify(incompleteFreshness));
+		const freshnessResult = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+		});
+		expect(freshnessResult.freshness).not.toBeNull();
 	});
 
 	it("maps gross headline and keeps transfer cost/net separate", async () => {
@@ -1351,6 +1446,29 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(4);
 	});
 
+	it("rejects a cached H2H standing with an invalid group ID", async () => {
+		const redis = new TestRedis();
+		const publication = h2hPublicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			h2h: { standings: Array<{ groupId: number }> };
+		};
+		cached.h2h.standings[0]!.groupId = 0;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.h2h?.standings[0]?.groupId).toBe(1);
+	});
+
 	it("fails closed when a bye is represented by an Average Team", async () => {
 		const base = h2hPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -1826,6 +1944,35 @@ describe("My Tournament Review V2 repository", () => {
 		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
 		expect(result.knockout?.matches[0]?.home?.netPoints).toBeNull();
 		expect(databaseReads).toBe(4);
+	});
+
+	it("rejects a cached scored single-sided knockout without its winner", async () => {
+		const redis = new TestRedis();
+		const publication = knockoutPublicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			knockout: {
+				matches: Array<{
+					home: { netPoints: number | null };
+					away: Record<string, unknown> | null;
+				}>;
+			};
+		};
+		cached.knockout.matches[0]!.home.netPoints = 10;
+		cached.knockout.matches[0]!.away = null;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.knockout?.matches[0]?.away?.entryId).toBe(6954);
 	});
 
 	it("rejects a cached completed knockout winner with fewer net points", async () => {
@@ -3384,6 +3531,29 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(4);
 	});
 
+	it("rejects a cached Gameweek points witness for the Season view", async () => {
+		const redis = new TestRedis();
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: { aggregateWitness: { view: string } };
+		};
+		cached.points.aggregateWitness.view = "SEASON";
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.points?.aggregateWitness.view).toBe("GAMEWEEK");
+	});
+
 	it("rejects a cached paginated points aggregate that disagrees with its full-scope witness", async () => {
 		const base = publicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -3433,6 +3603,110 @@ describe("My Tournament Review V2 repository", () => {
 			points: { grossPointsTotal: number };
 		};
 		cached.points.grossPointsTotal = 94;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		expect(result.points).toMatchObject({ grossPointsTotal: 95, hasNextPage: true });
+	});
+
+	it("rejects a self-consistent but truncated Gameweek points witness", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		const rows = points.rows as Array<Record<string, unknown>>;
+		rows.push({
+			...rows[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			playerName: "Second Manager",
+			rank: 2,
+			grossPoints: 40,
+			transferCost: 0,
+			netPoints: 40,
+			tournamentScore: 40,
+			seasonGrossPoints: 40,
+			seasonNetPoints: 40,
+		});
+		points.grossPointsTotal = 95;
+		points.grossPointsAverage = 47.5;
+		points.netPointsTotal = 91;
+		points.seasonGrossPointsTotal = 140;
+		points.seasonGrossPointsAverage = 70;
+		points.seasonNetPointsTotal = 136;
+		const publication = {
+			...base,
+			row_count: 2,
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		};
+		const redis = new TestRedis();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: {
+				grossPointsTotal: number;
+				grossPointsAverage: number;
+				netPointsTotal: number;
+				seasonGrossPointsTotal: number;
+				seasonGrossPointsAverage: number;
+				seasonNetPointsTotal: number;
+				rows: Array<Record<string, unknown>>;
+				hasNextPage: boolean;
+				aggregateWitness: {
+					rowCount: number;
+					applicableRowCount: number;
+					pageLength: number;
+					grossPointsTotal: number;
+					grossPointsAverage: number;
+					netPointsTotal: number;
+					seasonGrossPointsTotal: number;
+					seasonGrossPointsAverage: number;
+					seasonNetPointsTotal: number;
+					selectedGrossPointsTotal: number;
+					selectedGrossPointsAverage: number;
+					selectedNetPointsTotal: number;
+					rows: Array<Record<string, unknown>>;
+				};
+			};
+		};
+		const witness = cached.points.aggregateWitness;
+		const firstWitnessRow = witness.rows[0]!;
+		cached.points.rows = [cached.points.rows[0]!];
+		cached.points.hasNextPage = false;
+		cached.points.grossPointsTotal = 55;
+		cached.points.grossPointsAverage = 55;
+		cached.points.netPointsTotal = 51;
+		cached.points.seasonGrossPointsTotal = 100;
+		cached.points.seasonGrossPointsAverage = 100;
+		cached.points.seasonNetPointsTotal = 96;
+		witness.rowCount = 1;
+		witness.applicableRowCount = 1;
+		witness.pageLength = 1;
+		witness.grossPointsTotal = 55;
+		witness.grossPointsAverage = 55;
+		witness.netPointsTotal = 51;
+		witness.seasonGrossPointsTotal = 100;
+		witness.seasonGrossPointsAverage = 100;
+		witness.seasonNetPointsTotal = 96;
+		witness.selectedGrossPointsTotal = 55;
+		witness.selectedGrossPointsAverage = 55;
+		witness.selectedNetPointsTotal = 51;
+		witness.rows = [firstWitnessRow];
 		redis.values.set(cacheKey!, JSON.stringify(cached));
 
 		const result = await repository.loadGameweekReview(context, {

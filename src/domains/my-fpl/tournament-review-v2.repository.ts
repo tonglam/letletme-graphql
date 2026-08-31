@@ -1346,7 +1346,11 @@ function pointsRowCache(value: unknown): value is MyTournamentReviewPointsRow {
 	);
 }
 
-function pointsCache(value: unknown): value is MyTournamentReviewPoints {
+function pointsCache(
+	value: unknown,
+	expectedView: MyTournamentReviewPointsAggregateWitness["view"],
+	expectedScope?: Pick<MyTournamentReviewScopeMeta, "rowCount" | "readySubjectCount">
+): value is MyTournamentReviewPoints {
 	if (!isRecord(value)) return false;
 	if (!Array.isArray(value.rows)) return false;
 	const witness = value.aggregateWitness;
@@ -1378,6 +1382,14 @@ function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 		return false;
 	}
 	const typedWitness = witness as unknown as MyTournamentReviewPointsAggregateWitness;
+	if (
+		typedWitness.view !== expectedView ||
+		(expectedScope !== undefined &&
+			(typedWitness.rowCount !== expectedScope.rowCount ||
+				typedWitness.applicableRowCount !== expectedScope.readySubjectCount))
+	) {
+		return false;
+	}
 	if (
 		typedWitness.rowCount <= 0 ||
 		typedWitness.applicableRowCount < 0 ||
@@ -1631,8 +1643,14 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 	const standingIds = new Set<number>();
 	const standingsValid = value.standings.every((standing) => {
 		if (!isRecord(standing)) return false;
+		const groupId = strictPositiveInt(standing.groupId);
 		const entryId = strictPositiveInt(standing.entryId);
-		if (entryId === null || standingIds.has(entryId) || !nonEmptyString(standing.entryName)) {
+		if (
+			groupId === null ||
+			entryId === null ||
+			standingIds.has(entryId) ||
+			!nonEmptyString(standing.entryName)
+		) {
 			return false;
 		}
 		standingIds.add(entryId);
@@ -1736,6 +1754,22 @@ function knockoutEntryCoverageValid(
 }
 
 function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId: unknown): boolean {
+	const sides = [home, away].filter(isRecord);
+	if (sides.length < 2) {
+		const singleSide = sides[0];
+		if (!singleSide) return winnerEntryId === null;
+		const singleSideScoreMetrics = [
+			singleSide.netPoints,
+			singleSide.goalsScored,
+			singleSide.goalsConceded,
+		];
+		// An unscored future bye has no winner yet. Once any score/goal metric
+		// is present, the sole side must be identified as the winner.
+		return (
+			singleSideScoreMetrics.every((value) => value === null) ||
+			winnerEntryId === singleSide.entryId
+		);
+	}
 	if (!isRecord(home) || !isRecord(away)) return true;
 	const homeNetPoints = home.netPoints;
 	const awayNetPoints = away.netPoints;
@@ -1817,7 +1851,7 @@ function knockoutCache(value: unknown): value is MyTournamentReviewKnockout {
 function catalogCache(value: unknown): value is MyTournamentReviewCatalog {
 	if (!isRecord(value) || !isKnownReviewState(value.state) || !nonEmptyString(value.asOf))
 		return false;
-	return (
+	if (
 		(value.viewerEntryId === null || positiveInt(value.viewerEntryId) !== null) &&
 		typeof value.adminReadAll === "boolean" &&
 		Array.isArray(value.tournaments) &&
@@ -1858,7 +1892,16 @@ function catalogCache(value: unknown): value is MyTournamentReviewCatalog {
 				isKnownReviewState(item.state)
 			);
 		})
-	);
+	) {
+		const firstState = isRecord(value.tournaments[0]) ? value.tournaments[0].state : null;
+		const derivedState = value.tournaments.some((item) => isRecord(item) && item.state === "READY")
+			? "READY"
+			: isKnownReviewState(firstState)
+				? firstState
+				: "UNAVAILABLE";
+		return value.state === derivedState;
+	}
+	return false;
 }
 
 function gameweekCache(value: unknown): value is MyTournamentGameweekReview {
@@ -1880,7 +1923,11 @@ function gameweekCache(value: unknown): value is MyTournamentGameweekReview {
 	}
 	if (!scopeMetaCache(value.scope)) return false;
 	if (value.scope.format === "POINTS") {
-		return pointsCache(value.points) && value.h2h === null && value.knockout === null;
+		return (
+			pointsCache(value.points, "GAMEWEEK", value.scope) &&
+			value.h2h === null &&
+			value.knockout === null
+		);
 	}
 	if (value.scope.format === "H2H") {
 		return h2hCache(value.h2h) && value.points === null && value.knockout === null;
@@ -1926,12 +1973,15 @@ function seasonCache(value: unknown): value is MyTournamentSeasonReview {
 	if (
 		positiveInt(value.latestEventId) === null ||
 		value.latestRevision === null ||
-		value.format === null
+		value.format === null ||
+		!freshnessCache(value.freshness) ||
+		eventIds.length === 0 ||
+		Number(value.latestEventId) !== Number(eventIds.at(-1))
 	) {
 		return false;
 	}
 	if (value.format === "POINTS") {
-		return pointsCache(value.points) && value.h2h === null && value.knockout === null;
+		return pointsCache(value.points, "SEASON") && value.h2h === null && value.knockout === null;
 	}
 	if (value.format === "H2H") {
 		return h2hCache(value.h2h) && value.points === null && value.knockout === null;
@@ -1957,7 +2007,8 @@ function statusCache(value: unknown): value is MyTournamentReviewStatus {
 		return false;
 	}
 	let previousEventId = 0;
-	return value.events.every((event) => {
+	let latestAvailableEventId: number | null = null;
+	const eventsValid = value.events.every((event) => {
 		if (!isRecord(event)) return false;
 		const eventId = positiveInt(event.eventId);
 		const revision =
@@ -1989,8 +2040,15 @@ function statusCache(value: unknown): value is MyTournamentReviewStatus {
 			return false;
 		}
 		previousEventId = eventId;
+		if (revision !== null) latestAvailableEventId = eventId;
 		return true;
 	});
+	return (
+		eventsValid &&
+		(value.latestAvailableEventId === null
+			? latestAvailableEventId === null
+			: Number(value.latestAvailableEventId) === latestAvailableEventId)
+	);
 }
 
 function cacheDecoder<T>(value: unknown, validate: (value: unknown) => boolean): T | null {
