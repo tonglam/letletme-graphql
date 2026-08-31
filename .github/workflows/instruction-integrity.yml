@@ -576,7 +576,7 @@ jobs:
 
           validator = load_tree(
               Path(os.environ["TARGET_VALIDATOR"]),
-              {"parse_yaml_mapping", "validate_asset", "check_agents_claude_consistency", "main", "has_secret", "has_secret_bytes", "has_locked_skill_secret", "has_locked_skill_secret_bytes", "skill_tree_digest", "validate_locked_skill", "_has_private_ip_literal", "_looks_like_placeholder", "_validate_skill_inventory"},
+              {"parse_yaml_mapping", "validate_asset", "check_agents_claude_consistency", "main", "has_secret", "has_secret_bytes", "has_locked_skill_secret", "has_locked_skill_secret_bytes", "skill_tree_digest", "validate_locked_skill", "_has_private_ip_literal", "_looks_like_placeholder", "_validate_skill_inventory", "_validate_claude_skill_aliases"},
           )
           provisioner_path = Path(os.environ["TARGET_PROVISIONER"])
           provisioner = load_tree(provisioner_path, {"load_manifest", "verify_registry", "tree_digest", "main"})
@@ -1140,29 +1140,65 @@ jobs:
           def check_has_secret_shape(node):
               """Require secret-detection results to reach a failure return."""
 
+              def static_truth(expression):
+                  """Evaluate only Python expressions whose truth is static."""
+
+                  if isinstance(expression, ast.Constant):
+                      return bool(expression.value)
+                  if isinstance(expression, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+                      elements = expression.elts if not isinstance(expression, ast.Dict) else expression.keys
+                      return bool(elements)
+                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                      value = static_truth(expression.operand)
+                      return None if value is None else not value
+                  if isinstance(expression, ast.BoolOp):
+                      values = [static_truth(value) for value in expression.values]
+                      if isinstance(expression.op, ast.And):
+                          if any(value is False for value in values):
+                              return False
+                          return True if all(value is True for value in values) else None
+                      if any(value is True for value in values):
+                          return True
+                      return False if all(value is False for value in values) else None
+                  if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
+                      try:
+                          left = ast.literal_eval(expression.left)
+                          right = ast.literal_eval(expression.comparators[0])
+                      except (ValueError, TypeError, SyntaxError):
+                          return None
+                      operation = expression.ops[0]
+                      try:
+                          if isinstance(operation, ast.Eq):
+                              return left == right
+                          if isinstance(operation, ast.NotEq):
+                              return left != right
+                          if isinstance(operation, ast.Is):
+                              return left is right
+                          if isinstance(operation, ast.IsNot):
+                              return left is not right
+                          if isinstance(operation, ast.Lt):
+                              return left < right
+                          if isinstance(operation, ast.LtE):
+                              return left <= right
+                          if isinstance(operation, ast.Gt):
+                              return left > right
+                          if isinstance(operation, ast.GtE):
+                              return left >= right
+                          if isinstance(operation, ast.In):
+                              return left in right
+                          if isinstance(operation, ast.NotIn):
+                              return left not in right
+                      except (TypeError, ValueError):
+                          return None
+                  return None
+
               def statically_false(expression):
                   """Reject a secret pre-check hidden behind constant-false logic."""
 
-                  if isinstance(expression, ast.Constant):
-                      return expression.value is False
-                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
-                      return statically_true(expression.operand)
-                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.And):
-                      return any(statically_false(value) for value in expression.values)
-                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.Or):
-                      return all(statically_false(value) for value in expression.values)
-                  return False
+                  return static_truth(expression) is False
 
               def statically_true(expression):
-                  if isinstance(expression, ast.Constant):
-                      return expression.value is True
-                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
-                      return statically_false(expression.operand)
-                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.And):
-                      return all(statically_true(value) for value in expression.values)
-                  if isinstance(expression, ast.BoolOp) and isinstance(expression.op, ast.Or):
-                      return any(statically_true(value) for value in expression.values)
-                  return False
+                  return static_truth(expression) is True
 
               def calls_receiver(expression, operation, receiver):
                   return any(
@@ -1212,6 +1248,102 @@ jobs:
               if not placeholder_check:
                   raise SystemExit("approved validator has_secret does not propagate credential-pattern results")
 
+          def check_locked_skill_secret_shape(node):
+              """Keep locked-skill secret detection positively reachable."""
+
+              def static_truth(expression):
+                  if isinstance(expression, ast.Constant):
+                      return bool(expression.value)
+                  if isinstance(expression, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+                      elements = expression.elts if not isinstance(expression, ast.Dict) else expression.keys
+                      return bool(elements)
+                  if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                      value = static_truth(expression.operand)
+                      return None if value is None else not value
+                  if isinstance(expression, ast.BoolOp):
+                      values = [static_truth(value) for value in expression.values]
+                      if isinstance(expression.op, ast.And):
+                          if any(value is False for value in values):
+                              return False
+                          return True if all(value is True for value in values) else None
+                      if any(value is True for value in values):
+                          return True
+                      return False if all(value is False for value in values) else None
+                  if isinstance(expression, ast.Compare) and len(expression.ops) == 1:
+                      try:
+                          left = ast.literal_eval(expression.left)
+                          right = ast.literal_eval(expression.comparators[0])
+                      except (ValueError, TypeError, SyntaxError):
+                          return None
+                      operation = expression.ops[0]
+                      try:
+                          if isinstance(operation, ast.Eq):
+                              return left == right
+                          if isinstance(operation, ast.NotEq):
+                              return left != right
+                          if isinstance(operation, ast.Is):
+                              return left is right
+                          if isinstance(operation, ast.IsNot):
+                              return left is not right
+                          if isinstance(operation, ast.Lt):
+                              return left < right
+                          if isinstance(operation, ast.LtE):
+                              return left <= right
+                          if isinstance(operation, ast.Gt):
+                              return left > right
+                          if isinstance(operation, ast.GtE):
+                              return left >= right
+                          if isinstance(operation, ast.In):
+                              return left in right
+                          if isinstance(operation, ast.NotIn):
+                              return left not in right
+                      except (TypeError, ValueError):
+                          return None
+                  return None
+
+              def statically_false(expression):
+                  return static_truth(expression) is False
+
+              def calls_secret_search(expression):
+                  return any(
+                      isinstance(item, ast.Call)
+                      and isinstance(item.func, ast.Attribute)
+                      and item.func.attr == "search"
+                      and (
+                          (isinstance(item.func.value, ast.Name) and item.func.value.id == "PEM_RE")
+                          or (
+                              isinstance(item.func.value, ast.Subscript)
+                              and isinstance(item.func.value.value, ast.Name)
+                              and item.func.value.value.id == "SECRET_VALUE_RES"
+                          )
+                      )
+                      for item in ast.walk(expression)
+                  )
+
+              def returns_true(statements):
+                  return any(
+                      isinstance(item, ast.Return)
+                      and isinstance(item.value, ast.Constant)
+                      and item.value.value is True
+                      for statement in statements
+                      for item in ast.walk(statement)
+                  )
+
+              positive_lines = []
+              for branch in ast.walk(node):
+                  if (
+                      isinstance(branch, ast.If)
+                      and not statically_false(branch.test)
+                      and calls_secret_search(branch.test)
+                      and returns_true(branch.body)
+                  ):
+                      positive_lines.append(branch.lineno)
+              if not positive_lines:
+                  raise SystemExit("approved validator has_locked_skill_secret lacks a positive detection path")
+              early_terminators = direct_terminator_lines(node.body)
+              if early_terminators and min(early_terminators) < min(positive_lines):
+                  raise SystemExit("approved validator has_locked_skill_secret can terminate before detection")
+
           def check_validator_shape(tree):
               parse_yaml = function_node(tree, "parse_yaml_mapping")
               validate = function_node(tree, "validate_asset")
@@ -1222,6 +1354,7 @@ jobs:
                   "_validate_instruction_file": function_node(tree, "_validate_instruction_file"),
                   "_validate_global_manifest": function_node(tree, "_validate_global_manifest"),
                   "_validate_skill_inventory": function_node(tree, "_validate_skill_inventory"),
+                  "_validate_claude_skill_aliases": function_node(tree, "_validate_claude_skill_aliases"),
                   "validate_locked_skill": function_node(tree, "validate_locked_skill"),
                   "has_secret": function_node(tree, "has_secret"),
                   "has_secret_bytes": function_node(tree, "has_secret_bytes"),
@@ -1242,6 +1375,7 @@ jobs:
                       "_validate_instruction_file",
                       "_validate_global_manifest",
                       "_validate_skill_inventory",
+                      "_validate_claude_skill_aliases",
                       "validate_locked_skill",
                       "has_secret",
                       "has_secret_bytes",
@@ -1254,6 +1388,7 @@ jobs:
               if rebound:
                   raise SystemExit(f"approved validator rebinds protected names: {', '.join(sorted(rebound))}")
               check_has_secret_shape(helper_nodes["has_secret"])
+              check_locked_skill_secret_shape(helper_nodes["has_locked_skill_secret"])
               secret_bytes = helper_nodes["has_secret_bytes"]
               json_operations = {
                   item.func.attr
@@ -1267,7 +1402,7 @@ jobs:
                   raise SystemExit("approved validator has_secret_bytes must normalize decoded JSON")
               required_calls = {
                   "parse_yaml_mapping": (parse_yaml, {"_parse_scalar"}),
-                  "validate_asset": (validate, {"validate_skill", "validate_locked_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory"}),
+                  "validate_asset": (validate, {"validate_skill", "validate_locked_skill", "_validate_instruction_file", "_validate_global_manifest", "check_agents_claude_consistency", "_validate_skill_inventory", "_validate_claude_skill_aliases"}),
                   "main": (main, {"validate_asset"}),
               }
               for label, (node, required_names) in required_calls.items():
@@ -2268,7 +2403,7 @@ jobs:
             raise "instruction protection step has an unexpected condition" unless protection_step["if"].to_s.strip == "env.GOVERNANCE_UPDATE_APPROVED != 'true'"
             raise "instruction protection step may not ignore failures" if protection_step.key?("continue-on-error")
             protection_run = protection_step["run"].to_s
-            ["def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit", "AGENTS.md", "(\".claude\", \"agents\")", "(\".claude\", \"rules\")", "unmanaged_prefixes", "_normalize_reference_target"].each do |needle|
+            ["def check_claude_skill_aliases", "check_claude_skill_aliases(trusted_root, paths)", "def surface", "trusted_files = surface", "target_files = surface", "hashlib.sha256", "raise SystemExit", "AGENTS.md", "(\".claude\", \"agents\")", "(\".claude\", \"rules\")", "unmanaged_prefixes", "_normalize_reference_target"].each do |needle|
               raise "instruction protection step is incomplete: #{needle}" unless protection_run.include?(needle)
             end
             protection_shell_lines = protection_run.split("python3 - <<'PY'", 2).first.lines.map(&:strip).reject(&:empty?)
@@ -2295,15 +2430,54 @@ jobs:
           sys.path.insert(0, str((trusted_root / ".codex").resolve()))
           from validate_instructions import REFERENCE_TEXT_SUFFIXES, _is_external_target, _is_within, _markdown_targets, _normalize_reference_target
 
+          def check_claude_skill_aliases(root, raw_paths):
+              allowed = {
+                  Path(str(raw)).parts[2]
+                  for raw in raw_paths
+                  if len(Path(str(raw)).parts) >= 3
+                  and Path(str(raw)).parts[:2] == (".agents", "skills")
+              }
+              lock_path = root / "skills-lock.json"
+              if lock_path.is_file():
+                  lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                  skills = lock.get("skills", {})
+                  if isinstance(skills, dict):
+                      allowed.update(str(name) for name in skills)
+              alias_root = root / ".claude" / "skills"
+              if not alias_root.exists() and not alias_root.is_symlink():
+                  return
+              if alias_root.is_symlink():
+                  raise SystemExit(f"Claude skill alias root may not be a symlink: {alias_root}")
+              for alias in alias_root.iterdir():
+                  if alias.is_symlink():
+                      expected = root / ".agents" / "skills" / alias.name
+                      if alias.name not in allowed:
+                          raise SystemExit(f"Claude skill alias is not contracted or lock-listed: {alias}")
+                      try:
+                          target = alias.resolve(strict=True)
+                          expected_target = expected.resolve(strict=True)
+                      except OSError as exc:
+                          raise SystemExit(f"Claude skill alias target is unavailable: {alias}: {exc}") from exc
+                      if target != expected_target or not expected_target.is_dir():
+                          raise SystemExit(f"Claude skill alias must target {expected}: {alias}")
+
           def surface(root, raw_paths):
               files = {}
               paths = {Path(raw) for raw in raw_paths}
               # Every repository-owned scoped entrypoint is governed, while
               # installer-owned plugin skill mounts remain preserved inputs.
-              unmanaged_prefixes = {(".agents", "skills"), (".claude", "skills")}
+              unmanaged_prefixes = {(".agents", "skills")}
               for item in root.rglob("*"):
                   relative = item.relative_to(root)
                   if any(part in {".git", "node_modules", ".next"} for part in relative.parts):
+                      continue
+                  if (
+                      len(relative.parts) >= 3
+                      and relative.parts[:2] == (".claude", "skills")
+                      and (root / Path(*relative.parts[:3])).is_symlink()
+                  ):
+                      # Legacy Claude plugin aliases are symlinks and remain
+                      # outside this repository-owned governance surface.
                       continue
                   if any(
                       len(relative.parts) >= len(prefix) and relative.parts[: len(prefix)] == prefix
@@ -2313,6 +2487,8 @@ jobs:
                   if item.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
                       paths.add(relative)
                   if len(relative.parts) >= 3 and relative.parts[:2] in {(".claude", "agents"), (".claude", "rules")} and item.suffix.casefold() == ".md":
+                      paths.add(relative)
+                  if len(relative.parts) >= 4 and relative.parts[:2] == (".claude", "skills") and item.name == "SKILL.md":
                       paths.add(relative)
               for relative in sorted(paths, key=str):
                   if relative.is_absolute() or ".." in relative.parts:
@@ -2389,6 +2565,8 @@ jobs:
               return files
 
           paths = list(contract.get("required_agents", [])) + list(contract.get("required_skills", []))
+          check_claude_skill_aliases(trusted_root, paths)
+          check_claude_skill_aliases(target_root, paths)
           trusted_files = surface(trusted_root, paths)
           target_files = surface(target_root, paths)
           if set(trusted_files) != set(target_files):

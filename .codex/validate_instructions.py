@@ -36,6 +36,15 @@ REFERENCE_DEF_RE = re.compile(
 REFERENCE_TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".txt", ".text", ".rst"}
 URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:", re.IGNORECASE)
 PEM_RE = re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")
+BASIC_AUTH_RE = re.compile(r"(?i)\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]{8,}={0,2})")
+CLI_CREDENTIAL_RE = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_-])(?:--(?:password|pass|token|api[-_]?key|access[-_]?token)"
+    r"|-[aA])(?:=|\s+)([^\s`<>#]+)"
+)
+AWS_CREDENTIAL_ARGUMENT_RE = re.compile(
+    r"(?ix)\baws\s+configure\s+set\s+(?:aws[_-])?(?:secret[_-]?access[_-]?key|access[_-]?key|session[_-]?token)"
+    r"\s+([^\s`<>#]+)"
+)
 IP_LITERAL_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:\[[0-9A-Fa-f:.]+\]|[0-9]{1,3}(?:\.[0-9]{1,3}){3}|"
     r"[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7})(?![A-Za-z0-9_])"
@@ -53,7 +62,9 @@ SECRET_VALUE_RES = (
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])+(?:secret|credential)(?:[_-](?:key|token|value))?["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r'''(?ix)(?<![A-Za-z0-9_])["']?(?:[A-Za-z0-9]+[_-])*(?:notification[_ -]?api[_ -]?token|notification[_ -]?token|notifier[_ -]?token|metrics[_ -]?token|telegram[_ -]?bot[_ -]?token|session[_ -]?(?:cookie|token)|cookie)["']?\s*[:=]\s*((?:"(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[^\n`<>#]+))'''),
     re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+([A-Za-z0-9._~+/=-]{8,})"),
-    re.compile(r"(?i)\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]{8,}={0,2})"),
+    BASIC_AUTH_RE,
+    CLI_CREDENTIAL_RE,
+    AWS_CREDENTIAL_ARGUMENT_RE,
     re.compile(r"(?i)\b(?:postgres(?:ql)?|mysql|redis(?:s)?|mongodb(?:\+srv)?):\/\/[^\s/@:]*:([^\s/@]+)@"),
     # HTTP(S) and Git userinfo can carry a password/token even when the host
     # is public. Keep the username optional so ``https://:secret@host`` is
@@ -132,7 +143,6 @@ CANONICAL_CONFIG_COMMIT = "312eaf56264f65bcc74fd7b81d8981a3517eca02"
 IGNORED_PARTS = {".git", "node_modules", ".next"}
 UNMANAGED_INSTRUCTION_PREFIXES = {
     (".agents", "skills"),
-    (".claude", "skills"),
 }
 
 
@@ -377,7 +387,12 @@ def _is_unmanaged_plugin_skill_path(path: Path, repo: Path) -> bool:
         relative = path.absolute().relative_to(repo.absolute())
     except ValueError:
         return False
-    return len(relative.parts) >= 2 and relative.parts[:2] == (".claude", "skills")
+    if len(relative.parts) < 3 or relative.parts[:2] != (".claude", "skills"):
+        return False
+    # Keep the narrow legacy exemption for installer-created symlink aliases;
+    # a regular Claude skill directory is repository-owned and must be
+    # discovered and governed like every other instruction entrypoint.
+    return (repo / ".claude" / "skills" / relative.parts[2]).is_symlink()
 
 
 def resolve_path(
@@ -1037,10 +1052,18 @@ LOCKED_CREDENTIAL_KEY_RE = re.compile(
 def has_locked_skill_secret(text: str) -> bool:
     """Scan installed plugin content without enforcing repository skill metadata."""
 
-    if PEM_RE.search(text) or SECRET_VALUE_RES[-1].search(text):
+    if (
+        PEM_RE.search(text)
+        or BASIC_AUTH_RE.search(text)
+        or CLI_CREDENTIAL_RE.search(text)
+        or AWS_CREDENTIAL_ARGUMENT_RE.search(text)
+        or SECRET_VALUE_RES[-1].search(text)
+    ):
         return True
     for pattern in SECRET_VALUE_RES[:-1]:
         for match in pattern.finditer(text):
+            if pattern in {BASIC_AUTH_RE, CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE}:
+                return True
             if not LOCKED_CREDENTIAL_KEY_RE.search(match.group(0)):
                 continue
             value = match.group(1) if match.lastindex else match.group(0)
@@ -1065,24 +1088,29 @@ def has_secret_bytes(raw: bytes) -> bool:
             # them. Scan a normalized serialization as well so an escaped
             # ``passw\\u006frd`` key cannot hide a literal credential.
             try:
-                pairs: list[tuple[str, Any]] = []
-
-                def collect_json_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-                    pairs.extend(items)
-                    return dict(items)
-
-                parsed = json.loads(decoded, object_pairs_hook=collect_json_pairs)
-            except (TypeError, ValueError, json.JSONDecodeError):
+                # Keep objects as tuples of pairs so duplicate keys remain
+                # visible without retaining or serializing every descendant
+                # subtree for every ancestor pair.
+                parsed = json.loads(decoded, object_pairs_hook=lambda items: tuple(items))
+            except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
                 pass
             else:
-                candidates.append(json.dumps(parsed, ensure_ascii=False))
-                # Scan each decoded pair before duplicate keys are collapsed;
-                # otherwise an innocuous later value can hide a credential
-                # carried by an earlier duplicate key.
-                candidates.extend(
-                    json.dumps({key: value}, ensure_ascii=False)
-                    for key, value in pairs
-                )
+                if has_secret(json.dumps(parsed, ensure_ascii=False)):
+                    return True
+                pending = [(parsed, None)]
+                while pending:
+                    current, field = pending.pop()
+                    if isinstance(current, tuple):
+                        for key, value in reversed(current):
+                            pending.append((value, key))
+                    elif isinstance(current, list):
+                        for value in reversed(current):
+                            pending.append((value, field))
+                    elif field is not None:
+                        if has_secret(f'"{field}": {json.dumps(current, ensure_ascii=False)}'):
+                            return True
+                    elif isinstance(current, str) and has_secret(current):
+                        return True
         except UnicodeDecodeError:
             continue
     return any(has_secret(candidate) for candidate in candidates)
@@ -1099,20 +1127,25 @@ def has_locked_skill_secret_bytes(raw: bytes) -> bool:
             continue
         candidates.append(decoded)
         try:
-            pairs: list[tuple[str, Any]] = []
-
-            def collect_json_pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-                pairs.extend(items)
-                return dict(items)
-
-            parsed = json.loads(decoded, object_pairs_hook=collect_json_pairs)
-        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = json.loads(decoded, object_pairs_hook=lambda items: tuple(items))
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             continue
-        candidates.append(json.dumps(parsed, ensure_ascii=False))
-        candidates.extend(
-            json.dumps({key: value}, ensure_ascii=False)
-            for key, value in pairs
-        )
+        if has_locked_skill_secret(json.dumps(parsed, ensure_ascii=False)):
+            return True
+        pending = [(parsed, None)]
+        while pending:
+            current, field = pending.pop()
+            if isinstance(current, tuple):
+                for key, value in reversed(current):
+                    pending.append((value, key))
+            elif isinstance(current, list):
+                for value in reversed(current):
+                    pending.append((value, field))
+            elif field is not None:
+                if has_locked_skill_secret(f'"{field}": {json.dumps(current, ensure_ascii=False)}'):
+                    return True
+            elif isinstance(current, str) and has_locked_skill_secret(current):
+                return True
     return any(has_locked_skill_secret(candidate) for candidate in candidates)
 
 
@@ -1277,24 +1310,58 @@ def _validate_skill_inventory(repo: Path, skills: list[Any], errors: list[str]) 
     return locked
 
 
-def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
+def _instruction_paths(
+    repo: Path,
+    *,
+    include_discovery: bool,
+    contracted_skill_names: set[str] | None = None,
+) -> list[Path]:
     if not include_discovery:
         return []
+    contracted_skill_names = contracted_skill_names or set()
     paths: set[Path] = set()
     # Discover repository-owned scoped entrypoints at every depth.  Installed
     # plugin/global skill trees are preserved inputs; their nested instruction
     # files are not silently promoted into this repository's contract.  The
     # contract-listed repository skills are checked separately by validate_skill.
+    def should_descend(relative: Path) -> bool:
+        parts = relative.parts
+        if len(parts) >= 2 and parts[:2] == (".agents", "skills"):
+            return len(parts) < 3 or parts[2] in contracted_skill_names
+        return not _is_unmanaged_instruction_path(relative)
+
     for root, directories, files in os.walk(repo, followlinks=False):
         root_path = Path(root)
         relative_root = root_path.relative_to(repo)
-        if _is_unmanaged_instruction_path(relative_root):
+        if relative_root.parts == (".agents", "skills") and not contracted_skill_names:
+            directories[:] = []
+            continue
+        if len(relative_root.parts) >= 3 and relative_root.parts[:2] == (".agents", "skills"):
+            if relative_root.parts[2] not in contracted_skill_names:
+                directories[:] = []
+                continue
+        if len(relative_root.parts) >= 2 and relative_root.parts[:2] == (".claude", "skills"):
+            # Skill trees are handled as entrypoints below.  Do not let their
+            # nested helper files become unrelated instruction discoveries.
+            directories[:] = []
+            continue
+        if _is_unmanaged_instruction_path(relative_root) and not (
+            (
+                relative_root.parts == (".agents", "skills")
+                and contracted_skill_names
+            )
+            or (
+                len(relative_root.parts) >= 3
+                and relative_root.parts[:2] == (".agents", "skills")
+                and relative_root.parts[2] in contracted_skill_names
+            )
+        ):
             directories[:] = []
             continue
         directories[:] = [
             name
             for name in directories
-            if not _is_unmanaged_instruction_path(relative_root / name)
+            if should_descend(relative_root / name)
         ]
         for name in files:
             if name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}:
@@ -1305,7 +1372,55 @@ def _instruction_paths(repo: Path, *, include_discovery: bool) -> list[Path]:
                 if path.is_file() or path.is_symlink():
                     if not _is_unmanaged_instruction_path(path.relative_to(repo)):
                         paths.add(path.absolute())
+    claude_skills_root = repo / ".claude" / "skills"
+    if claude_skills_root.is_dir():
+        for skill in claude_skills_root.iterdir():
+            if skill.is_symlink() or not skill.is_dir():
+                continue
+            entry = skill / "SKILL.md"
+            if entry.is_file():
+                paths.add(entry.absolute())
     return sorted(paths)
+
+
+def _validate_claude_skill_aliases(
+    repo: Path,
+    allowed_skill_names: set[str],
+    errors: list[str],
+) -> None:
+    """Validate legacy Claude skill symlinks without exempting retargets."""
+
+    root = repo / ".claude" / "skills"
+    if not root.exists() and not root.is_symlink():
+        return
+    if root.is_symlink():
+        errors.append(f"{root}: Claude skill alias root may not be a symlink")
+        return
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        errors.append(f"{root}: cannot inspect Claude skill aliases: {exc}")
+        return
+    for alias in children:
+        if alias.is_symlink():
+            expected = repo / ".agents" / "skills" / alias.name
+            if alias.name not in allowed_skill_names:
+                errors.append(f"{alias}: Claude skill alias is not contracted or lock-listed")
+                continue
+            try:
+                target = alias.resolve(strict=True)
+                expected_target = expected.resolve(strict=True)
+            except OSError as exc:
+                errors.append(f"{alias}: Claude skill alias target is unavailable: {exc}")
+                continue
+            if target != expected_target or not expected_target.is_dir():
+                errors.append(f"{alias}: Claude skill alias must target {expected}")
+            continue
+        if not alias.is_dir():
+            errors.append(f"{alias}: Claude skill entry must be a directory or validated symlink")
+            continue
+        if not (alias / "SKILL.md").is_file():
+            errors.append(f"{alias}: regular Claude skill directory must contain SKILL.md")
 
 
 def _validate_instruction_file(
@@ -1777,13 +1892,33 @@ def validate_asset(
             if path.exists() or path.is_symlink():
                 validate_locked_skill(path, policy, errors, expected_hash=locked_skills[name])
 
-        discovered = _instruction_paths(repo, include_discovery=asset.get("kind") != "instruction-system")
+        contracted_skill_names = {
+            Path(str(raw)).parts[2]
+            for raw in skills
+            if len(Path(str(raw)).parts) >= 3
+            and Path(str(raw)).parts[:2] == (".agents", "skills")
+        }
+        _validate_claude_skill_aliases(
+            repo,
+            contracted_skill_names | set(locked_skills),
+            errors,
+        )
+        discovered = _instruction_paths(
+            repo,
+            include_discovery=asset.get("kind") != "instruction-system",
+            contracted_skill_names=contracted_skill_names,
+        )
         discovered_set = set(discovered)
         for path in discovered:
             relative_parts = path.relative_to(repo).parts
             governed_entrypoint = path.name == "CLAUDE.md" or (
                 len(relative_parts) >= 3
                 and relative_parts[:2] in {(".claude", "agents"), (".claude", "rules")}
+            ) or (
+                len(relative_parts) >= 4
+                and relative_parts[:2] == (".agents", "skills")
+                and relative_parts[2] in contracted_skill_names
+                and path.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}
             )
             _validate_instruction_file(
                 path,
@@ -1802,6 +1937,11 @@ def validate_asset(
             ) or (
                 len(relative_parts) >= 3
                 and relative_parts[:2] == (".claude", "rules")
+            ) or (
+                len(relative_parts) >= 4
+                and relative_parts[:2] == (".agents", "skills")
+                and relative_parts[2] in contracted_skill_names
+                and path.name in {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}
             ):
                 required_paths.add(path)
         for path in sorted(discovered_set - required_paths):
