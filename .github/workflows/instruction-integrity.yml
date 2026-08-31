@@ -1659,7 +1659,7 @@ jobs:
                   "_validate_claude_skill_aliases": set(),
                   "has_secret_bytes": {"has_secret"},
                   "has_locked_skill_secret_bytes": {"has_locked_skill_secret"},
-                  "has_locked_skill_secret": set(),
+                  "has_locked_skill_secret": {"_looks_like_placeholder"},
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
