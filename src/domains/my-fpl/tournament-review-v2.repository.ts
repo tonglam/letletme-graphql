@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
+import { DateTimeResolver } from "graphql-scalars";
 
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
@@ -168,6 +169,17 @@ export type MyTournamentReviewH2H = {
 	standings: MyTournamentReviewH2HStanding[];
 	nextCursor: string | null;
 	hasNextPage: boolean;
+	/** Full-scope fixture/standing identity witness retained for cache validation. */
+	coverageWitness: MyTournamentReviewH2HCoverageWitness;
+};
+
+type MyTournamentReviewH2HCoverageWitness = {
+	matchIdentities: string[];
+	matchParticipantIdentities: string[];
+	standingIdentities: string[];
+	pageOffset: number;
+	pageMatchParticipantIdentities: string[];
+	pageStandingIdentities: string[];
 };
 
 export type MyTournamentReviewKnockoutSide = {
@@ -521,6 +533,8 @@ type SeasonMetadataRow = {
 	content_sha256: string | null;
 	event_data_checked_at: Date | string | null;
 	published_at: Date | string | null;
+	row_count: number | null;
+	ready_subject_count: number | null;
 	obligation_format: string | null;
 	obligation_state: string | null;
 	finalized_event_ids: unknown;
@@ -653,7 +667,9 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 		       publication.format,
 		       head.content_sha256,
 		       publication.event_data_checked_at,
-		       publication.published_at
+		       publication.published_at,
+		       publication.row_count,
+		       publication.ready_subject_count
 		FROM tournament_scope tournament
 		JOIN competition.tournament_review_heads head
 		  ON head.season_id = tournament.season_id
@@ -687,6 +703,8 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 	       coherent_heads.content_sha256,
 	       coherent_heads.event_data_checked_at,
 	       coherent_heads.published_at,
+	       coherent_heads.row_count,
+	       coherent_heads.ready_subject_count,
 	       obligations.obligation_format,
 	       obligations.obligation_state,
 	       finalized_window.finalized_event_ids
@@ -919,6 +937,16 @@ export const MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 				pgType: "text",
 			},
 			{ relation: "fpl.events", column: "event_id", pgType: "integer" },
+			{
+				relation: "competition.tournament_review_publications",
+				column: "row_count",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.tournament_review_publications",
+				column: "ready_subject_count",
+				pgType: "integer",
+			},
 		],
 	},
 	{
@@ -1585,19 +1613,86 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 	if (!isRecord(value) || !Array.isArray(value.matches) || !Array.isArray(value.standings)) {
 		return false;
 	}
+	const coverageWitness = value.coverageWitness;
+	const isCoverageMatchIdentity = (candidate: unknown): candidate is string => {
+		if (typeof candidate !== "string") return false;
+		try {
+			const parsed: unknown = JSON.parse(candidate);
+			return (
+				Array.isArray(parsed) &&
+				parsed.length === 2 &&
+				strictPositiveInt(parsed[0]) !== null &&
+				nonEmptyString(parsed[1]) &&
+				JSON.stringify(parsed) === candidate
+			);
+		} catch {
+			return false;
+		}
+	};
+	const isCoverageIdentity = (candidate: unknown): candidate is string => {
+		if (typeof candidate !== "string") return false;
+		const [groupId, entryId, ...rest] = candidate.split(":");
+		return (
+			rest.length === 0 &&
+			strictPositiveInt(Number(groupId)) !== null &&
+			strictPositiveInt(Number(entryId)) !== null &&
+			candidate === `${Number(groupId)}:${Number(entryId)}`
+		);
+	};
+	if (
+		!isRecord(coverageWitness) ||
+		!Array.isArray(coverageWitness.matchIdentities) ||
+		!Array.isArray(coverageWitness.matchParticipantIdentities) ||
+		!Array.isArray(coverageWitness.standingIdentities) ||
+		!Array.isArray(coverageWitness.pageMatchParticipantIdentities) ||
+		!Array.isArray(coverageWitness.pageStandingIdentities) ||
+		!safeInteger(coverageWitness.pageOffset) ||
+		coverageWitness.pageOffset < 0 ||
+		!coverageWitness.matchIdentities.every(isCoverageMatchIdentity) ||
+		!coverageWitness.matchParticipantIdentities.every(isCoverageIdentity) ||
+		!coverageWitness.standingIdentities.every(isCoverageIdentity) ||
+		!coverageWitness.pageMatchParticipantIdentities.every(isCoverageIdentity) ||
+		!coverageWitness.pageStandingIdentities.every(isCoverageIdentity)
+	) {
+		return false;
+	}
+	const witnessMatchIdentities = new Set(coverageWitness.matchIdentities);
+	const witnessParticipantIdentities = new Set(coverageWitness.matchParticipantIdentities);
+	const witnessStandingIdentities = new Set(coverageWitness.standingIdentities);
+	if (
+		witnessMatchIdentities.size !== coverageWitness.matchIdentities.length ||
+		witnessParticipantIdentities.size !== coverageWitness.matchParticipantIdentities.length ||
+		witnessStandingIdentities.size !== coverageWitness.standingIdentities.length ||
+		witnessMatchIdentities.size === 0 ||
+		witnessParticipantIdentities.size !== witnessStandingIdentities.size ||
+		[...witnessParticipantIdentities].some(
+			(identity) => !witnessStandingIdentities.has(identity)
+		) ||
+		coverageWitness.pageOffset >
+			Math.max(coverageWitness.matchIdentities.length, coverageWitness.standingIdentities.length) ||
+		coverageWitness.pageOffset + value.matches.length > coverageWitness.matchIdentities.length ||
+		coverageWitness.pageOffset + value.standings.length > coverageWitness.standingIdentities.length
+	) {
+		return false;
+	}
 	// A continuation page can legitimately contain standings only when the
 	// match collection is shorter than the standings collection.  It is still
 	// invalid for both collections to be empty.
 	if (value.matches.length === 0 && value.standings.length === 0) return false;
 	const matchIdentities = new Set<string>();
+	const pageMatchIdentities: string[] = [];
 	const matchParticipantIdentities = new Set<string>();
+	const pageMatchParticipantIdentities: string[] = [];
 	const matchesValid = value.matches.every((match) => {
 		if (!isRecord(match)) return false;
 		const groupId = strictPositiveInt(match.groupId);
 		const identity =
-			groupId !== null && typeof match.matchId === "string" ? `${groupId}:${match.matchId}` : null;
+			groupId !== null && typeof match.matchId === "string"
+				? JSON.stringify([groupId, match.matchId])
+				: null;
 		if (identity === null || matchIdentities.has(identity)) return false;
 		matchIdentities.add(identity);
+		pageMatchIdentities.push(identity);
 		const home = match.home;
 		const away = match.away;
 		const homeIsAverage = isRecord(home) && home.isAverage === true;
@@ -1627,6 +1722,7 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			const participantIdentity = `${groupId}:${entryId}`;
 			if (matchParticipantIdentities.has(participantIdentity)) return false;
 			matchParticipantIdentities.add(participantIdentity);
+			pageMatchParticipantIdentities.push(participantIdentity);
 			return true;
 		});
 		return (
@@ -1641,6 +1737,8 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 		);
 	});
 	const standingIds = new Set<number>();
+	const standingIdentities = new Set<string>();
+	const pageStandingIdentities: string[] = [];
 	const standingsValid = value.standings.every((standing) => {
 		if (!isRecord(standing)) return false;
 		const groupId = strictPositiveInt(standing.groupId);
@@ -1654,6 +1752,9 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			return false;
 		}
 		standingIds.add(entryId);
+		const identity = `${groupId}:${entryId}`;
+		standingIdentities.add(identity);
+		pageStandingIdentities.push(identity);
 		const rank = standing.rank;
 		const played = standing.played;
 		const won = standing.won;
@@ -1680,11 +1781,41 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			[pointsFor, pointsAgainst].every((candidate) => safeInteger(candidate))
 		);
 	});
+	const arraysEqual = (left: string[], right: string[]): boolean =>
+		left.length === right.length && left.every((value, index) => value === right[index]);
+	const participantCoverageValid =
+		[...matchParticipantIdentities].every((identity) =>
+			witnessParticipantIdentities.has(identity)
+		) && [...standingIdentities].every((identity) => witnessStandingIdentities.has(identity));
+	const pageCoverageValid =
+		arraysEqual(
+			pageMatchIdentities,
+			coverageWitness.matchIdentities.slice(
+				coverageWitness.pageOffset,
+				coverageWitness.pageOffset + value.matches.length
+			)
+		) &&
+		arraysEqual(
+			pageStandingIdentities,
+			coverageWitness.standingIdentities.slice(
+				coverageWitness.pageOffset,
+				coverageWitness.pageOffset + value.standings.length
+			)
+		) &&
+		arraysEqual(pageMatchParticipantIdentities, coverageWitness.pageMatchParticipantIdentities) &&
+		arraysEqual(pageStandingIdentities, coverageWitness.pageStandingIdentities);
+	const expectedHasNextPage =
+		coverageWitness.pageOffset + Math.max(value.matches.length, value.standings.length) <
+		Math.max(coverageWitness.matchIdentities.length, coverageWitness.standingIdentities.length);
 	return (
 		matchesValid &&
 		standingsValid &&
+		participantCoverageValid &&
+		pageCoverageValid &&
 		(value.nextCursor === null || typeof value.nextCursor === "string") &&
-		typeof value.hasNextPage === "boolean"
+		typeof value.hasNextPage === "boolean" &&
+		value.hasNextPage === expectedHasNextPage &&
+		(value.hasNextPage ? value.nextCursor !== null : value.nextCursor === null)
 	);
 }
 
@@ -1848,8 +1979,18 @@ function knockoutCache(value: unknown): value is MyTournamentReviewKnockout {
 	);
 }
 
+function dateTimeCache(value: unknown): value is string {
+	if (!nonEmptyString(value)) return false;
+	try {
+		DateTimeResolver.parseValue(value);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function catalogCache(value: unknown): value is MyTournamentReviewCatalog {
-	if (!isRecord(value) || !isKnownReviewState(value.state) || !nonEmptyString(value.asOf))
+	if (!isRecord(value) || !isKnownReviewState(value.state) || !dateTimeCache(value.asOf))
 		return false;
 	if (
 		(value.viewerEntryId === null || positiveInt(value.viewerEntryId) !== null) &&
@@ -1904,7 +2045,18 @@ function catalogCache(value: unknown): value is MyTournamentReviewCatalog {
 	return false;
 }
 
-function gameweekCache(value: unknown): value is MyTournamentGameweekReview {
+type GameweekCacheHead = {
+	tournamentId: number;
+	eventId: number;
+	revision: string;
+	format: MyTournamentReviewFormat;
+	contentSha256: string;
+};
+
+function gameweekCache(
+	value: unknown,
+	expectedHead?: GameweekCacheHead
+): value is MyTournamentGameweekReview {
 	if (!isRecord(value)) return false;
 	const state = value.state;
 	if (
@@ -1922,6 +2074,17 @@ function gameweekCache(value: unknown): value is MyTournamentGameweekReview {
 		);
 	}
 	if (!scopeMetaCache(value.scope)) return false;
+	const scope = value.scope;
+	if (
+		expectedHead !== undefined &&
+		(scope.tournamentId !== expectedHead.tournamentId ||
+			scope.eventId !== expectedHead.eventId ||
+			scope.revision !== expectedHead.revision ||
+			scope.format !== expectedHead.format ||
+			scope.contentSha256 !== expectedHead.contentSha256)
+	) {
+		return false;
+	}
 	if (value.scope.format === "POINTS") {
 		return (
 			pointsCache(value.points, "GAMEWEEK", value.scope) &&
@@ -1945,7 +2108,10 @@ function gameweekCache(value: unknown): value is MyTournamentGameweekReview {
 	);
 }
 
-function seasonCache(value: unknown): value is MyTournamentSeasonReview {
+function seasonCache(
+	value: unknown,
+	expectedPointsScope?: Pick<MyTournamentReviewScopeMeta, "rowCount" | "readySubjectCount">
+): value is MyTournamentSeasonReview {
 	if (!isRecord(value) || !isKnownReviewState(value.state)) return false;
 	if (
 		positiveInt(value.tournamentId) === null ||
@@ -1981,7 +2147,12 @@ function seasonCache(value: unknown): value is MyTournamentSeasonReview {
 		return false;
 	}
 	if (value.format === "POINTS") {
-		return pointsCache(value.points, "SEASON") && value.h2h === null && value.knockout === null;
+		return (
+			expectedPointsScope !== undefined &&
+			pointsCache(value.points, "SEASON", expectedPointsScope) &&
+			value.h2h === null &&
+			value.knockout === null
+		);
 	}
 	if (value.format === "H2H") {
 		return h2hCache(value.h2h) && value.points === null && value.knockout === null;
@@ -1989,8 +2160,39 @@ function seasonCache(value: unknown): value is MyTournamentSeasonReview {
 	return knockoutCache(value.knockout) && value.points === null && value.h2h === null;
 }
 
+function seasonPointsScope(
+	row: SeasonMetadataRow
+): Pick<MyTournamentReviewScopeMeta, "rowCount" | "readySubjectCount"> {
+	const rowCount = row.row_count === null ? NaN : Number(row.row_count);
+	const readySubjectCount =
+		row.ready_subject_count === null ? NaN : Number(row.ready_subject_count);
+	if (
+		!Number.isSafeInteger(rowCount) ||
+		rowCount <= 0 ||
+		!Number.isSafeInteger(readySubjectCount) ||
+		readySubjectCount < 0 ||
+		readySubjectCount > rowCount
+	) {
+		throw integrityError("Review season points scope metadata is invalid");
+	}
+	return { rowCount, readySubjectCount };
+}
+
+function seasonCountMetadataValid(row: SeasonMetadataRow): boolean {
+	const rowCount = row.row_count === null ? NaN : Number(row.row_count);
+	const readySubjectCount =
+		row.ready_subject_count === null ? NaN : Number(row.ready_subject_count);
+	return (
+		Number.isSafeInteger(rowCount) &&
+		rowCount > 0 &&
+		Number.isSafeInteger(readySubjectCount) &&
+		readySubjectCount >= 0 &&
+		readySubjectCount <= rowCount
+	);
+}
+
 function optionalTimestampCache(value: unknown): boolean {
-	return value === null || (nonEmptyString(value) && Number.isFinite(Date.parse(value)));
+	return value === null || dateTimeCache(value);
 }
 
 function statusCache(value: unknown): value is MyTournamentReviewStatus {
@@ -2035,7 +2237,8 @@ function statusCache(value: unknown): value is MyTournamentReviewStatus {
 			!optionalTimestampCache(event.degradedAt) ||
 			!optionalTimestampCache(event.publishedAt) ||
 			(revision !== null && event.publishedAt === null) ||
-			(event.state === "READY" && (revision === null || event.publishedAt === null))
+			(event.state === "READY" && (revision === null || event.publishedAt === null)) ||
+			(event.state !== "READY" && (revision !== null || event.publishedAt !== null))
 		) {
 			return false;
 		}
@@ -2805,11 +3008,38 @@ function h2hFromPayload(
 		maxOffset
 	);
 	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
+	const matchParticipantIdentities = new Set<string>();
+	for (const match of source.matches) {
+		for (const side of [match.home, match.away]) {
+			if (side && !side.isAverage) {
+				matchParticipantIdentities.add(`${match.groupId}:${side.entryId}`);
+			}
+		}
+	}
+	const standingIdentities = source.standings.map(
+		(standing) => `${standing.groupId}:${standing.entryId}`
+	);
 	return {
 		matches: page.items,
 		standings: standingsPage.items,
 		nextCursor: page.hasNextPage ? page.nextCursor : standingsPage.nextCursor,
 		hasNextPage,
+		coverageWitness: {
+			matchIdentities: source.matches.map((match) =>
+				JSON.stringify([match.groupId, match.matchId])
+			),
+			matchParticipantIdentities: [...matchParticipantIdentities],
+			standingIdentities,
+			pageOffset: cursor?.offset ?? 0,
+			pageMatchParticipantIdentities: page.items.flatMap((match) =>
+				[match.home, match.away]
+					.filter((side): side is MyTournamentReviewH2HSide => side !== null && !side.isAverage)
+					.map((side) => `${match.groupId}:${side.entryId}`)
+			),
+			pageStandingIdentities: standingsPage.items.map(
+				(standing) => `${standing.groupId}:${standing.entryId}`
+			),
+		},
 	};
 }
 
@@ -3100,7 +3330,20 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			`my-tournament-review-v2:gameweek:${args.tournamentId}:${args.eventId}:${head ? reviewHeadKey(head) : `${revision ?? "none"}:${unavailableState}`}:${first}:${cursor?.canonical ?? ""}`
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
-			cacheDecoder<MyTournamentGameweekReview>(value, gameweekCache)
+			cacheDecoder<MyTournamentGameweekReview>(value, (candidate) =>
+				gameweekCache(
+					candidate,
+					head
+						? {
+								tournamentId: args.tournamentId,
+								eventId: head.event_id,
+								revision: String(head.revision),
+								format: reviewFormat(head.format)!,
+								contentSha256: head.content_sha256,
+							}
+						: undefined
+				)
+			)
 		);
 		if (cached) return refreshGameweekAge(cached);
 		if (!head) {
@@ -3165,6 +3408,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					row.content_sha256 !== null ||
 					row.event_data_checked_at !== null ||
 					row.published_at !== null ||
+					row.row_count !== null ||
+					row.ready_subject_count !== null ||
 					row.obligation_format !== null ||
 					row.obligation_state !== null
 				) {
@@ -3184,6 +3429,10 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				row.published_at,
 			];
 			const hasHead = headFields.some((value) => value !== null && value !== undefined);
+			const hasCountMetadata = row.row_count !== null || row.ready_subject_count !== null;
+			if (hasHead !== hasCountMetadata || (hasCountMetadata && !seasonCountMetadataValid(row))) {
+				throw integrityError("Review season count metadata is inconsistent");
+			}
 			if (hasHead) {
 				if (headFields.some((value) => value === null || value === undefined)) {
 					throw integrityError("Review season head metadata is incomplete");
@@ -3291,6 +3540,11 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					"SEASON"
 				)
 			: null;
+		const latestHeadMetadata = latestHead ? rowsByEvent.get(latestHead.event_id) : undefined;
+		const expectedPointsScope =
+			latestHead && reviewFormat(latestHead.format) === "POINTS" && latestHeadMetadata
+				? seasonPointsScope(latestHeadMetadata)
+				: undefined;
 		const key = gqlCacheKey(
 			context,
 			`my-tournament-review-v2:season:${args.tournamentId}:${args.throughEventId}:${first}:${cursor?.canonical ?? ""}:${unavailableState}:${finalizedEventIds.join(",")}:${metadataRows
@@ -3300,6 +3554,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 						row.revision ?? "null",
 						row.format ?? "null",
 						row.content_sha256 ?? "null",
+						row.row_count ?? "null",
+						row.ready_subject_count ?? "null",
 						row.obligation_format ?? "null",
 						row.obligation_state ?? "null",
 					].join(":")
@@ -3307,7 +3563,9 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				.join(",")}`
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
-			cacheDecoder<MyTournamentSeasonReview>(value, seasonCache)
+			cacheDecoder<MyTournamentSeasonReview>(value, (candidate) =>
+				seasonCache(candidate, expectedPointsScope)
+			)
 		);
 		if (cached) return refreshSeasonAge(cached);
 		if (!ready) {
@@ -3427,6 +3685,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					(row.revision !== null && revision === null) ||
 					(row.revision === null && publishedAt !== null) ||
 					(state === "READY" && (revision === null || publishedAt === null)) ||
+					(state !== "READY" && (revision !== null || publishedAt !== null)) ||
 					(row.published_at !== null && publishedAt === null) ||
 					(row.next_attempt_at !== null && nextAttemptAt === null) ||
 					(row.degraded_at !== null && degradedAt === null)
