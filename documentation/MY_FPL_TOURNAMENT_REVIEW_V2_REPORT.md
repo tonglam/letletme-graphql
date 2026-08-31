@@ -29,8 +29,9 @@ publication consistency 均为 true。
    staging-publication quiescence 安全拦截；`0082_tournament_review_source_floor_requeue.sql`
    尚未 apply，生产仍是 `#366` 的镜像/数据状态。
 2. GraphQL `#193` 当前 exact head 是
-   `25fd8d415be3a8336b021357ea0df1a92023cd64`，CI 已通过，正确 full-SHA review
-   正在进行；Web/Mini 仍 pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
+   `49a7d49a0e6eb6e8d69c72b8530df4aa82d7e063`，verify 与 database-contract CI
+   已通过；针对该完整 SHA 的 exact-head review 已完成且无新发现。Web/Mini
+   仍 pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
 3. 还没有带受保护凭证的 6953 publication/status 样本，因此真实 row count、
    head parity、Season 全历史窗口和端到端消费结果仍属于未验证项。
 
@@ -348,7 +349,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI test/integration 通过；部署因两个 staging publication 的 quiescence gate 停止在 migration 前 |
 | Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；`/health/deploy`、`/health/ready`、`/health/live` | 已证明 #366 部署 identity、scheduler、worker、publicationConsistency 为 true；#368 尚未生效，且尚未证明 6953 受保护 publication 消费样本 |
-| GraphQL | PR `#193` 当前 head `25fd8d415be3a8336b021357ea0df1a92023cd64`；focused 34 / 0 fail；完整 997 pass、7 skip、0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build；CI 两个 verify + 两个 database-contract 均通过 | 六个旧 P2 review thread 已按实际 full SHA disposition/resolved；正确 full-SHA marker 已重发，当前 exact-head review 仍在运行，不能复用旧 commit review |
+| GraphQL | PR `#193` 当前 head `49a7d49a0e6eb6e8d69c72b8530df4aa82d7e063`；focused 44 / 0 fail；完整 1006 pass、7 skip、0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build；CI verify `33388789637`、`33388786000` 与两个 database-contract 均通过 | 既有 review findings 均已按实际 full SHA disposition/resolved；`49a7d49…` exact-head review 于 `12:02:50Z` 完成、无新发现；文档更新后仍需对最终 docs-inclusive SHA 重跑一次 gate |
 | Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
 | Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
@@ -363,7 +364,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data producer source floor | 已合并、未生效 | `#368` merge `530118af...`、CI test/integration 通过；deploy `33382095955`/`33382453786` 因 `Database has 2 staging publication(s)` 停在 migration 前；`0082` apply/reconcile/backfill 未验证 |
 | Data runtime deployment | #366 已通过；#368 阻塞 | #366 有 exact deploy SHA、health probes、scheduler/worker/publication consistency；#368 尚未切 slot，`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
-| GraphQL schema/read path | 待 exact-head review | 当前 head `25fd8d415...`，CI 通过，正确 marker 已发；六个旧线程已 resolved，但当前 review 未完成，不能复用旧 review |
+| GraphQL schema/read path | 代码 gate 通过 | 当前 head `49a7d49...`，CI 通过；既有线程已 resolved，exact-head review 于 `12:02:50Z` 完成且无新发现；文档提交后需重跑最终 docs-inclusive SHA review |
 | Web/Mini consumer contract | 未通过 | 两个客户端仍 pin 旧 GraphQL ref，Mini PR 还有 merge conflict；必须在 GraphQL merge SHA 后更新 pin、跑 contract 与消费者路径 |
 | 6953 end-to-end publication | 未验证 | 缺少带保护凭证的 head/publication/count/hash/source span/Redis-cache 对账；不能从 health 200 推断 |
 | V1 retirement | 设计已决定，执行未完成 | V1 不再是 fallback/alias/double-read；客户端切流完成后删除遗留 roots、loader、markup、queries 与文档 |

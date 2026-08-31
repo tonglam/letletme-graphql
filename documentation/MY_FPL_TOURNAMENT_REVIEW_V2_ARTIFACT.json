@@ -5,7 +5,7 @@
     "surface": "report",
     "title": "My LetLetMe Tournament Review V2：6953 端到端链路审查",
     "description": "V2-only settled-snapshot review chain audit from sync/finalization through PostgreSQL publication, GraphQL, Web/Mini consumers and Ops evidence.",
-    "generatedAt": "2026-08-31T11:08:01Z",
+    "generatedAt": "2026-08-31T12:02:50Z",
     "sources": [
       {
         "id": "audit_report",
@@ -22,7 +22,7 @@
           "engine": "duckdb",
           "language": "sql",
           "description": "Bounded, reviewed gate evidence reproduced as an inline VALUES snapshot; this is not a production query.",
-          "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.5, '待 exact-head review', '25fd8d415… CI 通过；正确 full-SHA marker 已发，review 运行中'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
+          "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 1.0, '代码 gate 通过', '49a7d49a… CI verify/database-contract 通过；exact-head review 于 12:02:50Z 完成、无新发现'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
           "filters": ["审查日期 2026-08-31", "只包含已核验的代码、CI、部署与显式缺口", "不包含生产凭证或原始 payload"],
           "metric_definitions": ["score: 1 = gate 通过，0.5 = 部分通过，0 = 未通过/未验证；不是生产成功率"]
         }
@@ -113,7 +113,7 @@
       {
         "id": "summary",
         "type": "markdown",
-        "body": "## Executive Summary\n\n本报告审查 V2 唯一路径：已结算快照才进入复盘；未结算轮次统一留在 Live。Data 负责 source validation、immutable publication 与 atomic head，GraphQL 负责授权、revision pin、fail-closed 和 query cache，Web/Mini 负责 V2 contract 与格式化页面。\n\n当前结果是 **代码与 CI 已有较强闭环，但生产 readiness 仍为 partial**：Data #368 已合并，deploy 在 migration 前被 `Database has 2 staging publication(s)` 安全拦截；GraphQL #193 当前 exact-head review 尚未结束；Web/Mini 仍 pin 旧 GraphQL contract；6953 受保护 publication/status/consumer 样本缺失。"
+        "body": "## Executive Summary\n\n本报告审查 V2 唯一路径：已结算快照才进入复盘；未结算轮次统一留在 Live。Data 负责 source validation、immutable publication 与 atomic head，GraphQL 负责授权、revision pin、fail-closed 和 query cache，Web/Mini 负责 V2 contract 与格式化页面。\n\n当前结果是 **代码与 CI 已有较强闭环，但生产 readiness 仍为 partial**：Data #368 已合并，deploy 在 migration 前被 `Database has 2 staging publication(s)` 安全拦截；GraphQL #193 的 `49a7d49…` exact-head review 已完成且无新发现；Web/Mini 仍 pin 旧 GraphQL contract；6953 受保护 publication/status/consumer 样本缺失。文档提交后仍需针对新的 docs-inclusive SHA 重跑最终 review。"
       },
       { "id": "gate-chart", "type": "chart", "chartId": "gate_status" },
       { "id": "time-chart", "type": "chart", "chartId": "time_budget" },
@@ -152,7 +152,7 @@
   },
   "snapshot": {
     "version": 1,
-    "generatedAt": "2026-08-31T11:08:01Z",
+    "generatedAt": "2026-08-31T12:02:50Z",
     "status": "partial",
     "accessIssues": [
       {
@@ -165,7 +165,7 @@
       "gate_status": [
         { "gate": "Data producer", "score": 0.5, "state": "已合并、未生效", "evidence": "#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止" },
         { "gate": "Data runtime", "score": 0.5, "state": "#366 通过；#368 阻塞", "evidence": "#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot" },
-        { "gate": "GraphQL read path", "score": 0.5, "state": "待 exact-head review", "evidence": "25fd8d415… CI 通过；正确 full-SHA marker 已发，review 运行中" },
+        { "gate": "GraphQL read path", "score": 1.0, "state": "代码 gate 通过", "evidence": "49a7d49a… CI verify/database-contract 通过；exact-head review 于 12:02:50Z 完成、无新发现；文档提交后需重跑最终 SHA review" },
         { "gate": "Web/Mini contract", "score": 0.0, "state": "未通过", "evidence": "PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict" },
         { "gate": "6953 end-to-end", "score": 0.0, "state": "未验证", "evidence": "缺受保护 publication/status/consumer sample" },
         { "gate": "V1 retirement", "score": 0.5, "state": "设计决定、执行未完成", "evidence": "V2-only 规则已写入；客户端切流后清理遗留 V1" }
@@ -198,7 +198,7 @@
         "engine": "duckdb",
         "language": "sql",
         "description": "Bounded, reviewed gate evidence reproduced as an inline VALUES snapshot; this is not a production query.",
-        "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.5, '待 exact-head review', '25fd8d415… CI 通过；正确 full-SHA marker 已发，review 运行中'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
+        "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 1.0, '代码 gate 通过', '49a7d49a… CI verify/database-contract 通过；exact-head review 于 12:02:50Z 完成、无新发现'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
         "filters": ["审查日期 2026-08-31", "只包含已核验的代码、CI、部署与显式缺口", "不包含生产凭证或原始 payload"],
         "metric_definitions": ["score: 1 = gate 通过，0.5 = 部分通过，0 = 未通过/未验证；不是生产成功率"]
       }
