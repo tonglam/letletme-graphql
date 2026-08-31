@@ -41,7 +41,7 @@ CLI_CREDENTIAL_RE = re.compile(
     r"(?ix)(?<![A-Za-z0-9_-])(?:"
     r"(?:--(?:password|pass|token|api[-_]?key|access[-_]?token)(?:=|\s+))"
     r"|(?:redis-cli)(?:[^\n;&|`]*?)\s+-a(?:=|\s+|(?=[^\s`<>#]))"
-    r"|(?:mysql(?:dump|admin|sh)?)(?:[^\n;&|`]*?)\s+-p(?:=|\s+|(?=[^\s`<>#]))"
+    r"|(?:mysql(?:dump|admin|sh)?)(?:[^\n;&|`]*?)\s+-p(?:=|(?=[^\s`<>#]))"
     r")(?!-)([^\s`<>#]+)"
 )
 AWS_CREDENTIAL_ARGUMENT_RE = re.compile(
@@ -1057,22 +1057,18 @@ def has_locked_skill_secret(text: str) -> bool:
 
     if (
         PEM_RE.search(text)
-        or BASIC_AUTH_RE.search(text)
         or SECRET_VALUE_RES[-1].search(text)
     ):
         return True
-    for pattern in (CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE):
+    for pattern in (BASIC_AUTH_RE, CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE):
         for match in pattern.finditer(text):
             value = match.group(1) if match.lastindex else match.group(0)
             if not _looks_like_placeholder(value):
                 return True
     for pattern in SECRET_VALUE_RES[:-1]:
-        if pattern in {CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE}:
+        if pattern in {BASIC_AUTH_RE, CLI_CREDENTIAL_RE, AWS_CREDENTIAL_ARGUMENT_RE}:
             continue
         for match in pattern.finditer(text):
-            if pattern is BASIC_AUTH_RE:
-                value = match.group(1) if match.lastindex else match.group(0)
-                return True
             if not LOCKED_CREDENTIAL_KEY_RE.search(match.group(0)):
                 continue
             value = match.group(1) if match.lastindex else match.group(0)
@@ -1108,10 +1104,11 @@ def has_secret_bytes(raw: bytes) -> bool:
                 # visible without retaining or serializing every descendant
                 # subtree for every ancestor pair.
                 parsed = json.loads(decoded, object_pairs_hook=lambda items: tuple(items))
+                normalized = json.dumps(parsed, ensure_ascii=False)
             except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
                 pass
             else:
-                if has_secret(json.dumps(parsed, ensure_ascii=False)):
+                if has_secret(normalized):
                     return True
                 pending = [(parsed, None, None)]
                 while pending:
@@ -1150,9 +1147,10 @@ def has_locked_skill_secret_bytes(raw: bytes) -> bool:
         candidates.append(decoded)
         try:
             parsed = json.loads(decoded, object_pairs_hook=lambda items: tuple(items))
+            normalized = json.dumps(parsed, ensure_ascii=False)
         except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             continue
-        if has_locked_skill_secret(json.dumps(parsed, ensure_ascii=False)):
+        if has_locked_skill_secret(normalized):
             return True
         pending = [(parsed, None, None)]
         while pending:
@@ -1354,6 +1352,8 @@ def _instruction_paths(
     # contract-listed repository skills are checked separately by validate_skill.
     def should_descend(relative: Path) -> bool:
         parts = relative.parts
+        if any(part in IGNORED_PARTS for part in parts):
+            return False
         if len(parts) >= 2 and parts[:2] == (".agents", "skills"):
             return len(parts) < 3 or parts[2] in contracted_skill_names
         return not _is_unmanaged_instruction_path(relative)

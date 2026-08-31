@@ -1382,6 +1382,7 @@ jobs:
                   "_validate_claude_skill_aliases": function_node(tree, "_validate_claude_skill_aliases"),
                   "validate_locked_skill": function_node(tree, "validate_locked_skill"),
                   "has_secret": function_node(tree, "has_secret"),
+                  "has_locked_skill_secret": function_node(tree, "has_locked_skill_secret"),
                   "has_secret_bytes": function_node(tree, "has_secret_bytes"),
                   "has_locked_skill_secret_bytes": function_node(tree, "has_locked_skill_secret_bytes"),
                   "skill_tree_digest": function_node(tree, "skill_tree_digest"),
@@ -1403,6 +1404,7 @@ jobs:
                       "_validate_claude_skill_aliases",
                       "validate_locked_skill",
                       "has_secret",
+                      "has_locked_skill_secret",
                       "has_secret_bytes",
                       "has_locked_skill_secret_bytes",
                       "skill_tree_digest",
@@ -1636,6 +1638,7 @@ jobs:
                   "_validate_global_manifest": {"load_json", "read_bytes", "sha256", "resolve"},
                   "_validate_skill_inventory": {"load_json"},
                   "has_secret_bytes": {"loads", "dumps", "has_secret"},
+                  "has_locked_skill_secret": {"search", "finditer", "_looks_like_placeholder"},
                   "has_secret": {"search", "finditer", "_has_private_ip_literal", "_looks_like_placeholder"},
                   "_has_private_ip_literal": {"finditer", "ip_address"},
                   "_looks_like_placeholder": {"fullmatch", "match", "search"},
@@ -1656,6 +1659,7 @@ jobs:
                   "_validate_claude_skill_aliases": set(),
                   "has_secret_bytes": {"has_secret"},
                   "has_locked_skill_secret_bytes": {"has_locked_skill_secret"},
+                  "has_locked_skill_secret": set(),
                   "has_secret": {"_has_private_ip_literal", "_looks_like_placeholder"},
               }
               helper_receivers = {
@@ -1698,6 +1702,10 @@ jobs:
                   "has_locked_skill_secret_bytes": {
                       "loads": {"json"},
                       "dumps": {"json"},
+                  },
+                  "has_locked_skill_secret": {
+                      "search": {"PEM_RE", "LOCKED_CREDENTIAL_KEY_RE"},
+                      "finditer": {"BASIC_AUTH_RE", "CLI_CREDENTIAL_RE", "AWS_CREDENTIAL_ARGUMENT_RE", "pattern"},
                   },
                   "has_secret": {
                       "search": {"PEM_RE", "PRIVATE_ORIGIN_RE"},
