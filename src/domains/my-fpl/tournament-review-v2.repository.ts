@@ -1067,8 +1067,8 @@ function decodeCursor(
 	value: string | null | undefined,
 	expectedRevision: string,
 	expectedScope: string
-): number {
-	if (!value) return 0;
+): ReviewCursor | null {
+	if (!value) return null;
 	try {
 		const decoded = Buffer.from(value, "base64url").toString("utf8");
 		const parsed: unknown = JSON.parse(decoded);
@@ -1077,8 +1077,19 @@ function decodeCursor(
 			parsed.revision === expectedRevision &&
 			parsed.scope === expectedScope
 		) {
-			const offset = Number(parsed.offset);
-			if (Number.isSafeInteger(offset) && offset >= 0) return offset;
+			const rawOffset = parsed.offset;
+			const offset =
+				typeof rawOffset === "number"
+					? rawOffset
+					: typeof rawOffset === "string" && rawOffset.trim() !== ""
+						? Number(rawOffset)
+						: NaN;
+			if (Number.isSafeInteger(offset) && offset >= 0) {
+				return {
+					offset,
+					canonical: encodeCursor(offset, expectedRevision, expectedScope),
+				};
+			}
 		}
 	} catch {
 		// Fall through to a stable client error.
@@ -1097,6 +1108,33 @@ function reviewCursorScope(
 	collection: string
 ): string {
 	return JSON.stringify([row.season_id, row.tournament_id, row.event_id, row.format, collection]);
+}
+
+type ReviewCursor = {
+	offset: number;
+	canonical: string;
+};
+
+function reviewCursorCollection(
+	format: MyTournamentReviewFormat,
+	view: "GAMEWEEK" | "SEASON"
+): string {
+	if (view === "SEASON") return "SEASON_POINTS";
+	return format === "POINTS" ? "GAMEWEEK_POINTS" : format === "H2H" ? "H2H" : "KNOCKOUT";
+}
+
+function decodePublicationCursor(
+	row: Pick<PublicationRow, "season_id" | "tournament_id" | "event_id" | "format" | "revision">,
+	after: string | null | undefined,
+	view: "GAMEWEEK" | "SEASON"
+): ReviewCursor | null {
+	const format = reviewFormat(row.format);
+	if (!format) throw integrityError("Review publication format is invalid");
+	return decodeCursor(
+		after,
+		String(row.revision),
+		reviewCursorScope(row, reviewCursorCollection(format, view))
+	);
 }
 
 function serializePostgresJsonb(value: unknown): string {
@@ -1386,9 +1424,7 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			) &&
 			played === won + drawn + lost &&
 			matchPoints === 3 * won + drawn &&
-			[pointsFor, pointsAgainst].every(
-				(candidate) => typeof candidate === "number" && Number.isSafeInteger(candidate)
-			)
+			[pointsFor, pointsAgainst].every((candidate) => safeInteger(candidate))
 		);
 	});
 	return (
@@ -1401,16 +1437,21 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 
 function knockoutSideCache(value: unknown): value is MyTournamentReviewKnockoutSide {
 	if (!isRecord(value)) return false;
+	const scoreMetrics = [value.grossPoints, value.transferCost, value.netPoints];
+	const goalMetrics = [value.goalsScored, value.goalsConceded];
 	return (
 		positiveInt(value.entryId) !== null &&
 		nonEmptyString(value.entryName) &&
 		(value.applicable === undefined || typeof value.applicable === "boolean") &&
-		[value.grossPoints, value.transferCost, value.netPoints].every((candidate) =>
-			nullableSafeInteger(candidate)
-		) &&
-		[value.goalsScored, value.goalsConceded].every((candidate) =>
-			nullableNonNegativeSafeInteger(candidate)
-		)
+		scoreMetrics.every((candidate) => nullableSafeInteger(candidate)) &&
+		goalMetrics.every((candidate) => nullableNonNegativeSafeInteger(candidate)) &&
+		(value.applicable !== false ||
+			[...scoreMetrics, ...goalMetrics].every((candidate) => candidate === null)) &&
+		knockoutScoreBreakdownValid({
+			grossPoints: nullableNumber(value.grossPoints),
+			transferCost: nullableNumber(value.transferCost),
+			netPoints: nullableNumber(value.netPoints),
+		})
 	);
 }
 
@@ -1469,6 +1510,18 @@ function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId:
 		away.goalsScored,
 		away.goalsConceded,
 	].every((value) => value !== null);
+}
+
+function knockoutScoreBreakdownValid(
+	side: Pick<MyTournamentReviewKnockoutSide, "grossPoints" | "transferCost" | "netPoints">
+): boolean {
+	// Knockout publications may expose only net points. Once the optional
+	// gross/cost breakdown starts, all three values must reconcile.
+	if (side.grossPoints === null && side.transferCost === null) return true;
+	if (side.grossPoints === null || side.transferCost === null || side.netPoints === null) {
+		return false;
+	}
+	return side.transferCost >= 0 && side.netPoints === side.grossPoints - side.transferCost;
 }
 
 function knockoutCache(value: unknown): value is MyTournamentReviewKnockout {
@@ -2163,7 +2216,7 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 	) {
 		return null;
 	}
-	return {
+	const mapped: MyTournamentReviewKnockoutSide = {
 		entryId,
 		entryName,
 		...(value.applicable === undefined ? {} : { applicable: value.applicable }),
@@ -2173,6 +2226,16 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 		goalsScored: nullableNumber(value.goalsScored),
 		goalsConceded: nullableNumber(value.goalsConceded),
 	};
+	const scoreMetrics = [mapped.grossPoints, mapped.transferCost, mapped.netPoints];
+	const goalMetrics = [mapped.goalsScored, mapped.goalsConceded];
+	if (
+		(mapped.applicable === false &&
+			[...scoreMetrics, ...goalMetrics].some((metric) => metric !== null)) ||
+		!knockoutScoreBreakdownValid(mapped)
+	) {
+		return null;
+	}
+	return mapped;
 }
 
 function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
@@ -2228,15 +2291,21 @@ function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 function pageSlice<T>(
 	values: T[],
 	first: number,
-	after: string | null | undefined,
+	cursor: ReviewCursor | null,
 	revision: string,
-	scope: string
+	scope: string,
+	maxOffset = values.length
 ): {
 	items: T[];
 	nextCursor: string | null;
 	hasNextPage: boolean;
 } {
-	const start = decodeCursor(after, revision, scope);
+	const start = cursor?.offset ?? 0;
+	if (start > maxOffset) {
+		throw new GraphQLError("Review cursor is out of range", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
 	const items = values.slice(start, start + first);
 	const hasNextPage = start + items.length < values.length;
 	return {
@@ -2249,7 +2318,7 @@ function pageSlice<T>(
 function pointsFromPayload(
 	row: PublicationRow,
 	first: number,
-	after: string | null | undefined,
+	cursor: ReviewCursor | null,
 	view: "GAMEWEEK" | "SEASON" = "GAMEWEEK"
 ): MyTournamentReviewPoints {
 	const payload = isRecord(row.payload) ? row.payload : {};
@@ -2323,7 +2392,7 @@ function pointsFromPayload(
 	const page = pageSlice(
 		rows,
 		first,
-		after,
+		cursor,
 		String(row.revision),
 		reviewCursorScope(row, view === "SEASON" ? "SEASON_POINTS" : "GAMEWEEK_POINTS")
 	);
@@ -2352,7 +2421,7 @@ function pointsFromPayload(
 function h2hFromPayload(
 	row: PublicationRow,
 	first: number,
-	after: string | null | undefined
+	cursor: ReviewCursor | null
 ): MyTournamentReviewH2H {
 	const payload = isRecord(row.payload) ? row.payload : {};
 	const source = mapH2H(payload.h2h);
@@ -2363,13 +2432,22 @@ function h2hFromPayload(
 		throw integrityError("Review H2H row count does not match publication metadata");
 	}
 	const cursorScope = reviewCursorScope(row, "H2H");
-	const page = pageSlice(source.matches, first, after, String(row.revision), cursorScope);
+	const maxOffset = Math.max(source.matches.length, source.standings.length);
+	const page = pageSlice(
+		source.matches,
+		first,
+		cursor,
+		String(row.revision),
+		cursorScope,
+		maxOffset
+	);
 	const standingsPage = pageSlice(
 		source.standings,
 		first,
-		after,
+		cursor,
 		String(row.revision),
-		cursorScope
+		cursorScope,
+		maxOffset
 	);
 	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
 	return {
@@ -2383,7 +2461,7 @@ function h2hFromPayload(
 function knockoutFromPayload(
 	row: PublicationRow,
 	first: number,
-	after: string | null | undefined
+	cursor: ReviewCursor | null
 ): MyTournamentReviewKnockout {
 	const payload = isRecord(row.payload) ? row.payload : {};
 	const matches = mapKnockout(payload.knockout);
@@ -2403,7 +2481,7 @@ function knockoutFromPayload(
 	const page = pageSlice(
 		matches,
 		first,
-		after,
+		cursor,
 		String(row.revision),
 		reviewCursorScope(row, "KNOCKOUT")
 	);
@@ -2435,7 +2513,7 @@ function requireNonReadyObligationState(value: unknown): MyTournamentReviewState
 function mapGameweek(
 	row: PublicationRow | null,
 	first: number,
-	after: string | null | undefined
+	cursor: ReviewCursor | null
 ): MyTournamentGameweekReview {
 	if (!row) return emptyGameweek("UNAVAILABLE");
 	const scope = mapScopeMeta(row);
@@ -2443,7 +2521,7 @@ function mapGameweek(
 		return {
 			state: "READY",
 			scope,
-			points: pointsFromPayload(row, first, after),
+			points: pointsFromPayload(row, first, cursor),
 			h2h: null,
 			knockout: null,
 		};
@@ -2453,7 +2531,7 @@ function mapGameweek(
 			state: "READY",
 			scope,
 			points: null,
-			h2h: h2hFromPayload(row, first, after),
+			h2h: h2hFromPayload(row, first, cursor),
 			knockout: null,
 		};
 	}
@@ -2462,7 +2540,7 @@ function mapGameweek(
 		scope,
 		points: null,
 		h2h: null,
-		knockout: knockoutFromPayload(row, first, after),
+		knockout: knockoutFromPayload(row, first, cursor),
 	};
 }
 
@@ -2648,9 +2726,22 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		const unavailableState = head
 			? "READY"
 			: requireNonReadyObligationState(metadata?.obligation_state);
+		const cursor = head
+			? decodePublicationCursor(
+					{
+						season_id: context.currentSeason.seasonId,
+						tournament_id: args.tournamentId,
+						event_id: args.eventId,
+						revision: head.revision,
+						format: head.format,
+					},
+					args.after,
+					"GAMEWEEK"
+				)
+			: null;
 		const key = gqlCacheKey(
 			context,
-			`my-tournament-review-v2:gameweek:${args.tournamentId}:${args.eventId}:${head ? reviewHeadKey(head) : `${revision ?? "none"}:${unavailableState}`}:${first}:${args.after ?? ""}`
+			`my-tournament-review-v2:gameweek:${args.tournamentId}:${args.eventId}:${head ? reviewHeadKey(head) : `${revision ?? "none"}:${unavailableState}`}:${first}:${cursor?.canonical ?? ""}`
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
 			cacheDecoder<MyTournamentGameweekReview>(value, gameweekCache)
@@ -2675,7 +2766,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		if (!row) {
 			throw integrityError("Review head publication disappeared during read");
 		}
-		const payload = mapGameweek(row, first, args.after);
+		const payload = mapGameweek(row, first, cursor);
 		await writeJsonQueryCache(context, key, payload, REVIEW_CACHE_TTL_SECONDS);
 		return payload;
 	},
@@ -2819,9 +2910,33 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			}
 			unavailableState = requireNonReadyObligationState(latestObligation.state);
 		}
+		const latestHead = (() => {
+			if (!ready) return null;
+			if (latestFinalizedEventId === null) {
+				throw integrityError("Review season has no latest finalized event");
+			}
+			const head = headsByEvent.get(latestFinalizedEventId);
+			if (!head) {
+				throw integrityError("Review season latest finalized event has no publication head");
+			}
+			return head;
+		})();
+		const cursor = latestHead
+			? decodePublicationCursor(
+					{
+						season_id: context.currentSeason.seasonId,
+						tournament_id: args.tournamentId,
+						event_id: latestHead.event_id,
+						revision: latestHead.revision,
+						format: latestHead.format,
+					},
+					args.after,
+					"SEASON"
+				)
+			: null;
 		const key = gqlCacheKey(
 			context,
-			`my-tournament-review-v2:season:${args.tournamentId}:${args.throughEventId}:${first}:${args.after ?? ""}:${unavailableState}:${finalizedEventIds.join(",")}:${metadataRows
+			`my-tournament-review-v2:season:${args.tournamentId}:${args.throughEventId}:${first}:${cursor?.canonical ?? ""}:${unavailableState}:${finalizedEventIds.join(",")}:${metadataRows
 				.map((row) =>
 					[
 						row.event_id ?? "null",
@@ -2855,13 +2970,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			await writeJsonQueryCache(context, key, unavailable, REVIEW_CACHE_TTL_SECONDS);
 			return unavailable;
 		}
-		if (latestFinalizedEventId === null) {
-			throw integrityError("Review season has no latest finalized event");
-		}
-		const latestHead = headsByEvent.get(latestFinalizedEventId);
-		if (!latestHead) {
+		if (!latestHead)
 			throw integrityError("Review season latest finalized event has no publication head");
-		}
 		const result = await context.database.query<PublicationRow>(MY_TOURNAMENT_REVIEW_SEASON_SQL, [
 			context.currentSeason.seasonId,
 			args.tournamentId,
@@ -2904,10 +3014,9 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			format: latestFormat,
 			freshness: latestMeta.freshness,
 			finalizedEventIds,
-			points:
-				latestFormat === "POINTS" ? pointsFromPayload(latest, first, args.after, "SEASON") : null,
-			h2h: latestFormat === "H2H" ? h2hFromPayload(latest, first, args.after) : null,
-			knockout: latestFormat === "KNOCKOUT" ? knockoutFromPayload(latest, first, args.after) : null,
+			points: latestFormat === "POINTS" ? pointsFromPayload(latest, first, cursor, "SEASON") : null,
+			h2h: latestFormat === "H2H" ? h2hFromPayload(latest, first, cursor) : null,
+			knockout: latestFormat === "KNOCKOUT" ? knockoutFromPayload(latest, first, cursor) : null,
 		};
 		await writeJsonQueryCache(context, key, season, REVIEW_CACHE_TTL_SECONDS);
 		return season;
