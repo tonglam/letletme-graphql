@@ -997,6 +997,36 @@ function pointsRowMetricsValid(
 	);
 }
 
+function seasonPointsMetricsValid(
+	row: Pick<MyTournamentReviewPointsRow, "seasonGrossPoints" | "seasonNetPoints">
+): boolean {
+	return (
+		row.seasonGrossPoints !== null &&
+		row.seasonNetPoints !== null &&
+		row.seasonGrossPoints - row.seasonNetPoints >= 0 &&
+		safeInteger(row.seasonGrossPoints - row.seasonNetPoints)
+	);
+}
+
+function h2hMatchPointsValid(
+	home: Pick<MyTournamentReviewH2HSide, "netPoints" | "matchPoints">,
+	away: Pick<MyTournamentReviewH2HSide, "netPoints" | "matchPoints">
+): boolean {
+	if (
+		home.netPoints === null ||
+		home.matchPoints === null ||
+		away.netPoints === null ||
+		away.matchPoints === null
+	) {
+		return false;
+	}
+	const expectedHome =
+		home.netPoints > away.netPoints ? 3 : home.netPoints < away.netPoints ? 0 : 1;
+	const expectedAway =
+		away.netPoints > home.netPoints ? 3 : away.netPoints < home.netPoints ? 0 : 1;
+	return home.matchPoints === expectedHome && away.matchPoints === expectedAway;
+}
+
 function nullableNumber(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -1187,10 +1217,15 @@ function pointsRowCache(value: unknown): value is MyTournamentReviewPointsRow {
 		!value.applicable ||
 		(strictPositiveInt(value.groupId) !== null &&
 			strictPositiveInt(value.rank) !== null &&
+			value.tournamentScore !== null &&
 			pointsRowMetricsValid({
 				grossPoints: nullableNumber(value.grossPoints),
 				transferCost: nullableNumber(value.transferCost),
 				netPoints: nullableNumber(value.netPoints),
+			}) &&
+			seasonPointsMetricsValid({
+				seasonGrossPoints: nullableNumber(value.seasonGrossPoints),
+				seasonNetPoints: nullableNumber(value.seasonNetPoints),
 			}))
 	);
 }
@@ -1263,10 +1298,9 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			match.isBye === true ||
 			(isRecord(home) &&
 				isRecord(away) &&
-				home.netPoints !== null &&
-				home.matchPoints !== null &&
-				away.netPoints !== null &&
-				away.matchPoints !== null);
+				h2hSideCache(home) &&
+				h2hSideCache(away) &&
+				h2hMatchPointsValid(home, away));
 		const participantsValid = [home, away].every((side) => {
 			if (!isRecord(side) || side.isAverage === true) return true;
 			const entryId = strictPositiveInt(side.entryId);
@@ -1844,6 +1878,7 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 				mapped.grossPoints,
 				mapped.transferCost,
 				mapped.netPoints,
+				mapped.tournamentScore,
 				mapped.seasonGrossPoints,
 				mapped.seasonNetPoints,
 			].some((number) => number === null)
@@ -1859,6 +1894,11 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 		if (mapped.applicable && !pointsRowMetricsValid(mapped)) {
 			throw integrityError(
 				"Review applicable points row has inconsistent gross, cost, or net points"
+			);
+		}
+		if (mapped.applicable && !seasonPointsMetricsValid(mapped)) {
+			throw integrityError(
+				"Review applicable points row has inconsistent cumulative gross, cost, or net points"
 			);
 		}
 		return mapped;
@@ -1934,16 +1974,8 @@ function mapH2H(value: unknown): {
 				) {
 					throw integrityError("Review H2H match sides are invalid");
 				}
-				if (
-					!raw.isBye &&
-					(!home ||
-						!away ||
-						home.netPoints === null ||
-						home.matchPoints === null ||
-						away.netPoints === null ||
-						away.matchPoints === null)
-				) {
-					throw integrityError("Review H2H match scores are incomplete");
+				if (!raw.isBye && (!home || !away || !h2hMatchPointsValid(home, away))) {
+					throw integrityError("Review H2H match scores or match points are invalid");
 				}
 				const identity = JSON.stringify([groupId, raw.matchId]);
 				if (matchIdentities.has(identity)) {

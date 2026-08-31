@@ -37,6 +37,7 @@ const publicationRow = (overrides: Record<string, unknown> = {}) => {
 					grossPoints: 55,
 					transferCost: 4,
 					netPoints: 51,
+					tournamentScore: 55,
 				},
 			],
 		},
@@ -951,6 +952,40 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
+	it("fails closed when an applicable points row omits its tournament score", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		(points.rows as Array<Record<string, unknown>>)[0]!.tournamentScore = null;
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when Gameweek cumulative points imply a negative transfer cost", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		(points.rows as Array<Record<string, unknown>>)[0]!.seasonNetPoints = 101;
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
 	it("keeps later-starting H2H entries out of settled standings", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => ({ rows: [h2hPublicationRow()] }),
@@ -1368,6 +1403,53 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
+	it("fails closed when non-bye H2H match points do not match the net-score outcome", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		matches[0] = {
+			...matches[0],
+			isBye: false,
+			away: {
+				entryId: 6954,
+				entryName: "Second XI",
+				isAverage: false,
+				netPoints: 38,
+				matchPoints: 2,
+				rank: 2,
+			},
+		};
+		(h2h.standings as Array<Record<string, unknown>>).push({
+			...(h2h.standings as Array<Record<string, unknown>>)[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			rank: 2,
+			won: 0,
+			lost: 1,
+			matchPoints: 0,
+			pointsFor: 38,
+			pointsAgainst: 42,
+		});
+		const row = {
+			...base,
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			not_applicable_subject_count: 0,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		};
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
 	it("rejects a cached H2H side whose match points are negative", async () => {
 		const redis = new TestRedis();
 		const publication = h2hPublicationRow();
@@ -1393,6 +1475,63 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		expect(result.h2h?.matches[0]?.home?.matchPoints).toBe(3);
 		expect(databaseReads).toBe(4);
+	});
+
+	it("rejects a cached H2H match whose awards do not match its net-score outcome", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		matches[0] = {
+			...matches[0],
+			isBye: false,
+			away: {
+				entryId: 6954,
+				entryName: "Second XI",
+				isAverage: false,
+				netPoints: 38,
+				matchPoints: 0,
+				rank: 2,
+			},
+		};
+		(h2h.standings as Array<Record<string, unknown>>).push({
+			...(h2h.standings as Array<Record<string, unknown>>)[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			rank: 2,
+			won: 0,
+			lost: 1,
+			matchPoints: 0,
+			pointsFor: 38,
+			pointsAgainst: 42,
+		});
+		const publication = {
+			...base,
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			not_applicable_subject_count: 0,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		};
+		const redis = new TestRedis();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			h2h: { matches: Array<{ home: { matchPoints: number | null } }> };
+		};
+		cached.h2h.matches[0]!.home.matchPoints = 2;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.h2h?.matches[0]?.home?.matchPoints).toBe(3);
 	});
 
 	it("fails closed when a required H2H standing metric is null", async () => {
