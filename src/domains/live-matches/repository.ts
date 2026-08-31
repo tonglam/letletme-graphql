@@ -1066,8 +1066,14 @@ const compatibleDetail = (
 		.map((fixture) => fixture.fixtureId);
 	const detailFixtures = new Set(detail.fixtures.map((fixture) => fixture.fixtureId));
 	return (
-		startedDeskFixtures.every((fixtureId) => detailFixtures.has(fixtureId)) &&
-		validDetailForDesk(desk.fixtures, detail.fixtures)
+		startedDeskFixtures.every((fixtureId) => {
+			const detailFixture = detail.fixtures.find((fixture) => fixture.fixtureId === fixtureId);
+			return (
+				detailFixtures.has(fixtureId) &&
+				detailFixture !== undefined &&
+				detailFixture.players.length > 0
+			);
+		}) && validDetailForDesk(desk.fixtures, detail.fixtures)
 	);
 };
 
@@ -1076,6 +1082,29 @@ const chooseDetail = (
 	candidates: readonly (MatchDetailCandidate | null)[]
 ): MatchDetailCandidate | null =>
 	candidates.find((candidate) => compatibleDetail(desk, candidate)) ?? null;
+
+const selectNewestDesk = (
+	candidates: readonly (MatchDeskCandidate | null)[]
+): MatchDeskCandidate | null => {
+	let selected: MatchDeskCandidate | null = null;
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		if (!selected) {
+			selected = candidate;
+			continue;
+		}
+		if (candidate.publication.generation > selected.publication.generation) {
+			selected = candidate;
+			continue;
+		}
+		if (
+			candidate.publication.generation === selected.publication.generation &&
+			Date.parse(candidate.publication.publishedAt) > Date.parse(selected.publication.publishedAt)
+		)
+			selected = candidate;
+	}
+	return selected;
+};
 
 const sameTimestamp = (left: unknown, right: unknown): boolean => {
 	if (left === null || right === null) return left === right;
@@ -1339,7 +1368,6 @@ export const readLiveMatchday = async (
 	const shouldRevalidateActiveEvent =
 		requested === undefined &&
 		(redisBundle === null || redisBundle.eventId === null) &&
-		redisReadFailed &&
 		(cachedActiveEvent === undefined ||
 			Date.now() - (processActiveEventCheckedAt.get(season) ?? 0) >=
 				LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS);
@@ -1408,20 +1436,26 @@ export const readLiveMatchday = async (
 			].filter((value): value is MatchDetailCandidate => value !== null)
 		: [];
 	const stored = processLkg.get(lkgKey(season, selectedEventId));
-	const processDesk = stored ? asProcessLkg(stored).desk : null;
-	const desk = redisDesk[0] ?? processDesk;
+	const processLkgValue = stored ? asProcessLkg(stored) : null;
+	const processDesk = processLkgValue?.desk ?? null;
+	const redisDeskCandidate = redisDesk[0] ?? null;
+	const initialDesk = redisDeskCandidate ?? processDesk;
 
 	let postgresReadFailed = unscopedPostgres === null;
 	let postgres: PostgresCheckpointRead | null =
 		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
-	const retainedDetail = desk
-		? chooseDetail(desk, [...redisDetail, stored ? asProcessLkg(stored).detail : null])
+	const retainedDetail = initialDesk
+		? chooseDetail(initialDesk, [
+				...redisDetail,
+				processLkgValue?.detail ?? null,
+				postgres?.detail ?? null,
+			])
 		: null;
 	if (
-		!desk ||
-		(allFixturesStarted(desk) &&
+		!initialDesk ||
+		(allFixturesStarted(initialDesk) &&
 			retainedDetail === null &&
-			detailCheckpointMayBeRetried(season, selectedEventId, desk))
+			detailCheckpointMayBeRetried(season, selectedEventId, initialDesk))
 	) {
 		if (unscopedPostgres === undefined) {
 			postgres = await readPostgresCheckpoint(
@@ -1431,11 +1465,12 @@ export const readLiveMatchday = async (
 				selectedEventId
 			);
 			postgresReadFailed = postgres === null;
-			if (desk && postgres !== null && chooseDetail(desk, [postgres.detail]) === null)
-				rememberMissingDetailCheckpoint(season, selectedEventId, desk);
+			if (initialDesk && postgres !== null && chooseDetail(initialDesk, [postgres.detail]) === null)
+				rememberMissingDetailCheckpoint(season, selectedEventId, initialDesk);
 		}
 	}
-	const effectiveDesk = desk ?? postgres?.desk ?? null;
+	const effectiveDesk =
+		redisDeskCandidate ?? selectNewestDesk([processDesk, postgres?.desk ?? null]);
 	if (!effectiveDesk)
 		return {
 			season,
@@ -1446,9 +1481,12 @@ export const readLiveMatchday = async (
 			postgresReadFailed,
 		};
 
-	const detail = effectiveDesk
-		? chooseDetail(effectiveDesk, [retainedDetail, postgres?.detail ?? null])
-		: null;
+	const detail = chooseDetail(
+		effectiveDesk,
+		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT"
+			? [...redisDetail, postgres?.detail ?? null, processLkgValue?.detail ?? null]
+			: [retainedDetail, postgres?.detail ?? null]
+	);
 	const result = {
 		season,
 		eventId: selectedEventId,

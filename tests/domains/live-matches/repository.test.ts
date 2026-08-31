@@ -256,8 +256,12 @@ const buildBundle = (
 	return { bundle, deskPublication, detailPublication, deskFixtures, detailFixtures };
 };
 
-const buildCheckpointRow = (options: { eventId?: number } = {}) => {
-	const built = buildBundle({ checkpointed: true, eventId: options.eventId });
+const buildCheckpointRow = (options: { eventId?: number; deskGeneration?: number } = {}) => {
+	const built = buildBundle({
+		checkpointed: true,
+		eventId: options.eventId,
+		deskGeneration: options.deskGeneration,
+	});
 	return {
 		event_id: built.deskPublication.eventId,
 		desk: {
@@ -709,6 +713,58 @@ describe("Live Matches V2 read path", () => {
 		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(databaseReads).toBe(1);
 		expect(LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS).toBeGreaterThan(0);
+	});
+
+	it("revalidates the active event when Redis returns no pointer", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		const nextCheckpoint = buildCheckpointRow({ eventId: 2 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [nextCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		control.set({ ...buildBundle({ eventId: 1 }).bundle, eventId: null });
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(2);
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseReads).toBe(1);
+	});
+
+	it("prefers a newer same-event checkpoint over an older process LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
+		const newerCheckpoint = buildCheckpointRow({ deskGeneration: 3 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [newerCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.desk?.publication.generation).toBe(2);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.desk?.publication.generation).toBe(3);
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseReads).toBe(1);
 	});
 
 	it("uses the numeric season authority for PostgreSQL cold fallback", async () => {
