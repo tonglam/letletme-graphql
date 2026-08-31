@@ -1,4 +1,7 @@
+import type { GraphQLResolveInfo } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
+import { parentSelectionRequestsField } from "../../graphql/selection-set";
+import { playersService } from "../players/service";
 import {
 	readLiveMatchday,
 	type LiveMatchdayRead,
@@ -158,16 +161,77 @@ const toTimes = (read: LiveMatchdayRead) => {
 	};
 };
 
-const toPlayer = (player: MatchDetailCandidate["fixtures"][number]["players"][number]) => ({
+type LiveMatchPlayerPriceMap = ReadonlyMap<number, number | null>;
+
+const liveMatchPlayerIds = (read: LiveMatchdayRead): number[] => [
+	...new Set(
+		(read.detail?.fixtures ?? []).flatMap((fixture) =>
+			fixture.players.map((player) => player.id).filter((id) => Number.isSafeInteger(id) && id > 0)
+		)
+	),
+];
+
+/**
+ * Live Matches V2 owns scores and stats, while current price remains a Core
+ * publication field. Enrich only when selected and fail soft if Core is not
+ * available, so a price outage cannot take down the live match board.
+ */
+const loadPlayerPrices = async (
+	context: GraphQLContext,
+	read: LiveMatchdayRead
+): Promise<LiveMatchPlayerPriceMap> => {
+	const ids = liveMatchPlayerIds(read);
+	if (ids.length === 0) return new Map();
+
+	const prices = new Map<number, number | null>();
+	const preload = context.playersByIdPreload;
+	const missingIds: number[] = [];
+	for (const id of ids) {
+		const player = preload?.get(id);
+		if (preload?.has(id)) {
+			prices.set(id, player?.price ?? null);
+		} else {
+			missingIds.push(id);
+		}
+	}
+	if (missingIds.length === 0) return prices;
+
+	try {
+		const players = await playersService.getPlayersByIds(context, missingIds);
+		for (const id of missingIds) prices.set(id, null);
+		for (const player of players) prices.set(player.id, player.price);
+		const nextPreload = new Map(context.playersByIdPreload ?? []);
+		for (const id of missingIds) if (!nextPreload.has(id)) nextPreload.set(id, null);
+		for (const player of players) nextPreload.set(player.id, player);
+		context.playersByIdPreload = nextPreload;
+	} catch (error) {
+		for (const id of missingIds) prices.set(id, null);
+		context.logger.warn(
+			{ err: error, eventId: read.desk?.publication.eventId, playerCount: missingIds.length },
+			"Live Matches V2 player price enrichment unavailable"
+		);
+	}
+	return prices;
+};
+
+const toPlayer = (
+	player: MatchDetailCandidate["fixtures"][number]["players"][number],
+	prices: LiveMatchPlayerPriceMap
+) => ({
 	id: player.id,
 	webName: player.webName,
 	position: positionName(player.position),
 	teamId: player.teamId,
+	price: prices.get(player.id) ?? null,
 	totalPoints: player.totalPoints,
 	stats: player.stats,
 });
 
-const toMatches = (desk: MatchDeskCandidate, detail: MatchDetailCandidate | null) => {
+const toMatches = (
+	desk: MatchDeskCandidate,
+	detail: MatchDetailCandidate | null,
+	prices: LiveMatchPlayerPriceMap
+) => {
 	const details = detailFixtureMap(detail);
 	return desk.fixtures.map((fixture) => ({
 		fixtureId: fixture.fixtureId,
@@ -185,7 +249,9 @@ const toMatches = (desk: MatchDeskCandidate, detail: MatchDetailCandidate | null
 		started: fixture.started,
 		finished: fixture.finished,
 		finishedProvisional: fixture.finishedProvisional,
-		players: (details.get(fixture.fixtureId)?.players ?? []).map(toPlayer),
+		players: (details.get(fixture.fixtureId)?.players ?? []).map((player) =>
+			toPlayer(player, prices)
+		),
 	}));
 };
 
@@ -204,7 +270,7 @@ const toUnavailable = (read: LiveMatchdayRead) => {
 	};
 };
 
-const toResult = (read: LiveMatchdayRead) => {
+const toResult = (read: LiveMatchdayRead, prices: LiveMatchPlayerPriceMap = new Map()) => {
 	if (!read.desk) return toUnavailable(read);
 	const final = finalPublication(read);
 	const finalCheckpointPending =
@@ -249,7 +315,7 @@ const toResult = (read: LiveMatchdayRead) => {
 							: [detailServedFromReason(read.detail.servedFrom)]
 						: [detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE"],
 			},
-			matches: toMatches(read.desk, read.detail),
+			matches: toMatches(read.desk, read.detail, prices),
 		},
 	};
 };
@@ -259,7 +325,14 @@ export const liveMatchesResolvers = {
 		liveMatchday: async (
 			_parent: unknown,
 			args: { eventId?: number | null },
-			context: GraphQLContext
-		) => toResult(await readLiveMatchday(context, args.eventId ?? undefined)),
+			context: GraphQLContext,
+			info: GraphQLResolveInfo
+		) => {
+			const read = await readLiveMatchday(context, args.eventId ?? undefined);
+			const prices = parentSelectionRequestsField(info, "price")
+				? await loadPlayerPrices(context, read)
+				: new Map<number, number | null>();
+			return toResult(read, prices);
+		},
 	},
 };

@@ -357,6 +357,43 @@ describe("Live Matches V2 read path", () => {
 		expect(databaseReads).toBe(0);
 	});
 
+	it("adds the canonical current price when the live match client requests it", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+		const context = buildSnapshotContext(redis);
+		context.playersByIdPreload = new Map([
+			[
+				9001,
+				{
+					id: 9001,
+					code: 9001,
+					webName: "DGW Player",
+					firstName: null,
+					secondName: null,
+					teamId: 1,
+					position: 3,
+					price: 55,
+					startPrice: 50,
+					totalPoints: 0,
+					selectedByPercent: null,
+				},
+			],
+		]);
+
+		const result = await graphql({
+			schema,
+			contextValue: context,
+			source: `query { liveMatchday(eventId: 1) { snapshot { matches { players { id price } } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			snapshot: {
+				matches: [{ players: [{ id: 9001, price: 55 }] }, { players: [{ id: 9001, price: 55 }] }],
+			},
+		});
+	});
+
 	it("rejects a publication with an invalid V2 identity", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
