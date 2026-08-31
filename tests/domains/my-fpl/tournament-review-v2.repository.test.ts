@@ -96,7 +96,7 @@ const h2hPublicationRow = (overrides: Record<string, unknown> = {}) =>
 							entryName: "Example XI",
 							isAverage: false,
 							netPoints: 42,
-							matchPoints: 3,
+							matchPoints: null,
 							rank: 1,
 						},
 						away: null,
@@ -270,6 +270,49 @@ describe("My Tournament Review V2 repository", () => {
 		expect(observedSql).toBe(MY_TOURNAMENT_REVIEW_STATUS_SQL);
 		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: 4 });
 		expect(result.events).toHaveLength(1);
+	});
+
+	it("rejects a cached READY status without an immutable publication identity", async () => {
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return {
+					rows: [
+						{
+							event_id: 4,
+							format: "POINTS",
+							state: "READY",
+							next_attempt_at: null,
+							execution_attempts: 1,
+							source_rechecks: 0,
+							degraded_at: null,
+							revision: 8,
+							published_at: "2026-08-20T00:00:03.000Z",
+							latest_finalized_event_id: 4,
+						},
+					],
+				};
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadStatus(context, 6953);
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			events: Array<{ revision: string | null; publishedAt: string | null }>;
+		};
+		cached.events[0]!.revision = null;
+		cached.events[0]!.publishedAt = null;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadStatus(context, 6953);
+		expect(result.events[0]).toMatchObject({
+			revision: "8",
+			publishedAt: "2026-08-20T00:00:03.000Z",
+		});
+		expect(databaseReads).toBe(2);
 	});
 
 	it("preserves a finalized checkpoint when no obligation row exists", async () => {
@@ -1180,6 +1223,7 @@ describe("My Tournament Review V2 repository", () => {
 		matches[0] = {
 			...matches[0],
 			isBye: false,
+			home: { ...(matches[0]!.home as Record<string, unknown>), matchPoints: 3 },
 			away: {
 				entryId: null,
 				entryName: "Average Team",
@@ -1262,6 +1306,49 @@ describe("My Tournament Review V2 repository", () => {
 		await expect(
 			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when an H2H side reports a non-positive rank", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const match = (h2h.matches as Array<Record<string, unknown>>)[0]!;
+		match.home = { ...(match.home as Record<string, unknown>), rank: 0 };
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects a cached H2H side with a non-positive rank", async () => {
+		const redis = new TestRedis();
+		const publication = h2hPublicationRow();
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			h2h: { matches: Array<{ home: { rank: number | null } }> };
+		};
+		cached.h2h.matches[0]!.home.rank = -1;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		expect(result.h2h?.matches[0]?.home?.rank).toBe(1);
+		expect(databaseReads).toBe(4);
 	});
 
 	it("fails closed when a bye is represented by an Average Team", async () => {
@@ -1688,6 +1775,59 @@ describe("My Tournament Review V2 repository", () => {
 		expect(result.knockout?.matches[0]?.winnerEntryId).toBe(6954);
 	});
 
+	it("fails closed when completed knockout scores omit the winner", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const match = (
+			(payload.knockout as Record<string, unknown>).matches as Array<Record<string, unknown>>
+		)[0]!;
+		Object.assign(match.home as Record<string, unknown>, {
+			netPoints: 55,
+			goalsScored: 2,
+			goalsConceded: 1,
+		});
+		Object.assign(match.away as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 2,
+		});
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects a cached completed knockout score without the winner", async () => {
+		const redis = new TestRedis();
+		const publication = knockoutPublicationRow();
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			knockout: { matches: Array<{ home: { netPoints: number | null } }> };
+		};
+		cached.knockout.matches[0]!.home.netPoints = 55;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		expect(result.knockout?.matches[0]?.home?.netPoints).toBeNull();
+		expect(databaseReads).toBe(4);
+	});
+
 	it("rejects a cached completed knockout winner with fewer net points", async () => {
 		const base = knockoutPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -1880,6 +2020,7 @@ describe("My Tournament Review V2 repository", () => {
 		matches[0] = {
 			...matches[0],
 			isBye: false,
+			home: { ...(matches[0]!.home as Record<string, unknown>), matchPoints: 3 },
 			away: {
 				entryId: 6954,
 				entryName: "Second XI",
@@ -1919,6 +2060,49 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
+	it("fails closed when an H2H bye side reports match points", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const match = (h2h.matches as Array<Record<string, unknown>>)[0]!;
+		match.home = { ...(match.home as Record<string, unknown>), matchPoints: 3 };
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects a cached H2H bye side that reports match points", async () => {
+		const redis = new TestRedis();
+		const publication = h2hPublicationRow();
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			h2h: { matches: Array<{ home: { matchPoints: number | null } }> };
+		};
+		cached.h2h.matches[0]!.home.matchPoints = 3;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		expect(result.h2h?.matches[0]?.home?.matchPoints).toBeNull();
+		expect(databaseReads).toBe(4);
+	});
+
 	it("rejects a cached H2H side whose match points are negative", async () => {
 		const redis = new TestRedis();
 		const publication = h2hPublicationRow();
@@ -1942,7 +2126,7 @@ describe("My Tournament Review V2 repository", () => {
 			tournamentId: 6953,
 			eventId: 4,
 		});
-		expect(result.h2h?.matches[0]?.home?.matchPoints).toBe(3);
+		expect(result.h2h?.matches[0]?.home?.matchPoints).toBeNull();
 		expect(databaseReads).toBe(4);
 	});
 
@@ -1954,6 +2138,7 @@ describe("My Tournament Review V2 repository", () => {
 		matches[0] = {
 			...matches[0],
 			isBye: false,
+			home: { ...(matches[0]!.home as Record<string, unknown>), matchPoints: 3 },
 			away: {
 				entryId: 6954,
 				entryName: "Second XI",
@@ -2188,6 +2373,7 @@ describe("My Tournament Review V2 repository", () => {
 		matches[0] = {
 			...matches[0],
 			isBye: false,
+			home: { ...(matches[0]!.home as Record<string, unknown>), matchPoints: 3 },
 			away: {
 				entryId: 6954,
 				entryName: "Second XI",
@@ -3196,5 +3382,64 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		expect(result.points?.grossPointsTotal).toBe(55);
 		expect(databaseReads).toBe(4);
+	});
+
+	it("rejects a cached paginated points aggregate that disagrees with its full-scope witness", async () => {
+		const base = publicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const points = payload.points as Record<string, unknown>;
+		const rows = points.rows as Array<Record<string, unknown>>;
+		rows.push({
+			...rows[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			playerName: "Second Manager",
+			rank: 2,
+			grossPoints: 40,
+			transferCost: 0,
+			netPoints: 40,
+			tournamentScore: 40,
+			seasonGrossPoints: 40,
+			seasonNetPoints: 40,
+		});
+		points.grossPointsTotal = 95;
+		points.grossPointsAverage = 47.5;
+		points.netPointsTotal = 91;
+		points.seasonGrossPointsTotal = 140;
+		points.seasonGrossPointsAverage = 70;
+		points.seasonNetPointsTotal = 136;
+		const publication = {
+			...base,
+			row_count: 2,
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		};
+		const redis = new TestRedis();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		const firstPage = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		expect(firstPage.points).toMatchObject({ grossPointsTotal: 95, hasNextPage: true });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: { grossPointsTotal: number };
+		};
+		cached.points.grossPointsTotal = 94;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+			first: 1,
+		});
+		expect(result.points).toMatchObject({ grossPointsTotal: 95, hasNextPage: true });
 	});
 });

@@ -82,6 +82,22 @@ export type MyTournamentReviewPointsRow = {
 	overallRank: number | null;
 };
 
+type MyTournamentReviewPointsAggregateWitness = {
+	rowCount: number;
+	applicableRowCount: number;
+	pageOffset: number;
+	pageLength: number;
+	grossPointsTotal: number;
+	grossPointsAverage: number;
+	netPointsTotal: number;
+	seasonGrossPointsTotal: number;
+	seasonGrossPointsAverage: number;
+	seasonNetPointsTotal: number;
+	selectedGrossPointsTotal: number;
+	selectedGrossPointsAverage: number;
+	selectedNetPointsTotal: number;
+};
+
 export type MyTournamentReviewPoints = {
 	headlineMetric: string;
 	grossPointsTotal: number;
@@ -93,6 +109,8 @@ export type MyTournamentReviewPoints = {
 	rows: MyTournamentReviewPointsRow[];
 	nextCursor: string | null;
 	hasNextPage: boolean;
+	/** Full-scope aggregate witness retained only for revisioned query-cache validation. */
+	aggregateWitness: MyTournamentReviewPointsAggregateWitness;
 };
 
 export type MyTournamentReviewH2HSide = {
@@ -1313,6 +1331,47 @@ function pointsRowCache(value: unknown): value is MyTournamentReviewPointsRow {
 
 function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 	if (!isRecord(value)) return false;
+	if (!Array.isArray(value.rows)) return false;
+	const witness = value.aggregateWitness;
+	if (!isRecord(witness)) return false;
+	const witnessIntegers = [
+		witness.rowCount,
+		witness.applicableRowCount,
+		witness.pageOffset,
+		witness.pageLength,
+		witness.grossPointsTotal,
+		witness.netPointsTotal,
+		witness.seasonGrossPointsTotal,
+		witness.seasonNetPointsTotal,
+		witness.selectedGrossPointsTotal,
+		witness.selectedNetPointsTotal,
+	];
+	const witnessAverages = [
+		witness.grossPointsAverage,
+		witness.seasonGrossPointsAverage,
+		witness.selectedGrossPointsAverage,
+	];
+	if (
+		witnessIntegers.some((candidate) => !safeInteger(candidate)) ||
+		witnessAverages.some(
+			(candidate) => typeof candidate !== "number" || !Number.isFinite(candidate)
+		)
+	) {
+		return false;
+	}
+	const typedWitness = witness as unknown as MyTournamentReviewPointsAggregateWitness;
+	if (
+		typedWitness.rowCount <= 0 ||
+		typedWitness.applicableRowCount < 0 ||
+		typedWitness.applicableRowCount > typedWitness.rowCount ||
+		typedWitness.pageOffset < 0 ||
+		typedWitness.pageLength <= 0 ||
+		typedWitness.pageLength !== value.rows.length ||
+		typedWitness.pageOffset + typedWitness.pageLength > typedWitness.rowCount ||
+		value.hasNextPage !== typedWitness.pageOffset + typedWitness.pageLength < typedWitness.rowCount
+	) {
+		return false;
+	}
 	return (
 		value.headlineMetric === "gross" &&
 		safeInteger(value.grossPointsTotal) &&
@@ -1326,6 +1385,12 @@ function pointsCache(value: unknown): value is MyTournamentReviewPoints {
 		Array.isArray(value.rows) &&
 		value.rows.length > 0 &&
 		value.rows.every(pointsRowCache) &&
+		value.grossPointsTotal === typedWitness.selectedGrossPointsTotal &&
+		value.grossPointsAverage === typedWitness.selectedGrossPointsAverage &&
+		value.netPointsTotal === typedWitness.selectedNetPointsTotal &&
+		value.seasonGrossPointsTotal === typedWitness.seasonGrossPointsTotal &&
+		value.seasonGrossPointsAverage === typedWitness.seasonGrossPointsAverage &&
+		value.seasonNetPointsTotal === typedWitness.seasonNetPointsTotal &&
 		(value.nextCursor === null || typeof value.nextCursor === "string") &&
 		typeof value.hasNextPage === "boolean"
 	);
@@ -1342,6 +1407,7 @@ function h2hSideCache(value: unknown): value is MyTournamentReviewH2HSide {
 		[value.grossPoints, value.transferCost, value.netPoints, value.rank].every((candidate) =>
 			nullableSafeInteger(candidate)
 		) &&
+		(value.rank === null || strictPositiveInt(value.rank) !== null) &&
 		nullableNonNegativeSafeInteger(value.matchPoints) &&
 		h2hScoreBreakdownValid({
 			isAverage: value.isAverage,
@@ -1382,7 +1448,10 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 				!(homeIsAverage && awayIsAverage) &&
 				(homeIsAverage || awayIsAverage || homeEntryId !== awayEntryId);
 		const scoresValid =
-			match.isBye === true ||
+			(match.isBye === true &&
+				[home, away].every(
+					(side) => side === null || (isRecord(side) && side.matchPoints === null)
+				)) ||
 			(isRecord(home) &&
 				isRecord(away) &&
 				h2hSideCache(home) &&
@@ -1516,17 +1585,20 @@ function knockoutEntryCoverageValid(
 }
 
 function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId: unknown): boolean {
-	if (!isRecord(home) || !isRecord(away) || winnerEntryId === null) return true;
+	if (!isRecord(home) || !isRecord(away)) return true;
 	const homeNetPoints = home.netPoints;
 	const awayNetPoints = away.netPoints;
-	const settled = [
+	const scoreMetrics = [
 		homeNetPoints,
 		home.goalsScored,
 		home.goalsConceded,
 		awayNetPoints,
 		away.goalsScored,
 		away.goalsConceded,
-	].every((value) => value !== null);
+	];
+	if (scoreMetrics.every((value) => value === null)) return winnerEntryId === null;
+	if (winnerEntryId === null) return false;
+	const settled = scoreMetrics.every((value) => value !== null);
 	if (
 		!settled ||
 		home.goalsScored !== away.goalsConceded ||
@@ -1756,10 +1828,12 @@ function statusCache(value: unknown): value is MyTournamentReviewStatus {
 			!safeInteger(rechecks) ||
 			rechecks < 0 ||
 			(event.revision !== null && revision === null) ||
+			(event.revision === null && event.publishedAt !== null) ||
 			!optionalTimestampCache(event.nextAttemptAt) ||
 			!optionalTimestampCache(event.degradedAt) ||
 			!optionalTimestampCache(event.publishedAt) ||
-			(revision !== null && event.publishedAt === null)
+			(revision !== null && event.publishedAt === null) ||
+			(event.state === "READY" && (revision === null || event.publishedAt === null))
 		) {
 			return false;
 		}
@@ -2072,7 +2146,8 @@ function mapH2HSide(value: unknown): MyTournamentReviewH2HSide | null {
 		) ||
 		(value.matchPoints !== null &&
 			value.matchPoints !== undefined &&
-			!nullableNonNegativeSafeInteger(value.matchPoints))
+			!nullableNonNegativeSafeInteger(value.matchPoints)) ||
+		(value.rank !== null && value.rank !== undefined && strictPositiveInt(value.rank) === null)
 	) {
 		return null;
 	}
@@ -2117,6 +2192,9 @@ function mapH2H(value: unknown): {
 				}
 				if (raw.isBye && (home?.isAverage === true || away?.isAverage === true)) {
 					throw integrityError("Review H2H bye cannot use an Average Team side");
+				}
+				if (raw.isBye && [home, away].some((side) => side !== null && side.matchPoints !== null)) {
+					throw integrityError("Review H2H bye cannot contain match points");
 				}
 				if (
 					!raw.isBye &&
@@ -2451,6 +2529,21 @@ function pointsFromPayload(
 				: page.items,
 		nextCursor: page.nextCursor,
 		hasNextPage: page.hasNextPage,
+		aggregateWitness: {
+			rowCount: rows.length,
+			applicableRowCount: applicableRows.length,
+			pageOffset: cursor?.offset ?? 0,
+			pageLength: page.items.length,
+			grossPointsTotal: aggregates.grossPointsTotal,
+			grossPointsAverage: aggregates.grossPointsAverage,
+			netPointsTotal: aggregates.netPointsTotal,
+			seasonGrossPointsTotal: aggregates.seasonGrossPointsTotal,
+			seasonGrossPointsAverage: aggregates.seasonGrossPointsAverage,
+			seasonNetPointsTotal: aggregates.seasonNetPointsTotal,
+			selectedGrossPointsTotal,
+			selectedGrossPointsAverage,
+			selectedNetPointsTotal,
+		},
 	};
 }
 
