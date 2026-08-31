@@ -466,6 +466,8 @@ export const MY_TOURNAMENT_REVIEW_SEASON_SQL = `
 	FROM finalized latest
 	CROSS JOIN event_window
 	WHERE latest.event_id = (SELECT max(event_id) FROM finalized)
+	  AND latest.event_id = $4::integer
+	  AND latest.revision = $5::bigint
 	LIMIT 1
 `;
 
@@ -661,7 +663,7 @@ export const MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 	{
 		name: "my-tournament-review-v2.season",
 		sql: MY_TOURNAMENT_REVIEW_SEASON_SQL,
-		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 38],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 38, 38, 7],
 		resultTypes: [
 			{
 				relation: "competition.tournament_review_publications",
@@ -780,6 +782,10 @@ function requiredInteger(value: unknown, label: string): number {
 		throw integrityError(`Review points aggregate ${label} is not an integer`);
 	}
 	return number;
+}
+
+function roundedAverage(total: number, count: number): number {
+	return count === 0 ? 0 : Math.round((total / count) * 100) / 100;
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -990,9 +996,13 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 	if (!isRecord(value) || !Array.isArray(value.matches) || !Array.isArray(value.standings)) {
 		return false;
 	}
-	if (value.matches.length === 0) return false;
+	// A continuation page can legitimately contain standings only when the
+	// match collection is shorter than the standings collection.  It is still
+	// invalid for both collections to be empty.
+	if (value.matches.length === 0 && value.standings.length === 0) return false;
 	const matchIdentities = new Set<string>();
 	const standingIdentities = new Set<string>();
+	const matchParticipantIdentities = new Set<string>();
 	for (const standing of value.standings) {
 		if (!isRecord(standing)) continue;
 		const groupId = strictPositiveInt(standing.groupId);
@@ -1020,9 +1030,18 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 				away !== null &&
 				!(homeIsAverage && awayIsAverage) &&
 				(homeIsAverage || awayIsAverage || homeEntryId !== awayEntryId);
+		const scoresValid =
+			match.isBye === true ||
+			(isRecord(home) &&
+				isRecord(away) &&
+				home.netPoints !== null &&
+				home.matchPoints !== null &&
+				away.netPoints !== null &&
+				away.matchPoints !== null);
 		const participantsValid = [home, away].every((side) => {
 			if (!isRecord(side) || side.isAverage === true) return true;
 			const entryId = strictPositiveInt(side.entryId);
+			if (entryId !== null) matchParticipantIdentities.add(`${groupId}:${entryId}`);
 			return entryId !== null && standingIdentities.has(`${groupId}:${entryId}`);
 		});
 		return (
@@ -1032,6 +1051,7 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			(match.home === null || h2hSideCache(match.home)) &&
 			(match.away === null || h2hSideCache(match.away)) &&
 			sidesValid &&
+			scoresValid &&
 			participantsValid
 		);
 	});
@@ -1056,9 +1076,17 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			)
 		);
 	});
+	// This decoder sees an individual page, not the complete immutable
+	// publication.  When a page has match rows, require the standings on that
+	// page to be represented by a real side; a standings-only continuation is
+	// explicitly allowed above and is covered by the full-payload mapper.
+	const standingFixtureCoverage =
+		value.matches.length === 0 ||
+		[...standingIdentities].every((identity) => matchParticipantIdentities.has(identity));
 	return (
 		matchesValid &&
 		standingsValid &&
+		standingFixtureCoverage &&
 		(value.nextCursor === null || typeof value.nextCursor === "string") &&
 		typeof value.hasNextPage === "boolean"
 	);
@@ -1560,6 +1588,7 @@ function mapH2H(value: unknown): {
 } {
 	if (!isRecord(value)) return { matches: [], standings: [] };
 	const matchIdentities = new Set<string>();
+	const matchParticipantIdentities = new Set<string>();
 	const matches = Array.isArray(value.matches)
 		? value.matches.map((raw) => {
 				if (!isRecord(raw)) throw integrityError("Review H2H match payload is invalid");
@@ -1587,15 +1616,31 @@ function mapH2H(value: unknown): {
 					home &&
 					away &&
 					((!home.isAverage && !away.isAverage && home.entryId === away.entryId) ||
-						home.isAverage === away.isAverage)
+						(home.isAverage && away.isAverage))
 				) {
 					throw integrityError("Review H2H match sides are invalid");
+				}
+				if (
+					!raw.isBye &&
+					(!home ||
+						!away ||
+						home.netPoints === null ||
+						home.matchPoints === null ||
+						away.netPoints === null ||
+						away.matchPoints === null)
+				) {
+					throw integrityError("Review H2H match scores are incomplete");
 				}
 				const identity = JSON.stringify([groupId, raw.matchId]);
 				if (matchIdentities.has(identity)) {
 					throw integrityError("Review H2H matches contain duplicate identities");
 				}
 				matchIdentities.add(identity);
+				for (const side of [home, away]) {
+					if (side && !side.isAverage) {
+						matchParticipantIdentities.add(`${groupId}:${side.entryId}`);
+					}
+				}
 				return {
 					matchId: raw.matchId,
 					groupId,
@@ -1669,6 +1714,9 @@ function mapH2H(value: unknown): {
 				throw integrityError("Review H2H match participants do not match standings");
 			}
 		}
+	}
+	if ([...standingIdentities].some((identity) => !matchParticipantIdentities.has(identity))) {
+		throw integrityError("Review H2H standings do not have fixture coverage");
 	}
 	return { matches, standings };
 }
@@ -1794,36 +1842,60 @@ function pointsFromPayload(
 	if (source.headline !== "gross") {
 		throw integrityError("Review points headline metric is invalid");
 	}
-	const grossPointsTotal = requiredInteger(
-		view === "SEASON" ? source.seasonGrossPointsTotal : source.grossPointsTotal,
-		view === "SEASON" ? "seasonGrossPointsTotal" : "grossPointsTotal"
+	// The Data publication builder derives all six aggregates from applicable
+	// rows.  Recompute them at the read boundary so a stale or partially
+	// updated JSON payload cannot present totals that disagree with its rows.
+	const aggregates = {
+		grossPointsTotal: requiredInteger(source.grossPointsTotal, "grossPointsTotal"),
+		grossPointsAverage: requiredNumber(source.grossPointsAverage, "grossPointsAverage"),
+		netPointsTotal: requiredInteger(source.netPointsTotal, "netPointsTotal"),
+		seasonGrossPointsTotal: requiredInteger(
+			source.seasonGrossPointsTotal,
+			"seasonGrossPointsTotal"
+		),
+		seasonGrossPointsAverage: requiredNumber(
+			source.seasonGrossPointsAverage,
+			"seasonGrossPointsAverage"
+		),
+		seasonNetPointsTotal: requiredInteger(source.seasonNetPointsTotal, "seasonNetPointsTotal"),
+	};
+	const applicableRows = rows.filter((item) => item.applicable);
+	const grossPointsTotal = applicableRows.reduce((sum, item) => sum + (item.grossPoints ?? 0), 0);
+	const netPointsTotal = applicableRows.reduce((sum, item) => sum + (item.netPoints ?? 0), 0);
+	const seasonGrossPointsTotal = applicableRows.reduce(
+		(sum, item) => sum + (item.seasonGrossPoints ?? 0),
+		0
 	);
-	const grossPointsAverage = requiredNumber(
-		view === "SEASON" ? source.seasonGrossPointsAverage : source.grossPointsAverage,
-		view === "SEASON" ? "seasonGrossPointsAverage" : "grossPointsAverage"
+	const seasonNetPointsTotal = applicableRows.reduce(
+		(sum, item) => sum + (item.seasonNetPoints ?? 0),
+		0
 	);
-	const netPointsTotal = requiredInteger(
-		view === "SEASON" ? source.seasonNetPointsTotal : source.netPointsTotal,
-		view === "SEASON" ? "seasonNetPointsTotal" : "netPointsTotal"
-	);
-	const seasonGrossPointsTotal = requiredInteger(
-		source.seasonGrossPointsTotal,
-		"seasonGrossPointsTotal"
-	);
-	const seasonGrossPointsAverage = requiredNumber(
-		source.seasonGrossPointsAverage,
-		"seasonGrossPointsAverage"
-	);
-	const seasonNetPointsTotal = requiredInteger(source.seasonNetPointsTotal, "seasonNetPointsTotal");
+	if (
+		aggregates.grossPointsTotal !== grossPointsTotal ||
+		aggregates.netPointsTotal !== netPointsTotal ||
+		aggregates.seasonGrossPointsTotal !== seasonGrossPointsTotal ||
+		aggregates.seasonNetPointsTotal !== seasonNetPointsTotal ||
+		aggregates.grossPointsAverage !== roundedAverage(grossPointsTotal, applicableRows.length) ||
+		aggregates.seasonGrossPointsAverage !==
+			roundedAverage(seasonGrossPointsTotal, applicableRows.length)
+	) {
+		throw integrityError("Review points aggregates do not match applicable rows");
+	}
+	const selectedGrossPointsTotal =
+		view === "SEASON" ? aggregates.seasonGrossPointsTotal : aggregates.grossPointsTotal;
+	const selectedGrossPointsAverage =
+		view === "SEASON" ? aggregates.seasonGrossPointsAverage : aggregates.grossPointsAverage;
+	const selectedNetPointsTotal =
+		view === "SEASON" ? aggregates.seasonNetPointsTotal : aggregates.netPointsTotal;
 	const page = pageSlice(rows, first, after, String(row.revision));
 	return {
 		headlineMetric: "gross",
-		grossPointsTotal,
-		grossPointsAverage,
-		netPointsTotal,
-		seasonGrossPointsTotal,
-		seasonGrossPointsAverage,
-		seasonNetPointsTotal,
+		grossPointsTotal: selectedGrossPointsTotal,
+		grossPointsAverage: selectedGrossPointsAverage,
+		netPointsTotal: selectedNetPointsTotal,
+		seasonGrossPointsTotal: aggregates.seasonGrossPointsTotal,
+		seasonGrossPointsAverage: aggregates.seasonGrossPointsAverage,
+		seasonNetPointsTotal: aggregates.seasonNetPointsTotal,
 		rows:
 			view === "SEASON"
 				? page.items.map((item) => ({
@@ -2063,6 +2135,23 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			revision,
 		]);
 		const head = headResult.rows[0] ? validateReviewHeadRow(headResult.rows[0]) : null;
+		if (!head && revision !== null) {
+			// A revision pin is an optimistic concurrency guard.  If the active
+			// head exists but has moved on, surface a client mismatch instead of
+			// silently returning an unavailable response for a stale pin.
+			const activeHeadResult = await context.database.query<ReviewHeadRow>(
+				MY_TOURNAMENT_REVIEW_HEAD_SQL,
+				[context.currentSeason.seasonId, args.tournamentId, args.eventId, null]
+			);
+			const activeHead = activeHeadResult.rows[0]
+				? validateReviewHeadRow(activeHeadResult.rows[0])
+				: null;
+			if (activeHead) {
+				throw new GraphQLError("Review revision does not match the active publication head", {
+					extensions: { code: "BAD_USER_INPUT" },
+				});
+			}
+		}
 		const unavailableState = head
 			? "READY"
 			: requireNonReadyObligationState(
@@ -2143,9 +2232,9 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			cacheDecoder<MyTournamentSeasonReview>(value, seasonCache)
 		);
 		if (cached) return refreshSeasonAge(cached);
-		if (latestObligationNeedsHead) {
+		if (latestObligationNeedsHead || heads.length === 0) {
 			const unavailable: MyTournamentSeasonReview = {
-				state: unavailableState,
+				state: latestObligationNeedsHead ? unavailableState : "UNAVAILABLE",
 				tournamentId: args.tournamentId,
 				throughEventId: args.throughEventId,
 				latestEventId: null,
@@ -2164,6 +2253,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			context.currentSeason.seasonId,
 			args.tournamentId,
 			args.throughEventId,
+			Number(heads[0]!.event_id),
+			String(heads[0]!.revision),
 		]);
 		const rows = parsePublicationRows(result.rows);
 		if (heads.length > 0 && rows.length === 0) {
@@ -2171,6 +2262,14 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		}
 		for (const row of rows) mapScopeMeta(row);
 		const latest = rows[0] ?? null;
+		if (
+			latest &&
+			(!heads[0] ||
+				Number(latest.event_id) !== Number(heads[0].event_id) ||
+				String(latest.revision) !== String(heads[0].revision))
+		) {
+			throw integrityError("Review season payload does not match the observed publication head");
+		}
 		const payloadFinalizedEventIds = parseFinalizedEventIds(latest?.finalized_event_ids);
 		const finalizedEventIds =
 			payloadFinalizedEventIds ??
