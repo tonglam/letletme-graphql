@@ -15,8 +15,11 @@ import {
 } from "../../../src/domains/live-matches/repository";
 import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
 
-const now = "2026-08-31T10:00:00.000Z";
-const later = "2026-08-31T10:01:00.000Z";
+const testClock = Date.now();
+const now = new Date(testClock - 60_000).toISOString();
+const later = new Date(testClock - 30_000).toISOString();
+const expectedNextCheckAt = new Date(testClock + 30_000).toISOString();
+const staleAt = new Date(testClock + 37_500).toISOString();
 
 const canonical = (value: unknown): unknown => {
 	if (Array.isArray(value)) return value.map(canonical);
@@ -117,6 +120,7 @@ const player = (totalPoints: number) => ({
 	webName: "DGW Player",
 	position: 3,
 	teamId: 1,
+	price: 55,
 	totalPoints,
 	stats: [
 		{ identifier: "bps", value: totalPoints * 10, points: totalPoints, pointsModification: null },
@@ -171,8 +175,8 @@ const buildBundle = (
 		sourceCheckedAt: later,
 		publishedAt: later,
 		checkpointedAt,
-		expectedNextCheckAt: "2026-08-31T10:01:30.000Z",
-		staleAt: "2026-08-31T10:02:15.000Z",
+		expectedNextCheckAt,
+		staleAt,
 		revisions,
 		desk: {
 			name: "desk",
@@ -215,8 +219,8 @@ const buildBundle = (
 		sourceCheckedAt: later,
 		publishedAt: later,
 		checkpointedAt,
-		expectedNextCheckAt: "2026-08-31T10:01:30.000Z",
-		staleAt: "2026-08-31T10:02:15.000Z",
+		expectedNextCheckAt,
+		staleAt,
 		detail: { revision: digest(detailFixtures), contentUpdatedAt: later },
 		fixtures: detailItems.map(({ payload: _payload, metadata: _metadata, ...item }) => item),
 	};
@@ -339,7 +343,7 @@ describe("Live Matches V2 read path", () => {
 					throw new Error("warm Live Matches reads must not touch PostgreSQL");
 				},
 			}),
-			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id totalPoints stats { identifier points } } } } } }`,
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id price totalPoints stats { identifier points } } } } } }`,
 		});
 
 		expect(result.errors).toBeUndefined();
@@ -349,75 +353,12 @@ describe("Live Matches V2 read path", () => {
 			snapshot: {
 				eventId: 1,
 				matches: [
-					{ fixtureId: 101, players: [{ id: 9001, totalPoints: 3 }] },
-					{ fixtureId: 102, players: [{ id: 9001, totalPoints: 8 }] },
+					{ fixtureId: 101, players: [{ id: 9001, price: 55, totalPoints: 3 }] },
+					{ fixtureId: 102, players: [{ id: 9001, price: 55, totalPoints: 8 }] },
 				],
 			},
 		});
 		expect(databaseReads).toBe(0);
-	});
-
-	it("adds the canonical current price when the live match client requests it", async () => {
-		const redis = new TestRedis();
-		attachBundle(redis, buildBundle().bundle);
-		const context = buildSnapshotContext(redis);
-		context.playersByIdPreload = new Map([
-			[
-				9001,
-				{
-					id: 9001,
-					code: 9001,
-					webName: "DGW Player",
-					firstName: null,
-					secondName: null,
-					teamId: 1,
-					position: 3,
-					price: 55,
-					startPrice: 50,
-					totalPoints: 0,
-					selectedByPercent: null,
-				},
-			],
-		]);
-
-		const result = await graphql({
-			schema,
-			contextValue: context,
-			source: `query { liveMatchday(eventId: 1) { snapshot { revisions { corePriceRevision } matches { players { id price } } } } }`,
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(result.data?.liveMatchday).toMatchObject({
-			snapshot: {
-				revisions: { corePriceRevision: "core-7" },
-				matches: [{ players: [{ id: 9001, price: 55 }] }, { players: [{ id: 9001, price: 55 }] }],
-			},
-		});
-	});
-
-	it("does not load Core prices when the price field is skipped", async () => {
-		const redis = new TestRedis();
-		attachBundle(redis, buildBundle().bundle);
-		let databaseReads = 0;
-		const result = await graphql({
-			schema,
-			contextValue: buildSnapshotContext(redis, {
-				databaseQuery: async () => {
-					databaseReads += 1;
-					throw new Error("skipped prices must not load Core");
-				},
-			}),
-			source: `query SkipPrice($skip: Boolean!) { liveMatchday(eventId: 1) { snapshot { matches { players { id price @skip(if: $skip) } } } } }`,
-			variableValues: { skip: true },
-		});
-
-		expect(result.errors).toBeUndefined();
-		expect(databaseReads).toBe(0);
-		expect(result.data?.liveMatchday).toMatchObject({
-			snapshot: {
-				matches: [{ players: [{ id: 9001 }] }, { players: [{ id: 9001 }] }],
-			},
-		});
 	});
 
 	it("rejects a publication with an invalid V2 identity", async () => {
@@ -693,6 +634,54 @@ describe("Live Matches V2 read path", () => {
 			detail: { revision: string };
 		};
 		const invalidPlayers = [{ ...player(3), teamId: 999 }];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = publication.fixtures[0];
+		if (!item) throw new Error("missing first detail descriptor");
+		const nextKey = item.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`);
+		publication.fixtures[0] = {
+			...item,
+			key: nextKey,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+		};
+		active.items[0] = {
+			...active.items[0],
+			key: nextKey,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects detail players without a canonical price", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null || active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const invalidPlayers = [{ ...player(3), price: undefined }];
 		const payload = encode(invalidPlayers);
 		const checksum = digest(invalidPlayers);
 		const item = publication.fixtures[0];
@@ -1158,6 +1147,7 @@ describe("Live Matches V2 read path", () => {
 					webName: "x".repeat(232_000),
 					position: 3,
 					teamId: 1,
+					price: 55,
 					totalPoints: 0,
 					stats: [],
 				},
