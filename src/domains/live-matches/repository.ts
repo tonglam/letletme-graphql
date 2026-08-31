@@ -11,6 +11,7 @@ export const LIVE_MATCHES_REDIS_PREFIX = "llm:data:v2:fpl:live-match";
 export const LIVE_MATCHES_POSTGRES_TIMEOUT_MS = 400;
 export const LIVE_MATCHES_PROCESS_LKG_LIMIT = 8;
 export const LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS = 30_000;
+export const LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT = 32;
 export const LIVE_MATCH_MAX_FIXTURES = 32;
 export const LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE = 64;
 export const LIVE_MATCH_MAX_STATS_PER_PLAYER = 32;
@@ -187,10 +188,15 @@ type PostgresCheckpointRead = Readonly<{
 	detail: MatchDetailCandidate | null;
 }>;
 
+type ScopedEventCheckpointCheck = Readonly<{
+	checkedAt: number;
+	failed: boolean;
+}>;
+
 const processLkg = new Map<string, SelectedLkg>();
 const processActiveEvent = new Map<string, number>();
 const processActiveEventCheckedAt = new Map<string, number>();
-const processEventCheckedAt = new Map<string, number>();
+const processEventCheckedAt = new Map<string, ScopedEventCheckpointCheck>();
 const postgresDetailMissUntil = new Map<string, number>();
 let postgresCircuitOpenUntil = 0;
 let postgresCircuitFailures = 0;
@@ -1379,6 +1385,38 @@ const rememberMissingDetailCheckpoint = (
 	postgresDetailMissUntil.set(detailFallbackKey(season, eventId, desk), Date.now() + 30_000);
 };
 
+const recentScopedEventCheckpointCheck = (
+	key: string,
+	now = Date.now()
+): ScopedEventCheckpointCheck | null => {
+	const check = processEventCheckedAt.get(key);
+	if (check === undefined) return null;
+	if (now - check.checkedAt >= LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS) {
+		processEventCheckedAt.delete(key);
+		return null;
+	}
+	return check;
+};
+
+const rememberScopedEventCheckpointCheck = (
+	key: string,
+	failed: boolean,
+	checkedAt = Date.now()
+): void => {
+	for (const [candidate, check] of processEventCheckedAt) {
+		if (checkedAt - check.checkedAt >= LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS) {
+			processEventCheckedAt.delete(candidate);
+		}
+	}
+	if (processEventCheckedAt.has(key)) processEventCheckedAt.delete(key);
+	while (processEventCheckedAt.size >= LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT) {
+		const oldest = processEventCheckedAt.keys().next().value;
+		if (oldest === undefined) break;
+		processEventCheckedAt.delete(oldest);
+	}
+	processEventCheckedAt.set(key, { checkedAt, failed });
+};
+
 const requestedEventId = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : Number.isSafeInteger(value) && value > 0 ? value : undefined;
 
@@ -1481,24 +1519,24 @@ export const readLiveMatchday = async (
 	let postgresReadFailed = unscopedPostgres === null;
 	let postgres: PostgresCheckpointRead | null =
 		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
-	let scopedPostgresAttempted = false;
 	const scopedEventKey = lkgKey(season, selectedEventId);
-	if (
-		requested !== undefined &&
-		redisBundle === null &&
-		Date.now() - (processEventCheckedAt.get(scopedEventKey) ?? 0) >=
-			LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS
-	) {
+	const scopedEventNeedsCheckpoint =
+		requested !== undefined && (redisBundle === null || redisDeskCandidate === null);
+	const recentScopedCheck = scopedEventNeedsCheckpoint
+		? recentScopedEventCheckpointCheck(scopedEventKey)
+		: null;
+	let scopedPostgresAttempted = recentScopedCheck !== null;
+	if (scopedEventNeedsCheckpoint && recentScopedCheck === null) {
 		postgres = await readPostgresCheckpoint(
 			context,
 			context.currentSeason.seasonId,
 			season,
 			selectedEventId
 		);
-		processEventCheckedAt.set(scopedEventKey, Date.now());
 		postgresReadFailed = postgres === null;
+		rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
 		scopedPostgresAttempted = true;
-	}
+	} else if (recentScopedCheck !== null) postgresReadFailed = recentScopedCheck.failed;
 	const retainedDetail = initialDesk
 		? chooseDetail(initialDesk, [
 				...redisDetail,

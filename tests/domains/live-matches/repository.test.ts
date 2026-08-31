@@ -6,6 +6,7 @@ import { schema } from "../../../src/graphql/schema";
 import {
 	LIVE_MATCHES_READ_BUNDLE_LUA,
 	LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS,
+	LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT,
 	LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES,
 	LIVE_MATCH_MAX_FIXTURES,
 	readLiveMatchday,
@@ -948,6 +949,51 @@ describe("Live Matches V2 read path", () => {
 		await readLiveMatchday(context);
 
 		expect(parameters).toEqual([2026, null]);
+	});
+
+	it("bounds checkpoint reads for an explicit event with a healthy Redis miss", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle({ eventId: 999 }).bundle);
+		bundle.desk.active = emptyDesk;
+		bundle.desk.previous = emptyDesk;
+		bundle.detail.active = emptyDetail;
+		bundle.detail.previous = emptyDetail;
+		attachBundle(redis, bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		const first = await readLiveMatchday(context, 999);
+		const second = await readLiveMatchday(context, 999);
+
+		expect(first.desk).toBeNull();
+		expect(second.desk).toBeNull();
+		expect(databaseReads).toBe(1);
+	});
+
+	it("keeps explicit event checkpoint cooldown state bounded", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		for (let eventId = 1; eventId <= LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT + 1; eventId += 1) {
+			await readLiveMatchday(context, eventId);
+		}
+		await readLiveMatchday(context, 1);
+
+		expect(databaseReads).toBe(LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT + 2);
 	});
 
 	it("serves an exact self-contained PostgreSQL checkpoint when Redis is unavailable", async () => {
