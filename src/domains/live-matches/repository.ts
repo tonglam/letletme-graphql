@@ -12,6 +12,7 @@ export const LIVE_MATCHES_POSTGRES_TIMEOUT_MS = 400;
 export const LIVE_MATCHES_PROCESS_LKG_LIMIT = 8;
 export const LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS = 30_000;
 export const LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT = 32;
+export const LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET = 8;
 export const LIVE_MATCH_MAX_FIXTURES = 32;
 export const LIVE_MATCH_MAX_PLAYERS_PER_FIXTURE = 64;
 export const LIVE_MATCH_MAX_STATS_PER_PLAYER = 32;
@@ -193,10 +194,16 @@ type ScopedEventCheckpointCheck = Readonly<{
 	failed: boolean;
 }>;
 
+type ScopedEventCheckpointBudget = Readonly<{
+	windowStartedAt: number;
+	attempts: number;
+}>;
+
 const processLkg = new Map<string, SelectedLkg>();
 const processActiveEvent = new Map<string, number>();
 const processActiveEventCheckedAt = new Map<string, number>();
 const processEventCheckedAt = new Map<string, ScopedEventCheckpointCheck>();
+const processEventCheckpointBudget = new Map<string, ScopedEventCheckpointBudget>();
 const postgresDetailMissUntil = new Map<string, number>();
 let postgresCircuitOpenUntil = 0;
 let postgresCircuitFailures = 0;
@@ -1417,6 +1424,24 @@ const rememberScopedEventCheckpointCheck = (
 	processEventCheckedAt.set(key, { checkedAt, failed });
 };
 
+const reserveScopedEventCheckpointBudget = (season: string, now = Date.now()): boolean => {
+	const budget = processEventCheckpointBudget.get(season);
+	if (!budget) {
+		processEventCheckpointBudget.set(season, { windowStartedAt: now, attempts: 1 });
+		return true;
+	}
+	if (now - budget.windowStartedAt >= LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS) {
+		processEventCheckpointBudget.set(season, { windowStartedAt: now, attempts: 1 });
+		return true;
+	}
+	if (budget.attempts >= LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET) return false;
+	processEventCheckpointBudget.set(season, {
+		windowStartedAt: budget.windowStartedAt,
+		attempts: budget.attempts + 1,
+	});
+	return true;
+};
+
 const requestedEventId = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : Number.isSafeInteger(value) && value > 0 ? value : undefined;
 
@@ -1527,15 +1552,24 @@ export const readLiveMatchday = async (
 		: null;
 	let scopedPostgresAttempted = recentScopedCheck !== null;
 	if (scopedEventNeedsCheckpoint && recentScopedCheck === null) {
-		postgres = await readPostgresCheckpoint(
-			context,
-			context.currentSeason.seasonId,
-			season,
-			selectedEventId
-		);
-		postgresReadFailed = postgres === null;
-		rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
-		scopedPostgresAttempted = true;
+		if (reserveScopedEventCheckpointBudget(season)) {
+			postgres = await readPostgresCheckpoint(
+				context,
+				context.currentSeason.seasonId,
+				season,
+				selectedEventId
+			);
+			postgresReadFailed = postgres === null;
+			rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
+			scopedPostgresAttempted = true;
+		} else {
+			// A rotating set of explicit misses must not turn the bounded per-event
+			// cache into one cold PostgreSQL read per request. Reserve the budget
+			// before awaiting the query so concurrent misses cannot all pass the
+			// admission check; Redis/process LKG candidates remain eligible and the
+			// next window can retry PostgreSQL.
+			scopedPostgresAttempted = true;
+		}
 	} else if (recentScopedCheck !== null) postgresReadFailed = recentScopedCheck.failed;
 	const retainedDetail = initialDesk
 		? chooseDetail(initialDesk, [
@@ -1600,6 +1634,7 @@ export const resetLiveMatchProcessStateForTests = (): void => {
 	processActiveEvent.clear();
 	processActiveEventCheckedAt.clear();
 	processEventCheckedAt.clear();
+	processEventCheckpointBudget.clear();
 	postgresDetailMissUntil.clear();
 	postgresCircuitOpenUntil = 0;
 	postgresCircuitFailures = 0;

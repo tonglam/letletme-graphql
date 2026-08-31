@@ -6,6 +6,7 @@ import { schema } from "../../../src/graphql/schema";
 import {
 	LIVE_MATCHES_READ_BUNDLE_LUA,
 	LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS,
+	LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET,
 	LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT,
 	LIVE_MATCH_MAX_DETAIL_TOTAL_BYTES,
 	LIVE_MATCH_MAX_FIXTURES,
@@ -993,7 +994,30 @@ describe("Live Matches V2 read path", () => {
 		}
 		await readLiveMatchday(context, 1);
 
-		expect(databaseReads).toBe(LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT + 2);
+		expect(databaseReads).toBe(LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET);
+	});
+
+	it("reserves the explicit checkpoint budget before concurrent miss reads", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				await Promise.resolve();
+				return { rows: [] };
+			},
+		});
+
+		await Promise.all(
+			Array.from({ length: LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT + 1 }, (_, index) =>
+				readLiveMatchday(context, index + 1)
+			)
+		);
+
+		expect(databaseReads).toBe(LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET);
 	});
 
 	it("serves an exact self-contained PostgreSQL checkpoint when Redis is unavailable", async () => {
