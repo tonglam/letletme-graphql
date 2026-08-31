@@ -25,10 +25,12 @@ publication consistency 均为 true。
 
 当前仍有三个发布阻断：
 
-1. Data `#368` 需要先把 `source_min_checked_at` 固定在 finalized event checkpoint，
-   否则 Data 合法的历史/静态来源时间会被 GraphQL 误判为过期。
-2. GraphQL `#193` 已 rebase 到最新 `main`，但 exact-head Codex review 尚未完成；
-   Web/Mini 仍 pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
+1. Data `#368` 已合并，但两次 exact-image deploy 都在 migration 前被
+   staging-publication quiescence 安全拦截；`0082_tournament_review_source_floor_requeue.sql`
+   尚未 apply，生产仍是 `#366` 的镜像/数据状态。
+2. GraphQL `#193` 当前 exact head 是
+   `25fd8d415be3a8336b021357ea0df1a92023cd64`，CI 已通过，正确 full-SHA review
+   正在进行；Web/Mini 仍 pin 旧 GraphQL schema，不能宣称客户端 contract 已闭环。
 3. 还没有带受保护凭证的 6953 publication/status 样本，因此真实 row count、
    head parity、Season 全历史窗口和端到端消费结果仍属于未验证项。
 
@@ -283,10 +285,14 @@ llm:gql:* query cache (TTL 60s/300s)
 - `src/services/tournament-review-publication.service.ts`：三种 format builder、
   immutable revision/hash、repeatable-read + scope advisory lock、lease/retry/
   degraded repair、`6953` bounded status evidence。
-- PR `#368`（当前 head `cd9002882e698cab68c381e94048022602a9d1b1`）补齐 source-floor
-  producer 语义，并新增 `0082_tournament_review_source_floor_requeue.sql`：历史/静态
-  依赖不再把 `source_min_checked_at` 推到 event checkpoint 之前；已经存在的旧
-  READY head 会被有界地撤下并重新入队。该 PR 尚未合并或部署。
+- PR `#368`（合并前 head `cd9002882e698cab68c381e94048022602a9d1b1`，merge
+  `530118af6da52001248bc969b0b518d40e302d2a`，2026-08-31 10:15 UTC）补齐
+  source-floor producer 语义，并新增 `0082_tournament_review_source_floor_requeue.sql`：
+  历史/静态依赖不再把 `source_min_checked_at` 推到 event checkpoint 之前；已经存在的
+  旧 READY head 会被有界地撤下并重新入队。CI test/integration 均通过。两次 deploy run
+  `33382095955`、`33382453786` 都在执行 migration 前发现
+  `Database has 2 staging publication(s)`，因此没有停止服务、没有切 slot、没有 apply
+  migration；不能把该修复当成生产已生效。
 - `src/jobs/maintenance.jobs.ts`、`src/scheduler/job-registry.ts`、
   `src/workers/maintenance.worker.ts`：5 分钟 `my-fpl-orchestration` lane，
   每次最多 20 scopes。
@@ -340,9 +346,9 @@ llm:gql:* query cache (TTL 60s/300s)
 
 | 仓库 | 已执行证据 | 结果 |
 | --- | --- | --- |
-| Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI 新 head 的 integration 仍待完成 |
-| Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；三次 `/health/deploy` probe；`/health/ready`、`/health/live` | 已证明部署 identity、scheduler、worker、publicationConsistency 为 true；尚未证明 6953 受保护 publication 消费样本 |
-| GraphQL | PR `#193` 本地 focused 31 / 0 fail；完整 987 pass、7 skip、0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build | 代码门通过；候选 head 已 rebase 到 `main` 的 `0a03ade36ac4b263c5aa73617cc02c29baafbade`，仍需为 `c7d4223e...` 完成 exact-head review |
+| Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI test/integration 通过；部署因两个 staging publication 的 quiescence gate 停止在 migration 前 |
+| Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；`/health/deploy`、`/health/ready`、`/health/live` | 已证明 #366 部署 identity、scheduler、worker、publicationConsistency 为 true；#368 尚未生效，且尚未证明 6953 受保护 publication 消费样本 |
+| GraphQL | PR `#193` 当前 head `25fd8d415be3a8336b021357ea0df1a92023cd64`；focused 34 / 0 fail；完整 997 pass、7 skip、0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build；CI 两个 verify + 两个 database-contract 均通过 | 六个旧 P2 review thread 已按实际 full SHA disposition/resolved；正确 full-SHA marker 已重发，当前 exact-head review 仍在运行，不能复用旧 commit review |
 | Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
 | Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
@@ -355,9 +361,9 @@ llm:gql:* query cache (TTL 60s/300s)
 
 | Gate | 状态 | 证据/缺口 |
 | --- | --- | --- |
-| Data producer source floor | 部分通过 | `#368` 已有 producer 修复与 `0082` requeue；等待 exact-head Codex review、CI integration、merge、migration apply |
-| Data runtime deployment | 已通过（#366） | exact deploy SHA、health probes、scheduler/worker/publication consistency 均有证据；`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
-| GraphQL schema/read path | 待最终 gate | 旧 `27bf...` 已落后 `main`；必须 rebase 到 `0a03...`、重跑 gates、重新 review，旧 review 不能复用 |
+| Data producer source floor | 已合并、未生效 | `#368` merge `530118af...`、CI test/integration 通过；deploy `33382095955`/`33382453786` 因 `Database has 2 staging publication(s)` 停在 migration 前；`0082` apply/reconcile/backfill 未验证 |
+| Data runtime deployment | #366 已通过；#368 阻塞 | #366 有 exact deploy SHA、health probes、scheduler/worker/publication consistency；#368 尚未切 slot，`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
+| GraphQL schema/read path | 待 exact-head review | 当前 head `25fd8d415...`，CI 通过，正确 marker 已发；六个旧线程已 resolved，但当前 review 未完成，不能复用旧 review |
 | Web/Mini consumer contract | 未通过 | 两个客户端仍 pin 旧 GraphQL ref，Mini PR 还有 merge conflict；必须在 GraphQL merge SHA 后更新 pin、跑 contract 与消费者路径 |
 | 6953 end-to-end publication | 未验证 | 缺少带保护凭证的 head/publication/count/hash/source span/Redis-cache 对账；不能从 health 200 推断 |
 | V1 retirement | 设计已决定，执行未完成 | V1 不再是 fallback/alias/double-read；客户端切流完成后删除遗留 roots、loader、markup、queries 与文档 |
@@ -367,8 +373,9 @@ llm:gql:* query cache (TTL 60s/300s)
 按以下顺序执行，任一项失败都停在当前版本，不做隐式 V1 fallback：
 
 1. 在备份和 migration login contract 通过后 apply 至 `0082`（包含 `0077`
-   publication schema 与 `0082` source-floor requeue），验证表、索引、grants、
-   RLS 与 runtime reader/writer identity。
+   publication schema 与 `0082` source-floor requeue）。当前 deploy 已被
+   staging-publication quiescence gate 拦住，不能通过清空/绕过该 gate 继续；先收敛
+   staging publication，再验证表、索引、grants、RLS 与 runtime reader/writer identity。
 2. 对当前 season 运行 reconcile/backfill；用 `6953` 验证至少一个 POINTS、
    H2H 或 KNOCKOUT scope 的 source freshness、payload count、hash、head、
    obligation 全部一致。

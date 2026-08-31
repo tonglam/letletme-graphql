@@ -788,6 +788,15 @@ function roundedAverage(total: number, count: number): number {
 	return count === 0 ? 0 : Math.round((total / count) * 100) / 100;
 }
 
+function seasonTransferCost(row: MyTournamentReviewPointsRow): number | null {
+	if (row.seasonGrossPoints === null || row.seasonNetPoints === null) return null;
+	const transferCost = row.seasonGrossPoints - row.seasonNetPoints;
+	if (!Number.isSafeInteger(transferCost) || transferCost < 0) {
+		throw integrityError("Review Season transfer cost is inconsistent with cumulative points");
+	}
+	return transferCost;
+}
+
 function nullableNumber(value: unknown): number | null {
 	if (value === null || value === undefined || value === "") return null;
 	return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -798,8 +807,8 @@ function requiredSafeInteger(value: unknown): number | null {
 	return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 }
 
-function boundedFirst(value: number | null | undefined): number {
-	if (value === null || value === undefined) return 50;
+function boundedFirst(value: number | null | undefined, defaultValue = 50): number {
+	if (value === null || value === undefined) return defaultValue;
 	if (!Number.isInteger(value) || value < 1 || value > 100) {
 		throw new GraphQLError("first must be between 1 and 100", {
 			extensions: { code: "BAD_USER_INPUT" },
@@ -808,12 +817,20 @@ function boundedFirst(value: number | null | undefined): number {
 	return value;
 }
 
-function decodeCursor(value: string | null | undefined, expectedRevision: string): number {
+function decodeCursor(
+	value: string | null | undefined,
+	expectedRevision: string,
+	expectedScope: string
+): number {
 	if (!value) return 0;
 	try {
 		const decoded = Buffer.from(value, "base64url").toString("utf8");
 		const parsed: unknown = JSON.parse(decoded);
-		if (isRecord(parsed) && parsed.revision === expectedRevision) {
+		if (
+			isRecord(parsed) &&
+			parsed.revision === expectedRevision &&
+			parsed.scope === expectedScope
+		) {
 			const offset = Number(parsed.offset);
 			if (Number.isSafeInteger(offset) && offset >= 0) return offset;
 		}
@@ -825,8 +842,15 @@ function decodeCursor(value: string | null | undefined, expectedRevision: string
 	});
 }
 
-function encodeCursor(offset: number, revision: string): string {
-	return Buffer.from(JSON.stringify({ offset, revision }), "utf8").toString("base64url");
+function encodeCursor(offset: number, revision: string, scope: string): string {
+	return Buffer.from(JSON.stringify({ offset, revision, scope }), "utf8").toString("base64url");
+}
+
+function reviewCursorScope(
+	row: Pick<PublicationRow, "season_id" | "tournament_id" | "event_id" | "format">,
+	collection: string
+): string {
+	return JSON.stringify([row.season_id, row.tournament_id, row.event_id, row.format, collection]);
 }
 
 function serializePostgresJsonb(value: unknown): string {
@@ -952,9 +976,11 @@ function pointsRowCache(value: unknown): value is MyTournamentReviewPointsRow {
 	}
 	return (
 		!value.applicable ||
-		[value.groupId, value.rank, value.grossPoints, value.transferCost, value.netPoints].every(
-			(candidate) => candidate !== null
-		)
+		(strictPositiveInt(value.groupId) !== null &&
+			strictPositiveInt(value.rank) !== null &&
+			[value.grossPoints, value.transferCost, value.netPoints].every(
+				(candidate) => candidate !== null
+			))
 	);
 }
 
@@ -1001,16 +1027,7 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 	// invalid for both collections to be empty.
 	if (value.matches.length === 0 && value.standings.length === 0) return false;
 	const matchIdentities = new Set<string>();
-	const standingIdentities = new Set<string>();
 	const matchParticipantIdentities = new Set<string>();
-	for (const standing of value.standings) {
-		if (!isRecord(standing)) continue;
-		const groupId = strictPositiveInt(standing.groupId);
-		const entryId = strictPositiveInt(standing.entryId);
-		if (groupId !== null && entryId !== null) {
-			standingIdentities.add(`${groupId}:${entryId}`);
-		}
-	}
 	const matchesValid = value.matches.every((match) => {
 		if (!isRecord(match)) return false;
 		const groupId = strictPositiveInt(match.groupId);
@@ -1041,8 +1058,11 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 		const participantsValid = [home, away].every((side) => {
 			if (!isRecord(side) || side.isAverage === true) return true;
 			const entryId = strictPositiveInt(side.entryId);
-			if (entryId !== null) matchParticipantIdentities.add(`${groupId}:${entryId}`);
-			return entryId !== null && standingIdentities.has(`${groupId}:${entryId}`);
+			if (entryId === null) return false;
+			const participantIdentity = `${groupId}:${entryId}`;
+			if (matchParticipantIdentities.has(participantIdentity)) return false;
+			matchParticipantIdentities.add(participantIdentity);
+			return true;
 		});
 		return (
 			nonEmptyString(match.matchId) &&
@@ -1063,30 +1083,36 @@ function h2hCache(value: unknown): value is MyTournamentReviewH2H {
 			return false;
 		}
 		standingIds.add(entryId);
+		const rank = standing.rank;
+		const played = standing.played;
+		const won = standing.won;
+		const drawn = standing.drawn;
+		const lost = standing.lost;
+		const matchPoints = standing.matchPoints;
+		const pointsFor = standing.pointsFor;
+		const pointsAgainst = standing.pointsAgainst;
 		return (
-			typeof standing.rank === "number" &&
-			Number.isSafeInteger(standing.rank) &&
-			standing.rank > 0 &&
-			[standing.played, standing.won, standing.drawn, standing.lost, standing.matchPoints].every(
+			typeof rank === "number" &&
+			Number.isSafeInteger(rank) &&
+			rank > 0 &&
+			typeof played === "number" &&
+			typeof won === "number" &&
+			typeof drawn === "number" &&
+			typeof lost === "number" &&
+			typeof matchPoints === "number" &&
+			[played, won, drawn, lost, matchPoints].every(
 				(candidate) =>
 					typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
 			) &&
-			[standing.pointsFor, standing.pointsAgainst].every(
+			played === won + drawn + lost &&
+			[pointsFor, pointsAgainst].every(
 				(candidate) => typeof candidate === "number" && Number.isSafeInteger(candidate)
 			)
 		);
 	});
-	// This decoder sees an individual page, not the complete immutable
-	// publication.  When a page has match rows, require the standings on that
-	// page to be represented by a real side; a standings-only continuation is
-	// explicitly allowed above and is covered by the full-payload mapper.
-	const standingFixtureCoverage =
-		value.matches.length === 0 ||
-		[...standingIdentities].every((identity) => matchParticipantIdentities.has(identity));
 	return (
 		matchesValid &&
 		standingsValid &&
-		standingFixtureCoverage &&
 		(value.nextCursor === null || typeof value.nextCursor === "string") &&
 		typeof value.hasNextPage === "boolean"
 	);
@@ -1105,6 +1131,18 @@ function knockoutSideCache(value: unknown): value is MyTournamentReviewKnockoutS
 			value.goalsConceded,
 		].every((candidate) => nullableSafeInteger(candidate))
 	);
+}
+
+function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId: unknown): boolean {
+	if (!isRecord(home) || !isRecord(away) || winnerEntryId === null) return true;
+	return [
+		home.netPoints,
+		home.goalsScored,
+		home.goalsConceded,
+		away.netPoints,
+		away.goalsScored,
+		away.goalsConceded,
+	].every((value) => value !== null);
 }
 
 function knockoutCache(value: unknown): value is MyTournamentReviewKnockout {
@@ -1134,6 +1172,7 @@ function knockoutCache(value: unknown): value is MyTournamentReviewKnockout {
 				(match.away === null || knockoutSideCache(match.away)) &&
 				(match.home !== null || match.away !== null) &&
 				(home === null || away === null || homeEntryId !== awayEntryId) &&
+				knockoutSettledScoresValid(home, away, match.winnerEntryId) &&
 				(match.winnerEntryId === null ||
 					match.winnerEntryId === match.home?.entryId ||
 					match.winnerEntryId === match.away?.entryId)
@@ -1544,6 +1583,12 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 		) {
 			throw integrityError("Review applicable points row is incomplete");
 		}
+		if (
+			mapped.applicable &&
+			(strictPositiveInt(mapped.groupId) === null || strictPositiveInt(mapped.rank) === null)
+		) {
+			throw integrityError("Review applicable points row has invalid group or rank");
+		}
 		return mapped;
 	});
 }
@@ -1638,7 +1683,11 @@ function mapH2H(value: unknown): {
 				matchIdentities.add(identity);
 				for (const side of [home, away]) {
 					if (side && !side.isAverage) {
-						matchParticipantIdentities.add(`${groupId}:${side.entryId}`);
+						const participantIdentity = `${groupId}:${side.entryId}`;
+						if (matchParticipantIdentities.has(participantIdentity)) {
+							throw integrityError("Review H2H entries appear in multiple matches");
+						}
+						matchParticipantIdentities.add(participantIdentity);
 					}
 				}
 				return {
@@ -1678,7 +1727,8 @@ function mapH2H(value: unknown): {
 					won < 0 ||
 					drawn < 0 ||
 					lost < 0 ||
-					matchPoints < 0
+					matchPoints < 0 ||
+					played !== won + drawn + lost
 				) {
 					throw integrityError("Review H2H standing payload is invalid");
 				}
@@ -1778,7 +1828,10 @@ function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 			(raw.away !== null && !away) ||
 			(home === null && away === null) ||
 			(home !== null && away !== null && home.entryId === away.entryId) ||
-			(winnerEntryId !== null && winnerEntryId !== home?.entryId && winnerEntryId !== away?.entryId)
+			(winnerEntryId !== null &&
+				winnerEntryId !== home?.entryId &&
+				winnerEntryId !== away?.entryId) ||
+			!knockoutSettledScoresValid(home, away, winnerEntryId)
 		) {
 			throw integrityError("Review knockout match payload is invalid");
 		}
@@ -1803,18 +1856,19 @@ function pageSlice<T>(
 	values: T[],
 	first: number,
 	after: string | null | undefined,
-	revision: string
+	revision: string,
+	scope: string
 ): {
 	items: T[];
 	nextCursor: string | null;
 	hasNextPage: boolean;
 } {
-	const start = decodeCursor(after, revision);
+	const start = decodeCursor(after, revision, scope);
 	const items = values.slice(start, start + first);
 	const hasNextPage = start + items.length < values.length;
 	return {
 		items,
-		nextCursor: hasNextPage ? encodeCursor(start + items.length, revision) : null,
+		nextCursor: hasNextPage ? encodeCursor(start + items.length, revision, scope) : null,
 		hasNextPage,
 	};
 }
@@ -1887,7 +1941,13 @@ function pointsFromPayload(
 		view === "SEASON" ? aggregates.seasonGrossPointsAverage : aggregates.grossPointsAverage;
 	const selectedNetPointsTotal =
 		view === "SEASON" ? aggregates.seasonNetPointsTotal : aggregates.netPointsTotal;
-	const page = pageSlice(rows, first, after, String(row.revision));
+	const page = pageSlice(
+		rows,
+		first,
+		after,
+		String(row.revision),
+		reviewCursorScope(row, view === "SEASON" ? "SEASON_POINTS" : "GAMEWEEK_POINTS")
+	);
 	return {
 		headlineMetric: "gross",
 		grossPointsTotal: selectedGrossPointsTotal,
@@ -1901,6 +1961,7 @@ function pointsFromPayload(
 				? page.items.map((item) => ({
 						...item,
 						grossPoints: item.seasonGrossPoints,
+						transferCost: seasonTransferCost(item),
 						netPoints: item.seasonNetPoints,
 					}))
 				: page.items,
@@ -1922,8 +1983,15 @@ function h2hFromPayload(
 	) {
 		throw integrityError("Review H2H row count does not match publication metadata");
 	}
-	const page = pageSlice(source.matches, first, after, String(row.revision));
-	const standingsPage = pageSlice(source.standings, first, after, String(row.revision));
+	const cursorScope = reviewCursorScope(row, "H2H");
+	const page = pageSlice(source.matches, first, after, String(row.revision), cursorScope);
+	const standingsPage = pageSlice(
+		source.standings,
+		first,
+		after,
+		String(row.revision),
+		cursorScope
+	);
 	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
 	return {
 		matches: page.items,
@@ -1943,7 +2011,13 @@ function knockoutFromPayload(
 	if (matches.length !== Number(row.row_count)) {
 		throw integrityError("Review knockout row count does not match publication metadata");
 	}
-	const page = pageSlice(matches, first, after, String(row.revision));
+	const page = pageSlice(
+		matches,
+		first,
+		after,
+		String(row.revision),
+		reviewCursorScope(row, "KNOCKOUT")
+	);
 	return {
 		matches: page.items,
 		nextCursor: page.nextCursor,
@@ -2118,7 +2192,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadGameweekReview(context, args) {
-		const first = boundedFirst(args.first);
+		const first = boundedFirst(args.first, 50);
 		const revision = args.revision?.trim() || null;
 		if (
 			revision &&
@@ -2189,7 +2263,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadSeasonReview(context, args) {
-		const first = boundedFirst(args.first);
+		const first = boundedFirst(args.first, 100);
 		const headResult = await context.database.query<ReviewHeadRow>(
 			MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
 			[context.currentSeason.seasonId, args.tournamentId, args.throughEventId]

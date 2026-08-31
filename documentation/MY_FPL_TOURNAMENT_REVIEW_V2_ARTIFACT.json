@@ -1,0 +1,225 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "My LetLetMe Tournament Review V2：6953 端到端链路审查",
+    "description": "V2-only settled-snapshot review chain audit from sync/finalization through PostgreSQL publication, GraphQL, Web/Mini consumers and Ops evidence.",
+    "generatedAt": "2026-08-31T11:08:01Z",
+    "sources": [
+      {
+        "id": "audit_report",
+        "label": "6953 V2 链路审查报告",
+        "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+        "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md"
+      },
+      {
+        "id": "gate_evidence",
+        "label": "V2 发布门审计快照",
+        "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+        "href": "https://github.com/tonglam/letletme-graphql/pull/193",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "description": "Bounded, reviewed gate evidence reproduced as an inline VALUES snapshot; this is not a production query.",
+          "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.5, '待 exact-head review', '25fd8d415… CI 通过；正确 full-SHA marker 已发，review 运行中'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
+          "filters": ["审查日期 2026-08-31", "只包含已核验的代码、CI、部署与显式缺口", "不包含生产凭证或原始 payload"],
+          "metric_definitions": ["score: 1 = gate 通过，0.5 = 部分通过，0 = 未通过/未验证；不是生产成功率"]
+        }
+      },
+      {
+        "id": "timing_evidence",
+        "label": "复盘时效契约快照",
+        "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+        "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "description": "Bounded V2 timing targets reproduced as an inline VALUES snapshot; these are contract targets, not measured production percentiles.",
+          "sql": "SELECT * FROM (VALUES ('catalog cache', 60, '目标'), ('review/status cache', 300, '目标'), ('worker cadence', 300, '目标'), ('eligible→visible p95 target', 900, '目标'), ('eligible→visible hard line', 4500, '硬线'), ('lease reclaim', 120, '目标'), ('Mini stale fallback', 900, '硬线'), ('degraded repair horizon', 86400, '窗口')) AS t(budget, seconds, class)",
+          "filters": ["V2 report timing contract", "seconds are wall-clock budgets", "not a production measurement"],
+          "metric_definitions": ["seconds: maximum or target elapsed time for the named cache, worker, visibility, reclaim, stale, or repair budget"]
+        }
+      },
+      {
+        "id": "data_pr_368",
+        "label": "Data PR #368 / deploy evidence",
+        "href": "https://github.com/tonglam/letletme_data/pull/368"
+      },
+      {
+        "id": "graphql_pr_193",
+        "label": "GraphQL PR #193",
+        "href": "https://github.com/tonglam/letletme-graphql/pull/193"
+      },
+      {
+        "id": "web_pr_266",
+        "label": "Web PR #266",
+        "href": "https://github.com/tonglam/letletme-web/pull/266"
+      },
+      {
+        "id": "mini_pr_82",
+        "label": "Mini PR #82",
+        "href": "https://github.com/tonglam/letletme-wechat-miniprogram/pull/82"
+      }
+    ],
+    "charts": [
+      {
+        "id": "gate_status",
+        "title": "V2 发布门状态（6953）",
+        "subtitle": "1 = 通过，0.5 = 部分通过，0 = 未通过；生产 migration、消费者 pin 和受保护样本仍是硬阻断。",
+        "type": "bar",
+        "dataset": "gate_status",
+        "sourceId": "gate_evidence",
+        "encodings": {
+          "x": { "field": "gate", "type": "nominal", "label": "Gate" },
+          "y": { "field": "score", "type": "quantitative", "label": "状态分（0–1）" }
+        }
+      },
+      {
+        "id": "time_budget",
+        "title": "复盘链路时效目标与硬线（秒）",
+        "subtitle": "正常目标为结算 checkpoint 后 900 秒内可见，4500 秒为必须告警/人工介入的硬线。",
+        "type": "bar",
+        "dataset": "time_budgets",
+        "sourceId": "timing_evidence",
+        "encodings": {
+          "x": { "field": "budget", "type": "nominal", "label": "预算" },
+          "y": { "field": "seconds", "type": "quantitative", "label": "秒" }
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "evidence_table",
+        "title": "当前 gate 证据与缺口",
+        "subtitle": "代码、CI、部署和受保护线上样本分开计分。",
+        "dataset": "gate_status",
+        "sourceId": "gate_evidence",
+        "defaultSort": { "field": "score", "direction": "asc" },
+        "columns": [
+          { "field": "gate", "label": "Gate", "type": "text" },
+          { "field": "score", "label": "状态分", "type": "number" },
+          { "field": "state", "label": "状态", "type": "text" },
+          { "field": "evidence", "label": "证据/缺口", "type": "text" }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# My LetLetMe Tournament Review V2：6953 端到端链路审查"
+      },
+      {
+        "id": "summary",
+        "type": "markdown",
+        "body": "## Executive Summary\n\n本报告审查 V2 唯一路径：已结算快照才进入复盘；未结算轮次统一留在 Live。Data 负责 source validation、immutable publication 与 atomic head，GraphQL 负责授权、revision pin、fail-closed 和 query cache，Web/Mini 负责 V2 contract 与格式化页面。\n\n当前结果是 **代码与 CI 已有较强闭环，但生产 readiness 仍为 partial**：Data #368 已合并，deploy 在 migration 前被 `Database has 2 staging publication(s)` 安全拦截；GraphQL #193 当前 exact-head review 尚未结束；Web/Mini 仍 pin 旧 GraphQL contract；6953 受保护 publication/status/consumer 样本缺失。"
+      },
+      { "id": "gate-chart", "type": "chart", "chartId": "gate_status" },
+      { "id": "time-chart", "type": "chart", "chartId": "time_budget" },
+      { "id": "gate-table", "type": "table", "tableId": "evidence_table" },
+      {
+        "id": "business",
+        "type": "markdown",
+        "body": "## 业务口径与页面边界\n\n- **Season**：累计竞争格局，只看 finalized snapshot。\n- **Gameweek**：单轮表现；未结算数据统一去 Live。\n- **POINTS**：本轮主标题使用 Gross，cost/Net 作为解释维度。\n- **H2H / KNOCKOUT**：独立 typed payload 与复盘布局，不继续强塞 points-centric 页面。\n- 平台管理员通过 `scope = ALL` 查看所有赛事；自定义赛事 `setup_status = ready` 后进入同一 obligation/reconcile/publication 链路。\n\nV1 与 V2 冲突时舍弃 V1；不做 V1 fallback、alias 或双读。"
+      },
+      {
+        "id": "path",
+        "type": "markdown",
+        "body": "## 数据链路与一致性\n\n`FPL source → sync/finalization → fpl.events + competition facts → 5 分钟 reconcile → durable obligation/lease → immutable publication revision → atomic head → GraphQL exact-head read → revision-aware query cache → Web/Mini V2`。\n\n核心不变量：PostgreSQL 是业务真相；Redis 只做带 revision/args/TTL 的 query cache；publication immutable；head 是唯一切换点；坏 payload、count、hash、freshness 或跨 revision 读取均 fail-closed。"
+      },
+      {
+        "id": "freshness",
+        "type": "markdown",
+        "body": "## 新鲜度、时效与限流\n\n设计目标：catalog/cache 60 秒，review/status query cache 300 秒，Mini fresh 300 秒、transport failure stale 900 秒；worker 每 300 秒、每次最多 20 scopes；eligible → visible 目标 900 秒，4500 秒硬线；lease reclaim 120 秒；degraded repair horizon 24 小时。\n\n这些是契约目标/硬线，不是线上 p95 实测。必须在真实结算窗口补采 eligible→visible、pending age、queue tail、head parity、cache stale 和客户端响应。"
+      },
+      {
+        "id": "failure",
+        "type": "markdown",
+        "body": "## 失败补偿与复杂度 trade-off\n\n源延迟、缺行、transient DB error、worker crash、publication/head mismatch、Redis outage、旧客户端 426 分别进入 WAITING_SOURCE/PENDING/PROCESSING→reclaim/DEGRADED 或 fail-closed；补偿只针对同一 `(season,tournament,event)` scope，先生成新 revision，再原子切 head，不在 GraphQL 写 Data。\n\n保留 immutable publication + head、typed POINTS/H2H/KO、durable obligation、cursor（first ≤ 100）和 5 分钟 cadence，是用可审计性与一致性换取写入/状态机/容量复杂度；对已结算复盘值得。"
+      },
+      {
+        "id": "release",
+        "type": "markdown",
+        "body": "## 发布前 gate 与 V1 退出条件\n\n1. staging publication 收敛后重新执行受控 migration/apply `0082`，验证 grants/RLS/identity。\n2. reconcile/backfill 当前 season，并以 6953 验证 source span、count、hash、head、obligation 对账。\n3. 受保护只读凭证验证 PostgreSQL、Redis revision key、GraphQL 426/200、ACCESSIBLE/MANAGED/ALL、Web/Mini consumer path。\n4. 连续观察一个 finalized window，再做 source delay、lease reclaim、publication failure、head mismatch、Redis outage 和 old-client 426 演练。\n5. 全部消费者完成 V2 后删除遗留 V1 roots/loader/markup/queries/docs；上线时不恢复 V1 fallback。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 限制与后续问题\n\n本轮没有生产写权限，没有手工改 Data 表或 Redis，也没有绕过 quiescence/auth/rate-limit gate。缺少 6953 受保护 payload、真实 row count/head/hash/source span、Redis cache 对账和 Web/Mini response，因此报告结论是 **partial / not production-ready**。\n\n待补：0082 实际撤下/重建 head 数量；6953 cumulative event 覆盖；120 秒 lease 在大 payload 下的稳定性；20 scopes/5 分钟的 pending tail；自定义赛事从创建到 ready、失败重试和删除清理。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-31T11:08:01Z",
+    "status": "partial",
+    "accessIssues": [
+      {
+        "id": "protected-6953-sample",
+        "dataset": "tournament_6953",
+        "message": "Protected 6953 publication/status/consumer sample was not available in this audit; production readiness remains unverified."
+      }
+    ],
+    "datasets": {
+      "gate_status": [
+        { "gate": "Data producer", "score": 0.5, "state": "已合并、未生效", "evidence": "#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止" },
+        { "gate": "Data runtime", "score": 0.5, "state": "#366 通过；#368 阻塞", "evidence": "#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot" },
+        { "gate": "GraphQL read path", "score": 0.5, "state": "待 exact-head review", "evidence": "25fd8d415… CI 通过；正确 full-SHA marker 已发，review 运行中" },
+        { "gate": "Web/Mini contract", "score": 0.0, "state": "未通过", "evidence": "PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict" },
+        { "gate": "6953 end-to-end", "score": 0.0, "state": "未验证", "evidence": "缺受保护 publication/status/consumer sample" },
+        { "gate": "V1 retirement", "score": 0.5, "state": "设计决定、执行未完成", "evidence": "V2-only 规则已写入；客户端切流后清理遗留 V1" }
+      ],
+      "time_budgets": [
+        { "budget": "catalog cache", "seconds": 60, "class": "目标" },
+        { "budget": "review/status cache", "seconds": 300, "class": "目标" },
+        { "budget": "worker cadence", "seconds": 300, "class": "目标" },
+        { "budget": "eligible→visible p95 target", "seconds": 900, "class": "目标" },
+        { "budget": "eligible→visible hard line", "seconds": 4500, "class": "硬线" },
+        { "budget": "lease reclaim", "seconds": 120, "class": "目标" },
+        { "budget": "Mini stale fallback", "seconds": 900, "class": "硬线" },
+        { "budget": "degraded repair horizon", "seconds": 86400, "class": "窗口" }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "audit_report",
+      "label": "6953 V2 链路审查报告",
+      "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+      "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md"
+    },
+    {
+      "id": "gate_evidence",
+      "label": "V2 发布门审计快照",
+      "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+      "href": "https://github.com/tonglam/letletme-graphql/pull/193",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "description": "Bounded, reviewed gate evidence reproduced as an inline VALUES snapshot; this is not a production query.",
+        "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.5, '待 exact-head review', '25fd8d415… CI 通过；正确 full-SHA marker 已发，review 运行中'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
+        "filters": ["审查日期 2026-08-31", "只包含已核验的代码、CI、部署与显式缺口", "不包含生产凭证或原始 payload"],
+        "metric_definitions": ["score: 1 = gate 通过，0.5 = 部分通过，0 = 未通过/未验证；不是生产成功率"]
+      }
+    },
+    {
+      "id": "timing_evidence",
+      "label": "复盘时效契约快照",
+      "path": "documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+      "href": "https://github.com/tonglam/letletme-graphql/blob/codex/myfpl-tournament-review-v2-graphql-20260830/documentation/MY_FPL_TOURNAMENT_REVIEW_V2_REPORT.md",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "description": "Bounded V2 timing targets reproduced as an inline VALUES snapshot; these are contract targets, not measured production percentiles.",
+        "sql": "SELECT * FROM (VALUES ('catalog cache', 60, '目标'), ('review/status cache', 300, '目标'), ('worker cadence', 300, '目标'), ('eligible→visible p95 target', 900, '目标'), ('eligible→visible hard line', 4500, '硬线'), ('lease reclaim', 120, '目标'), ('Mini stale fallback', 900, '硬线'), ('degraded repair horizon', 86400, '窗口')) AS t(budget, seconds, class)",
+        "filters": ["V2 report timing contract", "seconds are wall-clock budgets", "not a production measurement"],
+        "metric_definitions": ["seconds: maximum or target elapsed time for the named cache, worker, visibility, reclaim, stale, or repair budget"]
+      }
+    },
+    { "id": "data_pr_368", "label": "Data PR #368 / deploy evidence", "href": "https://github.com/tonglam/letletme_data/pull/368" },
+    { "id": "graphql_pr_193", "label": "GraphQL PR #193", "href": "https://github.com/tonglam/letletme-graphql/pull/193" },
+    { "id": "web_pr_266", "label": "Web PR #266", "href": "https://github.com/tonglam/letletme-web/pull/266" },
+    { "id": "mini_pr_82", "label": "Mini PR #82", "href": "https://github.com/tonglam/letletme-wechat-miniprogram/pull/82" }
+  ]
+}
