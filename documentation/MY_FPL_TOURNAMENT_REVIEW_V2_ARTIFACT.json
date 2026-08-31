@@ -5,7 +5,7 @@
     "surface": "report",
     "title": "My LetLetMe Tournament Review V2：6953 端到端链路审查",
     "description": "V2-only settled-snapshot review chain audit from sync/finalization through PostgreSQL publication, GraphQL, Web/Mini consumers and Ops evidence.",
-    "generatedAt": "2026-08-31T16:22:08Z",
+    "generatedAt": "2026-08-31T16:47:47Z",
     "sources": [
       {
         "id": "audit_report",
@@ -22,7 +22,7 @@
           "engine": "duckdb",
           "language": "sql",
           "description": "Bounded, reviewed gate evidence reproduced as an inline VALUES snapshot; this is not a production query.",
-          "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.75, '代码修复、待最终 review', 'PR #193 tested code head 29372f72a4cc6b1dea62b028db944a439b447f04；artifact-bearing head 是该 code head 之后的 docs commit（exact SHA 由 PR review marker 记录）；focused87/full1050；CI verify/database-contract 33413505953、33413511341 通过；此前 4dca17f… exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、以及最终 review 的 3 个 P2 已修复，仍需 clean signal'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
+          "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.75, '代码修复、待最终 review', 'PR #193 tested code head 9a12d9b33ac1b0a56fabbaa42a47096948ea6b92；artifact-bearing head 是该 code head 之后的 docs commit（exact SHA 由 PR review marker 记录）；focused90/full1053；CI verify/database-contract 33415701328、33415700382 通过；此前 4dca17f… exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 2 个 P2 已修复并 disposition/resolve，仍需 clean signal'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
           "filters": ["审查日期 2026-08-31", "只包含已核验的代码、CI、部署与显式缺口", "不包含生产凭证或原始 payload"],
           "metric_definitions": ["score: 1 = gate 通过，0.5 = 部分通过，0 = 未通过/未验证；不是生产成功率"]
         }
@@ -113,7 +113,7 @@
       {
         "id": "summary",
         "type": "markdown",
-        "body": "## Executive Summary\n\n本报告审查 V2 唯一路径：已结算快照才进入复盘；未结算轮次统一留在 Live。Data 负责 source validation、immutable publication 与 atomic head，GraphQL 负责授权、revision pin、fail-closed 和 query cache，Web/Mini 负责 V2 contract 与格式化页面。\n\n当前结果是 **代码与 CI 已有较强闭环，但生产 readiness 仍为 partial**：Data #368 已合并，deploy 在 migration 前被 `Database has 2 staging publication(s)` 安全拦截；GraphQL PR #193 tested code head `29372f7…` 已修复此前 review findings，focused87/full1050 且 CI 通过；当前报告/artefact 是该 code head 之后的 docs commit，仍需针对该 exact artifact head 取得 clean review；Web/Mini 仍 pin 旧 GraphQL contract；6953 受保护 publication/status/consumer 样本缺失。"
+        "body": "## Executive Summary\n\n本报告审查 V2 唯一路径：已结算快照才进入复盘；未结算轮次统一留在 Live。Data 负责 source validation、immutable publication 与 atomic head，GraphQL 负责授权、revision pin、fail-closed 和 query cache，Web/Mini 负责 V2 contract 与格式化页面。\n\n当前结果是 **代码与 CI 已有较强闭环，但生产 readiness 仍为 partial**：Data #368 已合并，deploy 在 migration 前被 `Database has 2 staging publication(s)` 安全拦截；GraphQL PR #193 tested code head `9a12d9b…` 已修复此前 review findings，并新增 review event 边界、淘汰赛胜者与 tiebreak 校验，focused90/full1053 且 CI 通过；当前报告/artefact 是该 code head 之后的 docs commit，仍需针对该 exact artifact head 取得 clean review；Web/Mini 仍 pin 旧 GraphQL contract；6953 受保护 publication/status/consumer 样本缺失。"
       },
       { "id": "gate-chart", "type": "chart", "chartId": "gate_status" },
       { "id": "time-chart", "type": "chart", "chartId": "time_budget" },
@@ -152,7 +152,7 @@
   },
   "snapshot": {
     "version": 1,
-    "generatedAt": "2026-08-31T16:22:08Z",
+    "generatedAt": "2026-08-31T16:47:47Z",
     "status": "partial",
     "accessIssues": [
       {
@@ -165,7 +165,7 @@
       "gate_status": [
         { "gate": "Data producer", "score": 0.5, "state": "已合并、未生效", "evidence": "#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止" },
         { "gate": "Data runtime", "score": 0.5, "state": "#366 通过；#368 阻塞", "evidence": "#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot" },
-        { "gate": "GraphQL read path", "score": 0.75, "state": "代码修复、待最终 review", "evidence": "PR #193 tested code head 29372f72a4cc6b1dea62b028db944a439b447f04；artifact-bearing head 是该 code head 之后的 docs commit（exact SHA 由 PR review marker 记录）；focused87/full1050；CI verify/database-contract 33413505953、33413511341 通过；此前 4dca17f… exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、以及最终 review 的 3 个 P2 已修复，仍需 clean signal" },
+        { "gate": "GraphQL read path", "score": 0.75, "state": "代码修复、待最终 review", "evidence": "PR #193 tested code head 9a12d9b33ac1b0a56fabbaa42a47096948ea6b92；artifact-bearing head 是该 code head 之后的 docs commit（exact SHA 由 PR review marker 记录）；focused90/full1053；CI verify/database-contract 33415701328、33415700382 通过；此前 4dca17f… exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 2 个 P2 已修复并 disposition/resolve，仍需 clean signal" },
         { "gate": "Web/Mini contract", "score": 0.0, "state": "未通过", "evidence": "PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict" },
         { "gate": "6953 end-to-end", "score": 0.0, "state": "未验证", "evidence": "缺受保护 publication/status/consumer sample" },
         { "gate": "V1 retirement", "score": 0.5, "state": "设计决定、执行未完成", "evidence": "V2-only 规则已写入；客户端切流后清理遗留 V1" }
@@ -198,7 +198,7 @@
         "engine": "duckdb",
         "language": "sql",
         "description": "Bounded, reviewed gate evidence reproduced as an inline VALUES snapshot; this is not a production query.",
-        "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.75, '代码修复、待最终 review', 'PR #193 tested code head 29372f72a4cc6b1dea62b028db944a439b447f04；artifact-bearing head 是该 code head 之后的 docs commit（exact SHA 由 PR review marker 记录）；focused87/full1050；CI verify/database-contract 33413505953、33413511341 通过；此前 4dca17f… exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、以及最终 review 的 3 个 P2 已修复，仍需 clean signal'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
+        "sql": "SELECT * FROM (VALUES ('Data producer', 0.5, '已合并、未生效', '#368 merge 530118af；deploy 33382095955/33382453786 在 2 staging publication quiescence 前停止'), ('Data runtime', 0.5, '#366 通过；#368 阻塞', '#366 health/scheduler/worker/publicationConsistency 通过；#368 未切 slot'), ('GraphQL read path', 0.75, '代码修复、待最终 review', 'PR #193 tested code head 9a12d9b33ac1b0a56fabbaa42a47096948ea6b92；artifact-bearing head 是该 code head 之后的 docs commit（exact SHA 由 PR review marker 记录）；focused90/full1053；CI verify/database-contract 33415701328、33415700382 通过；此前 4dca17f… exact-head review 的 5 个 P2、随后 1 个 P1/1 个 P2、最终 review 的 3 个 P2，以及最新 review 的 2 个 P2 已修复并 disposition/resolve，仍需 clean signal'), ('Web/Mini contract', 0.0, '未通过', 'PR #266/#82 仍 pin 旧 GraphQL ref；Mini 有 conflict'), ('6953 end-to-end', 0.0, '未验证', '缺受保护 publication/status/consumer sample'), ('V1 retirement', 0.5, '设计决定、执行未完成', 'V2-only 规则已写入；客户端切流后清理遗留 V1')) AS t(gate, score, state, evidence)",
         "filters": ["审查日期 2026-08-31", "只包含已核验的代码、CI、部署与显式缺口", "不包含生产凭证或原始 payload"],
         "metric_definitions": ["score: 1 = gate 通过，0.5 = 部分通过，0 = 未通过/未验证；不是生产成功率"]
       }
