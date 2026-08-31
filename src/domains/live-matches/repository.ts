@@ -1023,13 +1023,23 @@ const readRedisBundle = async (
 
 const lkgKey = (season: string, eventId: number): string => `${season}:${eventId}`;
 
+const isActiveLkgKey = (key: string): boolean => {
+	for (const [season, eventId] of processActiveEvent) {
+		if (lkgKey(season, eventId) === key) return true;
+	}
+	return false;
+};
+
 const rememberLkg = (season: string, eventId: number, value: SelectedLkg): void => {
 	const key = lkgKey(season, eventId);
 	if (processLkg.has(key)) processLkg.delete(key);
 	processLkg.set(key, value);
 	while (processLkg.size > LIVE_MATCHES_PROCESS_LKG_LIMIT) {
-		const oldest = processLkg.keys().next().value;
-		if (typeof oldest !== "string") break;
+		// The active event is a protected availability fallback. Historical
+		// explicit reads may evict one another, but they must never evict the
+		// current event's process LKG while Redis/PG are recovering.
+		const oldest = [...processLkg.keys()].find((candidate) => !isActiveLkgKey(candidate));
+		if (oldest === undefined) break;
 		processLkg.delete(oldest);
 	}
 };
@@ -1080,8 +1090,26 @@ const compatibleDetail = (
 const chooseDetail = (
 	desk: MatchDeskCandidate,
 	candidates: readonly (MatchDetailCandidate | null)[]
-): MatchDetailCandidate | null =>
-	candidates.find((candidate) => compatibleDetail(desk, candidate)) ?? null;
+): MatchDetailCandidate | null => {
+	let selected: MatchDetailCandidate | null = null;
+	for (const candidate of candidates) {
+		if (!compatibleDetail(desk, candidate)) continue;
+		if (!selected) {
+			selected = candidate;
+			continue;
+		}
+		if (candidate.publication.generation > selected.publication.generation) {
+			selected = candidate;
+			continue;
+		}
+		if (
+			candidate.publication.generation === selected.publication.generation &&
+			Date.parse(candidate.publication.publishedAt) > Date.parse(selected.publication.publishedAt)
+		)
+			selected = candidate;
+	}
+	return selected;
+};
 
 const selectNewestDesk = (
 	candidates: readonly (MatchDeskCandidate | null)[]

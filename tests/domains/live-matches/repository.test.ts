@@ -129,6 +129,7 @@ const buildBundle = (
 		deskGeneration?: number;
 		deskState?: "LIVE_ACTIVE" | "FINALIZED";
 		detailDeskGeneration?: number;
+		detailGeneration?: number;
 		detailItemGeneration?: number;
 		corruptDesk?: boolean;
 		checkpointed?: boolean;
@@ -143,6 +144,7 @@ const buildBundle = (
 	const deskState = options.deskState ?? "LIVE_ACTIVE";
 	const checkpointedAt = options.checkpointed ? later : null;
 	const detailDeskGeneration = options.detailDeskGeneration ?? deskGeneration;
+	const detailGeneration = options.detailGeneration ?? deskGeneration + 10;
 	const deskFixtures = [
 		fixture(101, 2, options.deskStarted ?? true, eventId),
 		fixture(102, 3, options.deskStarted ?? true, eventId),
@@ -184,7 +186,6 @@ const buildBundle = (
 		{ fixtureId: 101, players: [player(3)] },
 		{ fixtureId: 102, players: [player(8)] },
 	];
-	const detailGeneration = deskGeneration + 10;
 	const detailItemGeneration = options.detailItemGeneration ?? detailGeneration;
 	const detailItems = detailFixtures.map((detail) => {
 		const payload = detail.players;
@@ -202,7 +203,7 @@ const buildBundle = (
 	});
 	const detailPublication = {
 		contractVersion: "live-matches-v2",
-		publicationId: publicationId(deskGeneration + 10),
+		publicationId: publicationId(detailGeneration),
 		generation: detailGeneration,
 		season: "2627",
 		eventId,
@@ -256,11 +257,14 @@ const buildBundle = (
 	return { bundle, deskPublication, detailPublication, deskFixtures, detailFixtures };
 };
 
-const buildCheckpointRow = (options: { eventId?: number; deskGeneration?: number } = {}) => {
+const buildCheckpointRow = (
+	options: { eventId?: number; deskGeneration?: number; detailGeneration?: number } = {}
+) => {
 	const built = buildBundle({
 		checkpointed: true,
 		eventId: options.eventId,
 		deskGeneration: options.deskGeneration,
+		detailGeneration: options.detailGeneration,
 	});
 	return {
 		event_id: built.deskPublication.eventId,
@@ -739,6 +743,38 @@ describe("Live Matches V2 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
+	it("prefers a newer same-desk detail checkpoint over process LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(
+			redis,
+			buildBundle({ deskGeneration: 2, detailGeneration: 12 }).bundle
+		);
+		const newerCheckpoint = buildCheckpointRow({ deskGeneration: 2, detailGeneration: 13 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, null]);
+				return { rows: [newerCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.desk?.publication.generation).toBe(2);
+		expect(warm.detail?.publication.generation).toBe(12);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.desk?.publication.generation).toBe(2);
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.detail?.publication.generation).toBe(13);
+		expect(databaseReads).toBe(1);
+	});
+
 	it("prefers a newer same-event checkpoint over an older process LKG", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
@@ -765,6 +801,40 @@ describe("Live Matches V2 read path", () => {
 		expect(recovered.desk?.publication.generation).toBe(3);
 		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 		expect(databaseReads).toBe(1);
+	});
+
+	it("reserves the active event LKG from explicit historical reads", async () => {
+		const redis = new TestRedis();
+		const bundles = new Map(
+			Array.from({ length: 10 }, (_, eventId) => {
+				const bundle = buildBundle({ eventId }).bundle;
+				return [eventId, { ...bundle, eventId }] as const;
+			})
+		);
+		let available = true;
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async (
+			...args
+		) => {
+			if (!available) throw new Error("redis unavailable");
+			const rawEventId = args[args.length - 1];
+			const eventId = rawEventId === "" ? 1 : Number(rawEventId);
+			return JSON.stringify(bundles.get(eventId) ?? bundles.get(1));
+		};
+		const context = buildSnapshotContext(redis, { databaseQuery: async () => ({ rows: [] }) });
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		for (let eventId = 2; eventId <= 9; eventId += 1) {
+			const historical = await readLiveMatchday(context, eventId);
+			expect(historical.eventId).toBe(eventId);
+		}
+		available = false;
+
+		const retained = await readLiveMatchday(context);
+
+		expect(retained.eventId).toBe(1);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.detail?.servedFrom).toBe("PROCESS_LKG");
 	});
 
 	it("uses the numeric season authority for PostgreSQL cold fallback", async () => {
