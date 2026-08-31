@@ -28,18 +28,18 @@ publication consistency 均为 true。
 1. Data `#368` 已合并，但两次 exact-image deploy 都在 migration 前被
    staging-publication quiescence 安全拦截；`0082_tournament_review_source_floor_requeue.sql`
    尚未 apply，生产仍是 `#366` 的镜像/数据状态。
-2. GraphQL `#193` 当前 tested code exact head 是
-	`b9b2e657261084dcf21f9234b39ea46f1bdeb75a`，verify 与 database-contract CI
-	两组 runs（`33424090845`、`33424095266`）均已通过；本地完整测试为 1070 pass、
-	7 skip、0 fail，typecheck、lint、format、layers、docs、deprecation 也通过。该
-	head 包含 H2H 结果、POINTS tournament score、累计成本和缓存 witness 的
-	fail-closed 校验，并进一步固定 review event `1..38` 边界、淘汰赛非平局胜者与
-	权威平局 tiebreak。它已修复此前 exact-head reviews 的全部已记录 P0–P2 findings，
-	包括本轮新增的 6 个 P2（Season freshness/identity、KO 单边胜者、H2H group ID、
-	status latest available event、POINTS view/scope witness、catalog root state）；
-	6 个线程均已由 owner 回复并 resolved。针对当前 exact head 的 clean Codex review
-	已发起，结果仍待返回；不能把 CI green 当作 review clean。Web/Mini 客户端仍未在
-	GraphQL 合并后完成 contract pin，不能宣称消费者闭环。
+2. GraphQL `#193` 当前缓存完整性修复的 tested code head 是
+	`c40a13c`（完整 SHA 以 GitHub 为准）；本地完整测试为 1076 pass、7 skip、0 fail，
+	critical coverage、typecheck、lint、format、layers、docs、deprecation 与 build
+	均已通过。上一轮 verify/database-contract CI（`33424090845`、`33424095266`）对应
+	的是修复前的 review head，不作为 `c40a13c` 的 CI 证据。`c40a13c` 修复了在旧
+	exact-head review 中发现的 6 个 P2：Season POINTS 权威 count 绑定、H2H 完整
+	fixture/standing witness、非 READY 状态身份反向校验、DateTime scalar 校验、
+	Gameweek head scope 绑定，以及 artifact head 记录规则。报告文档提交后，最终
+	**artifact-bearing review head** 是包含本报告的完整 PR head；它与 tested code
+	parent 明确区分，并将用该完整 SHA 重新跑 CI、回复/resolve findings，再请求新的
+	exact-head clean Codex review。当前不能把旧 review 或 CI green 当作新 head clean。
+	Web/Mini 客户端仍未在 GraphQL 合并后完成 contract pin，不能宣称消费者闭环。
 3. 还没有带受保护凭证的 6953 publication/status 样本，因此真实 row count、
    head parity、Season 全历史窗口和端到端消费结果仍属于未验证项。
 
@@ -368,7 +368,7 @@ Season 投影、页 offset/length、适用行数和三组聚合都会在 cache d
 | --- | --- | --- |
 | Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI test/integration 通过；部署因两个 staging publication 的 quiescence gate 停止在 migration 前 |
 | Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；`/health/deploy`、`/health/ready`、`/health/live` | 已证明 #366 部署 identity、scheduler、worker、publicationConsistency 为 true；#368 尚未生效，且尚未证明 6953 受保护 publication 消费样本 |
-| GraphQL | PR `#193` tested code head `b9b2e657261084dcf21f9234b39ea46f1bdeb75a`；focused 107 / 0 fail / 228 expect；完整 1070 pass、7 skip、0 fail、1 snapshot、3557 expect；typecheck、lint、format、layers、docs、deprecation；CI verify/database-contract `33424090845`、`33424095266` 两组均通过 | 已修复并 disposition/resolve 此前所有已记录 P0–P2 findings，本轮 6 个 P2 也已逐条回复并 resolved；当前 exact head 的 clean Codex review 已发起、仍待结果；不得把 CI green 当作 clean review |
+| GraphQL | PR `#193` remediation tested code head `c40a13c`；focused 113 / 0 fail / 242 expect；完整 1076 pass、7 skip、0 fail、1 snapshot、3571 expect；critical coverage、typecheck、lint、format、layers、docs、deprecation、build 通过；上一轮 CI `33424090845`、`33424095266` 对应修复前 head | 旧 review 新增的 6 个 P2 已在 `c40a13c` 修复；报告文档提交后以最终 artifact-bearing PR head 重新跑 CI、disposition/resolve 并请求 exact-head clean review；不得把旧 CI 当作新 head clean |
 | Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
 | Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
@@ -383,7 +383,7 @@ Season 投影、页 offset/length、适用行数和三组聚合都会在 cache d
 | --- | --- | --- |
 | Data producer source floor | 已合并、未生效 | `#368` merge `530118af...`、CI test/integration 通过；deploy `33382095955`/`33382453786` 因 `Database has 2 staging publication(s)` 停在 migration 前；`0082` apply/reconcile/backfill 未验证 |
 | Data runtime deployment | #366 已通过；#368 阻塞 | #366 有 exact deploy SHA、health probes、scheduler/worker/publication consistency；#368 尚未切 slot，`/jobs/status?tournamentId=6953` 仍需受保护凭证样本 |
-| GraphQL schema/read path | CI/local gate 通过，待当前 exact-head review | tested code head `b9b2e657261084dcf21f9234b39ea46f1bdeb75a`；focused 107、完整 1070、CI 4 项通过；此前所有已记录 P0–P2 findings 与本轮 6 个 P2 均已修复、回复并 resolved；当前 exact-head review 已发起，必须取得 clean signal |
+| GraphQL schema/read path | 本地 remediation gate 通过，待最终 artifact-bearing head 的 CI 与 exact-head review | tested code head `c40a13c`；focused 113、完整 1076、critical coverage 与 build 通过；旧 review 的 6 个 P2 已修复但尚未在最终 docs-inclusive head 上完成 disposition/resolve；必须用最终完整 SHA 取得 clean signal |
 | Web/Mini consumer contract | 未通过 | 两个客户端仍 pin 旧 GraphQL ref，Mini PR 还有 merge conflict；必须在 GraphQL merge SHA 后更新 pin、跑 contract 与消费者路径 |
 | 6953 end-to-end publication | 未验证 | 缺少带保护凭证的 head/publication/count/hash/source span/Redis-cache 对账；不能从 health 200 推断 |
 | V1 retirement | 设计已决定，执行未完成 | V1 不再是 fallback/alias/double-read；客户端切流完成后删除遗留 roots、loader、markup、queries 与文档 |
