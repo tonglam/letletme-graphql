@@ -342,7 +342,7 @@ llm:gql:* query cache (TTL 60s/300s)
 | --- | --- | --- |
 | Data | `bun run format:check`、`bun run typecheck`、`bun run lint`；`tournament-review-*` 聚焦测试；完整 `bun test tests/unit` | `#368` 本地 1499 tests / 0 fail；source-floor 聚焦 23 / 0 fail；CI 新 head 的 integration 仍待完成 |
 | Data production | PR `#366` merge `9d7d0ae9e8924b2cf97098cdad935bb37f985cc3`；deploy run `33375793861`；三次 `/health/deploy` probe；`/health/ready`、`/health/live` | 已证明部署 identity、scheduler、worker、publicationConsistency 为 true；尚未证明 6953 受保护 publication 消费样本 |
-| GraphQL | PR `#193` 本地 focused 31 / 0 fail；完整 985 / 0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build | 代码门通过；但 `main` 已推进到 `0a03ade36ac4b263c5aa73617cc02c29baafbade`，旧 head `27bf0a09...` 已 BEHIND，必须 rebase 后重新 exact-head review |
+| GraphQL | PR `#193` 本地 focused 31 / 0 fail；完整 987 pass、7 skip、0 fail；typecheck、lint、format、layers、docs、deprecation、Bun build | 代码门通过；候选 head 已 rebase 到 `main` 的 `0a03ade36ac4b263c5aa73617cc02c29baafbade`，仍需为 `c7d4223e...` 完成 exact-head review |
 | Web | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 771 tests / 0 fail；PR #266 仍 pin 旧 GraphQL contract，不能作为最终消费者证据 |
 | Mini | `npm run typecheck`、`npm run lint`；完整 `npm test -- --runInBand` | 599 tests / 0 fail；PR #82 当前 CONFLICTING，且仍 pin 旧 GraphQL contract |
 | Ops | `python3 -m unittest tests/test_vps_maintenance.py`、`py_compile`、`git diff --check` | 通过，152 tests / 0 fail |
