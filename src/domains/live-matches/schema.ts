@@ -48,6 +48,7 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 		lifecycle: String!
 		fixtureIdentity: String!
 		scoreState: String!
+		corePriceRevision: String
 		detailPublicationId: ID
 		detailGeneration: Int
 		playerDetail: String
@@ -78,6 +79,9 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 		webName: String!
 		position: ElementPosition!
 		teamId: Int!
+		# Current canonical FPL price in tenths of £m. A missing Core
+		# publication must not make the live match publication unusable.
+		price: Int
 		totalPoints: Int!
 		stats: [LiveMatchPlayerStat!]!
 	}

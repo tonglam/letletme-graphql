@@ -357,6 +357,69 @@ describe("Live Matches V2 read path", () => {
 		expect(databaseReads).toBe(0);
 	});
 
+	it("adds the canonical current price when the live match client requests it", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+		const context = buildSnapshotContext(redis);
+		context.playersByIdPreload = new Map([
+			[
+				9001,
+				{
+					id: 9001,
+					code: 9001,
+					webName: "DGW Player",
+					firstName: null,
+					secondName: null,
+					teamId: 1,
+					position: 3,
+					price: 55,
+					startPrice: 50,
+					totalPoints: 0,
+					selectedByPercent: null,
+				},
+			],
+		]);
+
+		const result = await graphql({
+			schema,
+			contextValue: context,
+			source: `query { liveMatchday(eventId: 1) { snapshot { revisions { corePriceRevision } matches { players { id price } } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			snapshot: {
+				revisions: { corePriceRevision: "core-7" },
+				matches: [{ players: [{ id: 9001, price: 55 }] }, { players: [{ id: 9001, price: 55 }] }],
+			},
+		});
+	});
+
+	it("does not load Core prices when the price field is skipped", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+		let databaseReads = 0;
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseReads += 1;
+					throw new Error("skipped prices must not load Core");
+				},
+			}),
+			source: `query SkipPrice($skip: Boolean!) { liveMatchday(eventId: 1) { snapshot { matches { players { id price @skip(if: $skip) } } } } }`,
+			variableValues: { skip: true },
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(databaseReads).toBe(0);
+		expect(result.data?.liveMatchday).toMatchObject({
+			snapshot: {
+				matches: [{ players: [{ id: 9001 }] }, { players: [{ id: 9001 }] }],
+			},
+		});
+	});
+
 	it("rejects a publication with an invalid V2 identity", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
