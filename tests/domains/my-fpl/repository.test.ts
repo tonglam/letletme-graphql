@@ -3,10 +3,10 @@ import { GraphQLError } from "graphql";
 import {
 	createMyFplRepository,
 	myFplTestables,
+	parseSnapshotEntryPayload,
 	type MyFplRepository,
 	type MyFplRepositoryDependencies,
 	type MyFplReviewState,
-	type MyFplTeamHistoryRow,
 	type MyFplCompetitionAggregate,
 } from "../../../src/domains/my-fpl/repository";
 import { createMyFplResolvers } from "../../../src/domains/my-fpl/resolvers";
@@ -48,7 +48,7 @@ const entryRow = (overrides: Record<string, unknown> = {}) => ({
 	...overrides,
 });
 
-const historyRow = (eventId: number): MyFplTeamHistoryRow & Record<string, unknown> => ({
+const historyRow = (eventId: number): Record<string, unknown> => ({
 	eventId,
 	eventPoints: 50,
 	eventRank: 10,
@@ -480,6 +480,22 @@ const snapshotFor = (currentEventId: number | null) => ({
 		{ id: 2, isCurrent: currentEventId === 2, isNext: currentEventId === 1 },
 		{ id: 3, isCurrent: currentEventId === 3, isNext: currentEventId === 2 },
 	],
+	selectionRules: {
+		squadSize: 15,
+		startingSize: 11,
+		budget: 1000,
+		maxPlayersPerTeam: 3,
+		currencyMultiplier: 10,
+		positions: [
+			{ id: 1, name: "Goalkeeper", shortName: "GKP", squadSelect: 2, minPlay: 1, maxPlay: 1 },
+			{ id: 2, name: "Defender", shortName: "DEF", squadSelect: 5, minPlay: 3, maxPlay: 5 },
+			{ id: 3, name: "Midfielder", shortName: "MID", squadSelect: 5, minPlay: 2, maxPlay: 5 },
+			{ id: 4, name: "Forward", shortName: "FWD", squadSelect: 3, minPlay: 1, maxPlay: 3 },
+		],
+		chips: [
+			{ id: 1, name: "wildcard", number: 1, startEvent: 1, stopEvent: 19, chipType: "transfer" },
+		],
+	},
 });
 
 const snapshotPublicationRow = {
@@ -541,6 +557,7 @@ const snapshotPick = (element: number) => ({
 });
 
 const snapshotPayload = () => ({
+	contractVersion: 2 as const,
 	entry: {
 		id: 123,
 		entryName: "Codex XI",
@@ -556,7 +573,6 @@ const snapshotPayload = () => ({
 		pastSeasonsCheckedAt: "2026-08-22T09:00:00.000Z",
 		pastSeasonsCount: 1,
 	},
-	history: [historyRow(1)],
 	pastSeasons: [{ season: "2526", totalPoints: 1000, overallRank: 500 }],
 	gameweek: {
 		state: "READY" as const,
@@ -564,34 +580,153 @@ const snapshotPayload = () => ({
 		result: {
 			eventId: 1,
 			eventPoints: 50,
+			eventRank: null,
 			overallPoints: 100,
-			overallRank: 1000,
+			overallRank: null,
 			eventTransfers: 1,
 			eventTransfersCost: 0,
 			eventNetPoints: 50,
 			eventBenchPoints: 2,
+			eventAutoSubPoints: 0,
 			eventChip: "NONE" as const,
 			eventCaptainPoints: 10,
 			playedCaptainWebName: "Captain",
+			playedCaptainTeamShortName: "ARS",
 			teamValue: 1000,
 			bank: 10,
 			picks: Array.from({ length: 15 }, (_, index) => snapshotPick(index + 1)),
 		},
 	},
-	transfers: [
-		{
-			eventId: 1,
-			elementInWebName: "Player 16",
-			elementInTypeName: "DEF",
-			elementInTeamShortName: "ARS",
-			elementInCost: 50,
-			elementOutWebName: "Player 15",
-			elementOutTypeName: "DEF",
-			elementOutTeamShortName: "CHE",
-			elementOutCost: 49,
-			time: "2026-08-22T09:00:00.000Z",
+	review: {
+		throughEventId: 1,
+		timeline: [
+			{
+				eventId: 1,
+				status: "PROVISIONAL" as const,
+				eventPoints: 50,
+				eventRank: null,
+				overallPoints: 100,
+				overallRank: null,
+				overallRankDelta: null,
+				eventTransfers: 1,
+				eventTransfersCost: 0,
+				eventNetPoints: 50,
+				eventBenchPoints: 2,
+				eventAutoSubPoints: 0,
+				eventChip: "NONE" as const,
+				eventCaptainPoints: 10,
+				captainWebName: "Captain",
+				captainTeamShortName: "ARS",
+				teamValue: 1000,
+				bank: 10,
+				review: {
+					formation: "4-4-2",
+					lineupBasePoints: 45,
+					bestElevenPoints: 55,
+					benchRegretPoints: null,
+					positionPoints: {
+						goalkeeper: 10,
+						defender: 20,
+						midfielder: 15,
+						forward: 5,
+						total: 50,
+					},
+					captain: {
+						captainElement: 1,
+						captainWebName: "Captain",
+						captainTeamShortName: "ARS",
+						captainBasePoints: 5,
+						captainContribution: 10,
+						viceCaptainElement: 2,
+						viceCaptainWebName: "Player 2",
+						viceCaptainBasePoints: 5,
+						bestSquadElement: 1,
+						bestSquadWebName: "Player 1",
+						bestSquadPoints: 5,
+						regretPoints: null,
+					},
+					automaticSubstitutions: [],
+				},
+			},
+		],
+		summary: {
+			gameweeksReviewed: 1,
+			provisionalGameweeks: 1,
+			totalNetPoints: 50,
+			averageNetPoints: 50,
+			medianNetPoints: 50,
+			bestGameweekId: 1,
+			bestNetPoints: 50,
+			worstGameweekId: 1,
+			worstNetPoints: 50,
+			totalHitPoints: 0,
+			hitGameweeks: 0,
+			totalBenchPoints: 2,
+			averageBenchPoints: 2,
+			zeroBenchGameweeks: 0,
+			highBenchGameweeks: 0,
+			totalAutoSubPoints: 0,
+			autoSubGameweeks: 0,
+			totalCaptainPoints: 10,
+			uniqueCaptains: 1,
+			captainBlankGameweeks: 0,
+			topCaptainWebName: "Captain",
+			topCaptainGameweeks: 1,
+			topCaptainRate: 100,
+			bestOverallRank: null,
+			worstOverallRank: null,
+			overallRankChange: null,
+			currentImprovementStreak: 0,
+			longestImprovementStreak: 0,
+			formations: [{ formation: "4-4-2", gameweeks: 1 }],
+			positionPoints: {
+				goalkeeper: 10,
+				defender: 20,
+				midfielder: 15,
+				forward: 5,
+				total: 50,
+			},
+			chips: [],
 		},
-	],
+		holdings: [
+			{
+				element: 1,
+				webName: "Player 1",
+				teamShortName: "ARS",
+				elementTypeName: "GKP",
+				startedEventId: 1,
+				endedEventId: null,
+				gameweeksHeld: 1,
+				starts: 1,
+				captaincies: 1,
+				pointsWhileOwned: 5,
+				scoringContribution: 10,
+			},
+		],
+		transfers: [
+			{
+				eventId: 1,
+				elementIn: 16,
+				elementInWebName: "Player 16",
+				elementInTypeName: "DEF",
+				elementInTeamShortName: "ARS",
+				elementInCost: 50,
+				elementInPoints: null,
+				elementInPlayed: null,
+				elementOut: 15,
+				elementOutWebName: "Player 15",
+				elementOutTypeName: "DEF",
+				elementOutTeamShortName: "CHE",
+				elementOutCost: 49,
+				elementOutPoints: null,
+				sameGameweekGain: null,
+				threeGameweekGain: null,
+				fiveGameweekGain: null,
+				evaluatedThroughEventId: null,
+				time: "2026-08-22T09:00:00.000Z",
+			},
+		],
+	},
 });
 
 const snapshotAggregatePayload = () => ({
@@ -862,6 +997,16 @@ const makeFixture = (options: FixtureOptions = {}) => {
 };
 
 describe("My FPL review repository", () => {
+	it("rejects internally contradictory v2 manager payloads", () => {
+		const wrongGameweek = snapshotPayload();
+		wrongGameweek.gameweek.result.eventId = 2;
+		expect(parseSnapshotEntryPayload(wrongGameweek)).toBeNull();
+
+		const wrongProvisionalCount = snapshotPayload();
+		wrongProvisionalCount.review.summary.provisionalGameweeks = 0;
+		expect(parseSnapshotEntryPayload(wrongProvisionalCount)).toBeNull();
+	});
+
 	it("normalizes search, chips, positions and board rows", () => {
 		expect(myFplTestables.snapshotDateKey(new Date("2026-08-21T16:00:00.000Z"))).toBe("2026-08-22");
 		expect(myFplTestables.normalizeSearch("  North London  ")).toBe("North London");
@@ -949,19 +1094,20 @@ describe("My FPL review repository", () => {
 				snapshotSeasonPathPayload: snapshotAggregatePayload(),
 			});
 
-			const desk = await fixture.repository.loadTeamDesk(fixture.context, 1, "42");
-			expect(desk.state).toBe("READY");
-			expect(desk.selectedEventId).toBe(1);
-			expect(desk.snapshotMeta).toMatchObject({ revision: "42", kind: "PROVISIONAL" });
-			expect(desk.gameweek?.result?.picks).toHaveLength(15);
+			const review = await fixture.repository.loadManagerReview(fixture.context, "42");
+			expect(review.state).toBe("READY");
+			expect(review.throughEventId).toBe(1);
+			expect(review.snapshotMeta).toMatchObject({ revision: "42", kind: "PROVISIONAL" });
+			expect(review.currentGameweek?.result?.picks).toHaveLength(15);
+			expect(review.timeline[0]?.review.formation).toBe("4-4-2");
+			expect(review.rules?.chips[0]?.stopEvent).toBe(19);
 
-			const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1, "42");
+			const gameweek = await fixture.repository.loadManagerGameweek(fixture.context, 1, "42");
 			expect(gameweek.state).toBe("READY");
 			expect(gameweek.snapshotMeta?.revision).toBe("42");
+			expect(gameweek.review?.bestElevenPoints).toBe(55);
 
-			const transfers = await fixture.repository.loadTeamTransfers(fixture.context, "42");
-			expect(transfers.state).toBe("READY");
-			expect(transfers.gameweeks[0]?.transfers).toHaveLength(1);
+			expect(review.transfers[0]?.transfers).toHaveLength(1);
 
 			const competitions = await fixture.repository.loadCompetitionsDesk(
 				fixture.context,
@@ -991,7 +1137,7 @@ describe("My FPL review repository", () => {
 				snapshotEntryRow: { ...snapshotEntryRow(), revision: "43" },
 			});
 
-			const desk = await fixture.repository.loadTeamDesk(fixture.context, 1, "42");
+			const desk = await fixture.repository.loadManagerReview(fixture.context, "42");
 
 			expect(desk.state).toBe("PENDING");
 			expect(desk.snapshotMeta).toBeNull();
@@ -1035,9 +1181,10 @@ describe("My FPL review repository", () => {
 	it("fails closed when the daily publication is absent or malformed", async () => {
 		{
 			const absent = makeFixture({ entryRows: [entryRow()] });
-			expect((await absent.repository.loadTeamDesk(absent.context)).state).toBe("PENDING");
-			expect((await absent.repository.loadTeamGameweek(absent.context, 1)).state).toBe("PENDING");
-			expect((await absent.repository.loadTeamTransfers(absent.context)).state).toBe("PENDING");
+			expect((await absent.repository.loadManagerReview(absent.context)).state).toBe("PENDING");
+			expect((await absent.repository.loadManagerGameweek(absent.context, 1)).state).toBe(
+				"PENDING"
+			);
 			expect(
 				(
 					await absent.repository.loadCompetitionBoard(absent.context, {
@@ -1051,7 +1198,7 @@ describe("My FPL review repository", () => {
 				publicationRows: [{ ...snapshotPublicationRow, content_sha256: "bad" }],
 				entryRows: [entryRow()],
 			});
-			const desk = await malformed.repository.loadTeamDesk(malformed.context, 1);
+			const desk = await malformed.repository.loadManagerReview(malformed.context);
 			expect(desk.state).toBe("PENDING");
 			expect(desk.snapshotMeta).toBeNull();
 		}
@@ -1061,7 +1208,7 @@ describe("My FPL review repository", () => {
 		const unauthenticated = makeFixture();
 		unauthenticated.context.principal = undefined;
 		await expect(
-			unauthenticated.repository.loadTeamDesk(unauthenticated.context)
+			unauthenticated.repository.loadManagerReview(unauthenticated.context)
 		).rejects.toMatchObject({
 			extensions: { code: "VIEWER_ENTRY_REQUIRED" },
 		});
@@ -1070,7 +1217,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const desk = await fixture.repository.loadTeamDesk(fixture.context);
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
 		expect(desk.entry?.id).toBe(123);
 		expect(desk.entry?.entryName).toBe("Codex XI");
 
@@ -1086,7 +1233,7 @@ describe("My FPL review repository", () => {
 			fplEntryId: null,
 			fplEntryVerifiedAt: null,
 		};
-		expect((await miniViewer.repository.loadTeamDesk(miniViewer.context)).entry?.id).toBe(123);
+		expect((await miniViewer.repository.loadManagerReview(miniViewer.context)).entry?.id).toBe(123);
 	});
 
 	it("overlays the current entry name on historical My FPL team payloads", async () => {
@@ -1098,10 +1245,10 @@ describe("My FPL review repository", () => {
 			currentEntryNames: { 123: "Renamed XI" },
 		});
 
-		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
 
 		expect(desk.entry?.entryName).toBe("Renamed XI");
-		expect(desk.gameweek?.entry?.entryName).toBe("Renamed XI");
+		expect(desk.currentGameweek?.entry?.entryName).toBe("Renamed XI");
 		expect((snapshotEntry.payload as { entry: { entryName: string } }).entry.entryName).toBe(
 			"Codex XI"
 		);
@@ -1109,10 +1256,23 @@ describe("My FPL review repository", () => {
 
 	it("reports PRESEASON, EMPTY, PENDING and READY from durable checkpoints", async () => {
 		const preseason = makeFixture({ currentEventId: null, finalizedIds: [] });
-		expect((await preseason.repository.loadTeamDesk(preseason.context)).state).toBe("PRESEASON");
+		expect((await preseason.repository.loadManagerReview(preseason.context)).state).toBe(
+			"PRESEASON"
+		);
 		const emptyPayload = {
 			...snapshotPayload(),
 			gameweek: { state: "EMPTY" as const, eventId: 1, result: null },
+			review: {
+				...snapshotPayload().review,
+				timeline: [],
+				holdings: [],
+				transfers: [],
+				summary: {
+					...snapshotPayload().review.summary,
+					gameweeksReviewed: 0,
+					provisionalGameweeks: 0,
+				},
+			},
 		};
 		const empty = makeFixture({
 			finalizedIds: [1],
@@ -1130,16 +1290,16 @@ describe("My FPL review repository", () => {
 				picks_count: 0,
 			},
 		});
-		expect((await empty.repository.loadTeamDesk(empty.context)).state).toBe("EMPTY");
+		expect((await empty.repository.loadManagerReview(empty.context)).state).toBe("EMPTY");
 		const pending = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		const pendingDesk = await pending.repository.loadTeamDesk(pending.context);
+		const pendingDesk = await pending.repository.loadManagerReview(pending.context);
 		expect(pendingDesk.state).toBe("PENDING");
 		const ready = makeFixture({
 			finalizedIds: [1],
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		expect((await ready.repository.loadTeamDesk(ready.context)).state).toBe("READY");
+		expect((await ready.repository.loadManagerReview(ready.context)).state).toBe("READY");
 		expect(ready.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
 	});
 
@@ -1160,7 +1320,7 @@ describe("My FPL review repository", () => {
 				},
 			},
 		});
-		const readyDesk = await confirmedEmpty.repository.loadTeamDesk(confirmedEmpty.context);
+		const readyDesk = await confirmedEmpty.repository.loadManagerReview(confirmedEmpty.context);
 		expect(readyDesk.pastSeasons).toEqual([]);
 		expect(readyDesk.pastSeasonsState).toBe("READY");
 		expect(confirmedEmpty.redis.setCalls.at(-1)?.[3]).toBeGreaterThan(30);
@@ -1180,9 +1340,9 @@ describe("My FPL review repository", () => {
 				},
 			},
 		});
-		const uncheckedDesk = await unchecked.repository.loadTeamDesk(unchecked.context);
+		const uncheckedDesk = await unchecked.repository.loadManagerReview(unchecked.context);
 		expect(uncheckedDesk.pastSeasonsState).toBe("PENDING");
-		expect(unchecked.redis.setCalls.at(-1)?.[3]).toBe(30);
+		expect(unchecked.redis.setCalls.at(-1)?.[3]).toBe(300);
 	});
 
 	it("does not promote incomplete finalized or rich-enriched data to READY", async () => {
@@ -1193,14 +1353,14 @@ describe("My FPL review repository", () => {
 			historyRows: [historyRow(1)],
 		});
 		expect(
-			(await lifecycleIncomplete.repository.loadTeamDesk(lifecycleIncomplete.context)).state
+			(await lifecycleIncomplete.repository.loadManagerReview(lifecycleIncomplete.context)).state
 		).toBe("PRESEASON");
 		const richIncomplete = makeFixture({
 			entryRows: [entryRow()],
 			finalizedIds: [1, 2],
 			historyRows: [],
 		});
-		expect((await richIncomplete.repository.loadTeamDesk(richIncomplete.context)).state).toBe(
+		expect((await richIncomplete.repository.loadManagerReview(richIncomplete.context)).state).toBe(
 			"PENDING"
 		);
 	});
@@ -1213,10 +1373,10 @@ describe("My FPL review repository", () => {
 			gameweekRows: Array.from({ length: 15 }, (_, index) => gameweekRow(1, index + 1)),
 		});
 
-		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
 
 		expect(desk.state).toBe("PENDING");
-		expect(desk.gameweek).toBeNull();
+		expect(desk.currentGameweek).toBeNull();
 		expect(fixture.queries.some(({ sql }) => sql.includes("entry_event_results"))).toBe(false);
 	});
 
@@ -1234,10 +1394,10 @@ describe("My FPL review repository", () => {
 			historyRows: [],
 		});
 
-		const desk = await fixture.repository.loadTeamDesk(fixture.context, 1);
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
 
 		expect(desk.state).toBe("PENDING");
-		expect(desk.gameweek).toBeNull();
+		expect(desk.currentGameweek).toBeNull();
 		expect(fixture.queries.some(({ sql }) => sql.includes("competition.entries"))).toBe(false);
 	});
 
@@ -1247,35 +1407,39 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v10:team-desk:123:season:rev:42");
-		await fixture.redis.set(key, JSON.stringify({ state: "READY", history: [] }));
-		const desk = await fixture.repository.loadTeamDesk(fixture.context);
+		const key = gqlCacheKey(fixture.context, "my-fpl:v11:snapshot-entry:1:42:123");
+		await fixture.redis.set(key, JSON.stringify({ contractVersion: 1 }));
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
 		expect(desk.state).toBe("READY");
-		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ state: "READY", history: [] }));
+		expect(await fixture.redis.get(key)).not.toBe(JSON.stringify({ contractVersion: 1 }));
 		const malformed = makeFixture({
 			finalizedIds: [1],
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v10:team-desk:123:season:rev:42");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v11:snapshot-entry:1:42:123");
 		await malformed.redis.set(malformedKey, "{");
-		await malformed.repository.loadTeamDesk(malformed.context);
+		await malformed.repository.loadManagerReview(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
 	});
 
 	it("keeps transfer and gameweek readiness fail-closed", async () => {
 		const preseason = makeFixture({ currentEventId: null, finalizedIds: [] });
-		expect((await preseason.repository.loadTeamTransfers(preseason.context)).state).toBe(
+		expect((await preseason.repository.loadManagerReview(preseason.context)).state).toBe(
 			"PRESEASON"
 		);
 		const pending = makeFixture({
 			finalizedIds: [1, 2],
 			entryRows: [entryRow({ transfers_synced_through_event_id: 1 })],
 		});
-		expect((await pending.repository.loadTeamTransfers(pending.context)).state).toBe("PENDING");
+		expect((await pending.repository.loadManagerReview(pending.context)).state).toBe("PENDING");
 		const gameweek = makeFixture({ finalizedIds: [1], entryRows: [entryRow()] });
-		expect((await gameweek.repository.loadTeamGameweek(gameweek.context, 1)).state).toBe("PENDING");
-		await expect(gameweek.repository.loadTeamGameweek(gameweek.context, 0)).rejects.toMatchObject({
+		expect((await gameweek.repository.loadManagerGameweek(gameweek.context, 1)).state).toBe(
+			"PENDING"
+		);
+		await expect(
+			gameweek.repository.loadManagerGameweek(gameweek.context, 0)
+		).rejects.toMatchObject({
 			extensions: { code: "BAD_USER_INPUT" },
 		});
 	});
@@ -1286,7 +1450,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		const gameweek = await fixture.repository.loadManagerGameweek(fixture.context, 1);
 		expect(gameweek.state).toBe("READY");
 		expect(gameweek.result?.picks).toHaveLength(15);
 		expect(gameweek.result?.picks[0]?.isCaptain).toBe(true);
@@ -1305,7 +1469,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: { ...snapshotEntryRow(), payload },
 		});
-		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		const gameweek = await fixture.repository.loadManagerGameweek(fixture.context, 1);
 		expect(gameweek.state).toBe("READY");
 		expect(gameweek.result?.picks[0]).toMatchObject({
 			fixtureCount: 0,
@@ -1340,7 +1504,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: { ...snapshotEntryRow(), payload },
 		});
-		const gameweek = await fixture.repository.loadTeamGameweek(fixture.context, 1);
+		const gameweek = await fixture.repository.loadManagerGameweek(fixture.context, 1);
 		expect(gameweek.state).toBe("READY");
 		expect(gameweek.result?.eventChip).toBe("BENCH_BOOST");
 		expect(gameweek.result?.picks.every((pick) => pick.autoSub)).toBe(false);
@@ -1356,27 +1520,27 @@ describe("My FPL review repository", () => {
 				...snapshotEntryRow(),
 				payload: {
 					...payload,
-					transfers: [
-						{
-							eventId: 1,
-							elementInWebName: "In",
-							elementInTypeName: "DEF",
-							elementInTeamShortName: "ARS",
-							elementInCost: 70,
-							elementOutWebName: "Out",
-							elementOutTypeName: "FWD",
-							elementOutTeamShortName: "CHE",
-							elementOutCost: 65,
-							time: "2026-08-20T00:00:00.000Z",
-						},
-					],
+					review: {
+						...payload.review,
+						transfers: [
+							{
+								...payload.review.transfers[0],
+								elementInWebName: "In",
+								elementInCost: 70,
+								elementOutWebName: "Out",
+								elementOutTypeName: "FWD",
+								elementOutCost: 65,
+								time: "2026-08-20T00:00:00.000Z",
+							},
+						],
+					},
 				},
 			},
 		});
-		const transfers = await fixture.repository.loadTeamTransfers(fixture.context);
-		expect(transfers.state).toBe("READY");
-		expect(transfers.gameweeks).toHaveLength(1);
-		expect(transfers.gameweeks[0]?.transfers[0]?.elementInWebName).toBe("In");
+		const review = await fixture.repository.loadManagerReview(fixture.context);
+		expect(review.state).toBe("READY");
+		expect(review.transfers).toHaveLength(1);
+		expect(review.transfers[0]?.transfers[0]?.elementInWebName).toBe("In");
 	});
 
 	it("rejects contradictory transfer counts in a daily snapshot", async () => {
@@ -1388,12 +1552,18 @@ describe("My FPL review repository", () => {
 					...snapshotEntryRow(),
 					payload: {
 						...payload,
-						history: [{ ...historyRow(1), eventTransfers: 0 }],
+						review: {
+							...payload.review,
+							timeline: payload.review.timeline.map((row) => ({
+								...row,
+								eventTransfers: 0,
+							})),
+						},
 					},
 				},
 			});
-			const transfers = await fixture.repository.loadTeamTransfers(fixture.context);
-			expect(transfers.state).toBe("PENDING");
+			const review = await fixture.repository.loadManagerReview(fixture.context);
+			expect(review.state).toBe("PENDING");
 		}
 	});
 
@@ -1759,7 +1929,7 @@ describe("My FPL review repository", () => {
 				return { rows: [] };
 			},
 		});
-		const desk = await fixture.repository.loadTeamDesk(fixture.context);
+		const desk = await fixture.repository.loadManagerReview(fixture.context);
 		expect(desk.state).toBe("PENDING");
 		expect(desk.entry).toBeNull();
 		expect(fixture.queries.some((query) => query.sql.includes("competition.entries"))).toBe(false);
@@ -1791,12 +1961,11 @@ describe("My FPL review repository", () => {
 	it("delegates resolver roots through the injected repository and propagates errors", async () => {
 		const calls: string[] = [];
 		const fakeRepository = {
-			loadTeamDesk: async () => {
-				calls.push("desk");
+			loadManagerReview: async () => {
+				calls.push("review");
 				return { state: "EMPTY" as MyFplReviewState } as never;
 			},
-			loadTeamGameweek: async () => ({ state: "PENDING" as MyFplReviewState }) as never,
-			loadTeamTransfers: async () => ({ state: "PRESEASON" as MyFplReviewState }) as never,
+			loadManagerGameweek: async () => ({ state: "PENDING" as MyFplReviewState }) as never,
 			loadCompetitionsDesk: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
 			loadCompetitionBoard: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
 			loadCompetitionSeasonPath: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
@@ -1808,10 +1977,9 @@ describe("My FPL review repository", () => {
 		} as unknown as MyFplRepository;
 		const resolvers = createMyFplResolvers(fakeRepository);
 		const context = makeFixture().context;
-		await resolvers.Query.myFplTeamDesk(null, {}, context);
-		expect(calls).toEqual(["desk"]);
-		await resolvers.Query.myFplTeamGameweek(null, { eventId: 1 }, context);
-		await resolvers.Query.myFplTeamTransfers(null, {}, context);
+		await resolvers.Query.myFplManagerReview(null, {}, context);
+		expect(calls).toEqual(["review"]);
+		await resolvers.Query.myFplManagerGameweek(null, { eventId: 1 }, context);
 		await resolvers.Query.myFplCompetitionsDesk(null, {}, context);
 		await resolvers.Query.myFplCompetitionBoard(
 			null,

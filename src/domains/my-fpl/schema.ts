@@ -62,22 +62,67 @@ export const myFplTypeDefs = /* GraphQL */ `
 		totalTransfers: Int
 	}
 
-	type MyFplTeamHistoryRow {
+	type MyFplManagerPositionPoints {
+		goalkeeper: Int!
+		defender: Int!
+		midfielder: Int!
+		forward: Int!
+		total: Int!
+	}
+
+	type MyFplManagerCaptainReview {
+		captainElement: Int
+		captainWebName: String
+		captainTeamShortName: String
+		captainBasePoints: Int!
+		captainContribution: Int!
+		viceCaptainElement: Int
+		viceCaptainWebName: String
+		viceCaptainBasePoints: Int!
+		bestSquadElement: Int
+		bestSquadWebName: String
+		bestSquadPoints: Int!
+		regretPoints: Int
+	}
+
+	type MyFplManagerAutomaticSubstitution {
+		elementIn: Int!
+		elementInWebName: String!
+		elementOut: Int!
+		elementOutWebName: String!
+		pointsGained: Int!
+	}
+
+	type MyFplManagerGameweekReview {
+		formation: String!
+		lineupBasePoints: Int!
+		bestElevenPoints: Int!
+		benchRegretPoints: Int
+		positionPoints: MyFplManagerPositionPoints!
+		captain: MyFplManagerCaptainReview!
+		automaticSubstitutions: [MyFplManagerAutomaticSubstitution!]!
+	}
+
+	type MyFplManagerTimelineRow {
 		eventId: Int!
+		status: MyFplSnapshotKind!
 		eventPoints: Int!
 		eventRank: Int
 		overallPoints: Int!
-		overallRank: Int!
+		overallRank: Int
+		overallRankDelta: Int
 		eventTransfers: Int!
 		eventTransfersCost: Int!
 		eventNetPoints: Int!
 		eventBenchPoints: Int!
+		eventAutoSubPoints: Int!
 		eventChip: Chip!
 		eventCaptainPoints: Int!
 		captainWebName: String
 		captainTeamShortName: String
 		teamValue: Int
 		bank: Int
+		review: MyFplManagerGameweekReview!
 	}
 
 	type MyFplPastSeason {
@@ -86,7 +131,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		overallRank: Int!
 	}
 
-	type MyFplTeamPick {
+	type MyFplManagerPick {
 		element: Int!
 		position: Int!
 		webName: String!
@@ -121,54 +166,118 @@ export const myFplTypeDefs = /* GraphQL */ `
 		expectedGoalsConceded: Float
 	}
 
-	type MyFplTeamGameweekResult {
+	type MyFplManagerGameweekResult {
 		eventId: Int!
 		eventPoints: Int!
+		eventRank: Int
 		overallPoints: Int!
-		overallRank: Int!
+		overallRank: Int
 		eventTransfers: Int!
 		eventTransfersCost: Int!
 		eventNetPoints: Int!
 		eventBenchPoints: Int!
+		eventAutoSubPoints: Int!
 		eventChip: Chip!
 		eventCaptainPoints: Int!
 		playedCaptainWebName: String
+		playedCaptainTeamShortName: String
 		teamValue: Int
 		bank: Int
-		picks: [MyFplTeamPick!]!
+		picks: [MyFplManagerPick!]!
 	}
 
-	type MyFplTeamGameweek {
+	type MyFplManagerGameweek {
 		state: MyFplReviewState!
 		context: MyFplReviewContext!
 		eventId: Int!
 		entry: MyFplEntryIdentity
-		result: MyFplTeamGameweekResult
+		result: MyFplManagerGameweekResult
+		review: MyFplManagerGameweekReview
 		snapshotMeta: MyFplSnapshotMeta
 	}
 
-	type MyFplTeamDesk {
-		state: MyFplReviewState!
-		context: MyFplReviewContext!
-		entry: MyFplEntryIdentity
-		history: [MyFplTeamHistoryRow!]!
-		pastSeasons: [MyFplPastSeason!]!
-		pastSeasonsState: MyFplReviewState!
-		selectedEventId: Int
-		gameweek: MyFplTeamGameweek
-		snapshotMeta: MyFplSnapshotMeta
+	type MyFplManagerFormationCount {
+		formation: String!
+		gameweeks: Int!
+	}
+
+	type MyFplManagerChipReview {
+		chip: Chip!
+		eventId: Int!
+		status: MyFplSnapshotKind!
+		eventNetPoints: Int!
+		otherGameweeksAverageNetPoints: Float
+		differenceFromOtherGameweeks: Float
+		overallRankDelta: Int
+	}
+
+	type MyFplManagerSeasonSummary {
+		gameweeksReviewed: Int!
+		provisionalGameweeks: Int!
+		totalNetPoints: Int!
+		averageNetPoints: Float!
+		medianNetPoints: Float!
+		bestGameweekId: Int
+		bestNetPoints: Int
+		worstGameweekId: Int
+		worstNetPoints: Int
+		totalHitPoints: Int!
+		hitGameweeks: Int!
+		totalBenchPoints: Int!
+		averageBenchPoints: Float!
+		zeroBenchGameweeks: Int!
+		highBenchGameweeks: Int!
+		totalAutoSubPoints: Int!
+		autoSubGameweeks: Int!
+		totalCaptainPoints: Int!
+		uniqueCaptains: Int!
+		captainBlankGameweeks: Int!
+		topCaptainWebName: String
+		topCaptainGameweeks: Int!
+		topCaptainRate: Float!
+		bestOverallRank: Int
+		worstOverallRank: Int
+		overallRankChange: Int
+		currentImprovementStreak: Int!
+		longestImprovementStreak: Int!
+		formations: [MyFplManagerFormationCount!]!
+		positionPoints: MyFplManagerPositionPoints!
+		chips: [MyFplManagerChipReview!]!
+	}
+
+	type MyFplManagerHoldingPeriod {
+		element: Int!
+		webName: String!
+		teamShortName: String!
+		elementTypeName: String!
+		startedEventId: Int!
+		endedEventId: Int
+		gameweeksHeld: Int!
+		starts: Int!
+		captaincies: Int!
+		pointsWhileOwned: Int!
+		scoringContribution: Int!
 	}
 
 	type MyFplTransferMove {
 		eventId: Int!
+		elementIn: Int
 		elementInWebName: String!
 		elementInTypeName: String!
 		elementInTeamShortName: String!
 		elementInCost: Int!
+		elementInPoints: Int
+		elementInPlayed: Boolean
+		elementOut: Int
 		elementOutWebName: String!
 		elementOutTypeName: String!
 		elementOutTeamShortName: String!
 		elementOutCost: Int!
+		elementOutPoints: Int
+		sameGameweekGain: Int
+		threeGameweekGain: Int
+		fiveGameweekGain: Int
+		evaluatedThroughEventId: Int
 		time: DateTime!
 	}
 
@@ -179,10 +288,19 @@ export const myFplTypeDefs = /* GraphQL */ `
 		transfers: [MyFplTransferMove!]!
 	}
 
-	type MyFplTeamTransfers {
+	type MyFplManagerReview {
 		state: MyFplReviewState!
 		context: MyFplReviewContext!
-		gameweeks: [MyFplTransferGameweek!]!
+		entry: MyFplEntryIdentity
+		throughEventId: Int
+		timeline: [MyFplManagerTimelineRow!]!
+		summary: MyFplManagerSeasonSummary
+		holdings: [MyFplManagerHoldingPeriod!]!
+		transfers: [MyFplTransferGameweek!]!
+		pastSeasons: [MyFplPastSeason!]!
+		pastSeasonsState: MyFplReviewState!
+		currentGameweek: MyFplManagerGameweek
+		rules: TeamSelectionRules
 		snapshotMeta: MyFplSnapshotMeta
 	}
 
@@ -547,9 +665,8 @@ export const myFplTypeDefs = /* GraphQL */ `
 	}
 
 	extend type Query {
-		myFplTeamDesk(eventId: Int, snapshotRevision: String): MyFplTeamDesk!
-		myFplTeamGameweek(eventId: Int!, snapshotRevision: String): MyFplTeamGameweek!
-		myFplTeamTransfers(snapshotRevision: String): MyFplTeamTransfers!
+		myFplManagerReview(snapshotRevision: String): MyFplManagerReview!
+		myFplManagerGameweek(eventId: Int!, snapshotRevision: String): MyFplManagerGameweek!
 
 		myFplCompetitionsDesk(
 			tournamentId: Int

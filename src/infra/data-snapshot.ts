@@ -186,6 +186,7 @@ export type CoreEventSnapshot = Readonly<{
 	sourceCheckedAt: string;
 	events: readonly CoreEventData[];
 	currentEventId: number | null;
+	selectionRules?: CoreSelectionRules | null;
 }>;
 
 const coreSnapshotMemo = new WeakMap<object, Promise<CoreDataSnapshot>>();
@@ -799,6 +800,7 @@ const publicationCoreEventSnapshot = (publication: DataPublication): CoreEventSn
 		sourceCheckedAt: publication.manifest.sourceCheckedAt,
 		events,
 		currentEventId,
+		selectionRules: mapCoreSelectionRules(publication.items.selectionRules),
 	};
 };
 
@@ -992,6 +994,7 @@ type CoreEventFallbackRow = QueryResultRow & {
 	manifest: unknown;
 	source_checked_at: string | Date | null;
 	events: unknown;
+	source_metadata: unknown;
 };
 
 type CoreTeamFallbackRow = QueryResultRow & {
@@ -1033,7 +1036,10 @@ const CORE_EVENT_FALLBACK_SQL = `
 		COALESCE((
 			SELECT jsonb_agg((to_jsonb(event_row) - 'season_id') ORDER BY event_id)
 			FROM fpl.events event_row WHERE season_id = $1
-		), '[]'::jsonb) AS events
+		), '[]'::jsonb) AS events,
+		COALESCE((
+			SELECT source_metadata FROM fpl.seasons WHERE season_id = $1 LIMIT 1
+		), '{}'::jsonb) AS source_metadata
 	FROM authority
 `;
 
@@ -1284,6 +1290,7 @@ const loadCoreEventSnapshotFromPostgres = async (
 	const row = result.rows[0];
 	const authority = validateTargetedCoreAuthority(context, row, expectedManifest);
 	const events = mapArray(row?.events, mapCoreEvent);
+	const sourceMetadata = isRecord(row?.source_metadata) ? row.source_metadata : null;
 	if (!authority || !events || !hasCompleteCoreEventIdentity(events)) {
 		throw new Error("Coherent PostgreSQL core event publication is unavailable");
 	}
@@ -1295,6 +1302,7 @@ const loadCoreEventSnapshotFromPostgres = async (
 		sourceCheckedAt: authority.sourceCheckedAt,
 		events,
 		currentEventId: resolveCurrentEventId(events, undefined, authority.sourceCheckedAt),
+		selectionRules: mapCoreSelectionRules(sourceMetadata?.selectionRules),
 	};
 };
 
@@ -1420,7 +1428,11 @@ export const getCoreEventSnapshot = (context: GraphQLContext): Promise<CoreEvent
 	const existing = coreEventSnapshotMemo.get(requestScope);
 	if (existing) return bindCoreRevision(context, existing);
 	const load = (async (): Promise<CoreEventSnapshot> => {
-		const publication = await readPinnedCorePublicationItems(context, ["events", "currentEventId"]);
+		const publication = await readPinnedCorePublicationItems(context, [
+			"events",
+			"currentEventId",
+			"selectionRules",
+		]);
 		const snapshot = publication ? publicationCoreEventSnapshot(publication) : null;
 		if (snapshot) return snapshot;
 		context.logger.warn(

@@ -152,9 +152,8 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 		"priceChangeLiveBoard",
 	]),
 	domain("my-fpl", "my-fpl", [
-		"myFplTeamDesk",
-		"myFplTeamGameweek",
-		"myFplTeamTransfers",
+		"myFplManagerReview",
+		"myFplManagerGameweek",
 		"myFplCompetitionsDesk",
 		"myFplCompetitionBoard",
 		"myFplCompetitionSeasonPath",

@@ -8,9 +8,8 @@ import {
 	type MyFplCompetitionSeasonPath,
 	type MyFplCompetitionSetupStatus,
 	type MyFplCompetitionsDesk,
-	type MyFplTeamDesk,
-	type MyFplTeamGameweek,
-	type MyFplTeamTransfers,
+	type MyFplManagerGameweek,
+	type MyFplManagerReview,
 	type MyFplSnapshotMeta,
 } from "./repository";
 import { buildDataCompleteness } from "../../graphql/data-completeness";
@@ -24,8 +23,8 @@ import {
 	type MyTournamentSeasonReview,
 } from "./tournament-review-v2.repository";
 
-type TeamDeskArgs = { eventId?: number | null; snapshotRevision?: string | null };
-type TeamGameweekArgs = { eventId: number; snapshotRevision?: string | null };
+type ManagerReviewArgs = { snapshotRevision?: string | null };
+type ManagerGameweekArgs = { eventId: number; snapshotRevision?: string | null };
 type CompetitionsDeskArgs = {
 	tournamentId?: number | null;
 	eventId?: number | null;
@@ -66,29 +65,21 @@ export const createMyFplResolvers = (
 	reviewRepository: MyTournamentReviewRepository = myTournamentReviewRepository
 ) => ({
 	Query: {
-		myFplTeamDesk: (
+		myFplManagerReview: (
 			_parent: unknown,
-			args: TeamDeskArgs,
+			args: ManagerReviewArgs,
 			context: GraphQLContext
-		): Promise<MyFplTeamDesk> =>
-			measureRequestStage(context.requestTiming, "myFplTeamDesk", () =>
-				repository.loadTeamDesk(context, args.eventId, args.snapshotRevision)
+		): Promise<MyFplManagerReview> =>
+			measureRequestStage(context.requestTiming, "myFplManagerReview", () =>
+				repository.loadManagerReview(context, args.snapshotRevision)
 			),
-		myFplTeamGameweek: (
+		myFplManagerGameweek: (
 			_parent: unknown,
-			args: TeamGameweekArgs,
+			args: ManagerGameweekArgs,
 			context: GraphQLContext
-		): Promise<MyFplTeamGameweek> =>
-			measureRequestStage(context.requestTiming, "myFplTeamGameweek", () =>
-				repository.loadTeamGameweek(context, args.eventId, args.snapshotRevision)
-			),
-		myFplTeamTransfers: (
-			_parent: unknown,
-			args: { snapshotRevision?: string | null },
-			context: GraphQLContext
-		): Promise<MyFplTeamTransfers> =>
-			measureRequestStage(context.requestTiming, "myFplTeamTransfers", () =>
-				repository.loadTeamTransfers(context, args.snapshotRevision)
+		): Promise<MyFplManagerGameweek> =>
+			measureRequestStage(context.requestTiming, "myFplManagerGameweek", () =>
+				repository.loadManagerGameweek(context, args.eventId, args.snapshotRevision)
 			),
 		myFplCompetitionsDesk: (
 			_parent: unknown,
