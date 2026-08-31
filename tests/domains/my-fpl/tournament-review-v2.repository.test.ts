@@ -526,10 +526,16 @@ describe("My Tournament Review V2 repository", () => {
 			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: -1 })
 		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 39 })
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
+		await expect(
 			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 0 })
 		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 		await expect(
 			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: -1 })
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
+		await expect(
+			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 39 })
 		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 		expect(databaseReads).toBe(0);
 	});
@@ -1623,6 +1629,104 @@ describe("My Tournament Review V2 repository", () => {
 				eventId: 4,
 			})
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when a completed knockout winner has fewer net points", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const match = (
+			(payload.knockout as Record<string, unknown>).matches as Array<Record<string, unknown>>
+		)[0]!;
+		match.winnerEntryId = 6954;
+		Object.assign(match.home as Record<string, unknown>, {
+			netPoints: 55,
+			goalsScored: 2,
+			goalsConceded: 1,
+		});
+		Object.assign(match.away as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 2,
+		});
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("allows an authoritative knockout tie-break winner when net points tie", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const match = (
+			(payload.knockout as Record<string, unknown>).matches as Array<Record<string, unknown>>
+		)[0]!;
+		match.winnerEntryId = 6954;
+		Object.assign(match.home as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 1,
+		});
+		Object.assign(match.away as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 1,
+		});
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		const result = await createMyTournamentReviewRepository().loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.knockout?.matches[0]?.winnerEntryId).toBe(6954);
+	});
+
+	it("rejects a cached completed knockout winner with fewer net points", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const match = (
+			(payload.knockout as Record<string, unknown>).matches as Array<Record<string, unknown>>
+		)[0]!;
+		match.winnerEntryId = 6953;
+		Object.assign(match.home as Record<string, unknown>, {
+			netPoints: 55,
+			goalsScored: 2,
+			goalsConceded: 1,
+		});
+		Object.assign(match.away as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 2,
+		});
+		const publication = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			knockout: { matches: Array<{ winnerEntryId: number | null }> };
+		};
+		cached.knockout.matches[0]!.winnerEntryId = 6954;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		expect(result.knockout?.matches[0]?.winnerEntryId).toBe(6953);
+		expect(databaseReads).toBe(4);
 	});
 
 	it("rejects a cached completed knockout match with inconsistent goals", async () => {

@@ -914,6 +914,7 @@ export const MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 
 const REVIEW_CACHE_TTL_SECONDS = 5 * 60;
 const REVIEW_CATALOG_CACHE_TTL_SECONDS = 60;
+const MAX_FPL_EVENT_ID = 38;
 // GraphQL's built-in Int scalar is a signed 32-bit integer. PostgreSQL and
 // JSON numbers can be wider, so values mapped to Int fields are bounded here.
 const GRAPHQL_INT_MIN = -2147483648;
@@ -1061,6 +1062,14 @@ function boundedFirst(value: number | null | undefined, defaultValue = 50): numb
 		});
 	}
 	return value;
+}
+
+function validateReviewEventId(eventId: number, label: "eventId" | "throughEventId"): void {
+	if (!Number.isSafeInteger(eventId) || eventId < 1 || eventId > MAX_FPL_EVENT_ID) {
+		throw new GraphQLError(`${label} must be an integer between 1 and ${MAX_FPL_EVENT_ID}`, {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
 }
 
 function decodeCursor(
@@ -1508,17 +1517,28 @@ function knockoutEntryCoverageValid(
 
 function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId: unknown): boolean {
 	if (!isRecord(home) || !isRecord(away) || winnerEntryId === null) return true;
+	const homeNetPoints = home.netPoints;
+	const awayNetPoints = away.netPoints;
 	const settled = [
-		home.netPoints,
+		homeNetPoints,
 		home.goalsScored,
 		home.goalsConceded,
-		away.netPoints,
+		awayNetPoints,
 		away.goalsScored,
 		away.goalsConceded,
 	].every((value) => value !== null);
-	return (
-		settled && home.goalsScored === away.goalsConceded && away.goalsScored === home.goalsConceded
-	);
+	if (
+		!settled ||
+		home.goalsScored !== away.goalsConceded ||
+		away.goalsScored !== home.goalsConceded ||
+		typeof homeNetPoints !== "number" ||
+		typeof awayNetPoints !== "number"
+	) {
+		return false;
+	}
+	if (homeNetPoints === awayNetPoints) return true;
+	const higherScoringEntryId = homeNetPoints > awayNetPoints ? home.entryId : away.entryId;
+	return winnerEntryId === higherScoringEntryId;
 }
 
 function knockoutScoreBreakdownValid(
@@ -2699,11 +2719,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadGameweekReview(context, args) {
-		if (strictPositiveInt(args.eventId) === null) {
-			throw new GraphQLError("eventId must be a positive integer", {
-				extensions: { code: "BAD_USER_INPUT" },
-			});
-		}
+		validateReviewEventId(args.eventId, "eventId");
 		const first = boundedFirst(args.first, 50);
 		const revision = args.revision?.trim() || null;
 		if (
@@ -2793,11 +2809,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadSeasonReview(context, args) {
-		if (strictPositiveInt(args.throughEventId) === null) {
-			throw new GraphQLError("throughEventId must be a positive integer", {
-				extensions: { code: "BAD_USER_INPUT" },
-			});
-		}
+		validateReviewEventId(args.throughEventId, "throughEventId");
 		const first = boundedFirst(args.first, 100);
 		const metadataResult = await context.database.query<SeasonMetadataRow>(
 			MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
