@@ -5,7 +5,7 @@
     "surface": "report",
     "title": "My LetLetMe Tournament Review V2：6953 端到端链路审查",
     "description": "V2-only settled-snapshot review chain audit from sync/finalization through PostgreSQL publication, GraphQL, Web/Mini consumers and Ops evidence.",
-    "generatedAt": "2026-09-01T00:00:00Z",
+    "generatedAt": "2026-08-31T19:55:09Z",
     "sources": [
       {
         "id": "audit_report",
@@ -152,7 +152,7 @@
   },
   "snapshot": {
     "version": 1,
-    "generatedAt": "2026-09-01T00:00:00Z",
+    "generatedAt": "2026-08-31T19:55:09Z",
     "status": "partial",
     "accessIssues": [
       {
