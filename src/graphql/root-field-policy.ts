@@ -262,6 +262,10 @@ const lightweightFields = [
 	"calcLivePointsByEntry",
 	"calcLivePointsForEntries",
 	"liveSnapshot",
+	"myTournamentReviewCatalog",
+	"myTournamentGameweekReview",
+	"myTournamentSeasonReview",
+	"myTournamentReviewStatus",
 ] as const;
 for (const field of lightweightFields) {
 	const current = registry.get(field);
