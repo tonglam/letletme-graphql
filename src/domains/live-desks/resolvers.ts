@@ -6,11 +6,9 @@ import {
 	getCoreFixtureSnapshot,
 	getCoreLiveIdentitySnapshot,
 	type CoreEventSnapshot,
-	type CoreFixtureData,
 	type CoreFixtureSnapshot,
 	type CoreLiveIdentitySnapshot,
 } from "../../infra/data-snapshot";
-import type { LivePerformanceData } from "../../infra/live-types";
 import { metrics } from "../../infra/metrics";
 import { getPlayerAndTeamMaps, getTournamentSelectionIndexRows } from "../event-stats/repository";
 import { Position } from "../players/repository";
@@ -24,6 +22,7 @@ import {
 } from "./tournament-entry-window";
 import {
 	calcLivePointsForEntriesV2,
+	getLivePointsFreshnessV2,
 	readLivePublicationV2,
 	type LivePublicationReadV2,
 } from "../entry-live/v2-service";
@@ -55,19 +54,11 @@ const lifecycleForPublication = (
 	return publication?.state ?? "PICKS_WAIT";
 };
 
-const snapshotStateForPublication = (
-	publication: LivePublicationReadV2["publication"] | null
-): string => {
-	return publication?.state ?? "UNAVAILABLE";
-};
-
 const publicationDeliveryState = (publication: LivePublicationReadV2 | null): string => {
 	if (!publication) return "UNAVAILABLE";
 	if (publication.publication.state === "FINALIZED") return "FINAL";
 	if (publication.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
-	return Date.now() - Date.parse(publication.publication.sourceCheckedAt) <= 30_000
-		? "FRESH"
-		: "STALE";
+	return getLivePointsFreshnessV2(publication.publication).isFresh ? "FRESH" : "STALE";
 };
 
 const publicationSource = (publication: LivePublicationReadV2 | null): string => {
@@ -100,6 +91,7 @@ const publicationAvailability = (publication: LivePublicationReadV2 | null): str
 
 const publicationDelivery = (publication: LivePublicationReadV2 | null) => {
 	const state = publicationDeliveryState(publication);
+	const freshness = publication ? getLivePointsFreshnessV2(publication.publication) : null;
 	return {
 		state,
 		servedFrom: publicationSource(publication),
@@ -108,7 +100,9 @@ const publicationDelivery = (publication: LivePublicationReadV2 | null) => {
 				? ["PUBLICATION_UNAVAILABLE"]
 				: state === "DEGRADED"
 					? ["FALLBACK_SERVED"]
-					: [],
+					: state === "STALE" && freshness
+						? [freshness.reasonCode]
+						: [],
 	};
 };
 
@@ -171,82 +165,10 @@ const publicationTimes = (publication: LivePublicationReadV2 | null) => {
 		publishedAt: value.publishedAt,
 		checkpointedAt: value.checkpointedAt,
 		servedAt: now,
-		staleAt: new Date(Date.parse(value.sourceCheckedAt) + 30_000).toISOString(),
+		staleAt: getLivePointsFreshnessV2(value).staleAt,
 		nextRefreshAt: value.expectedNextCheckAt,
 	};
 };
-
-const toCoreFixture = (fixture: Record<string, unknown>): CoreFixtureData => ({
-	id: Number(fixture.id),
-	code: Number(fixture.code),
-	eventId: fixture.event === null ? null : Number(fixture.event),
-	finished: Boolean(fixture.finished),
-	finishedProvisional: Boolean(fixture.finishedProvisional),
-	kickoffTime: typeof fixture.kickoffTime === "string" ? fixture.kickoffTime : null,
-	minutes: Number(fixture.minutes ?? 0),
-	started: typeof fixture.started === "boolean" ? fixture.started : null,
-	teamHId: Number(fixture.teamH),
-	teamAId: Number(fixture.teamA),
-	teamHScore: fixture.teamHScore === null ? null : Number(fixture.teamHScore),
-	teamAScore: fixture.teamAScore === null ? null : Number(fixture.teamAScore),
-	teamHDifficulty: fixture.teamHDifficulty === null ? null : Number(fixture.teamHDifficulty),
-	teamADifficulty: fixture.teamADifficulty === null ? null : Number(fixture.teamADifficulty),
-});
-
-const toLivePerformance = (row: Record<string, unknown>): LivePerformanceData => ({
-	eventId: Number(row.eventId),
-	playerId: Number(row.elementId),
-	minutes: row.minutes === null ? null : Number(row.minutes ?? 0),
-	goalsScored: row.goalsScored === null ? null : Number(row.goalsScored ?? 0),
-	assists: row.assists === null ? null : Number(row.assists ?? 0),
-	cleanSheets: row.cleanSheets === null ? null : Number(row.cleanSheets ?? 0),
-	goalsConceded: row.goalsConceded === null ? null : Number(row.goalsConceded ?? 0),
-	ownGoals: row.ownGoals === null ? null : Number(row.ownGoals ?? 0),
-	penaltiesSaved: row.penaltiesSaved === null ? null : Number(row.penaltiesSaved ?? 0),
-	penaltiesMissed: row.penaltiesMissed === null ? null : Number(row.penaltiesMissed ?? 0),
-	yellowCards: row.yellowCards === null ? null : Number(row.yellowCards ?? 0),
-	redCards: row.redCards === null ? null : Number(row.redCards ?? 0),
-	saves: row.saves === null ? null : Number(row.saves ?? 0),
-	bonus: row.bonus === null ? null : Number(row.bonus ?? 0),
-	bps: row.bps === null ? null : Number(row.bps ?? 0),
-	starts: typeof row.starts === "boolean" ? row.starts : null,
-	defensiveContribution:
-		row.defensiveContribution === null ? null : Number(row.defensiveContribution ?? 0),
-	expectedGoals: typeof row.expectedGoals === "string" ? row.expectedGoals : null,
-	expectedAssists: typeof row.expectedAssists === "string" ? row.expectedAssists : null,
-	expectedGoalInvolvements:
-		typeof row.expectedGoalInvolvements === "string" ? row.expectedGoalInvolvements : null,
-	expectedGoalsConceded:
-		typeof row.expectedGoalsConceded === "string" ? row.expectedGoalsConceded : null,
-	inDreamTeam: typeof row.inDreamTeam === "boolean" ? row.inDreamTeam : null,
-	totalPoints: Number(row.totalPoints ?? 0),
-});
-
-const teamName = (core: Pick<CoreLiveIdentitySnapshot, "teams">, id: number): string =>
-	core.teams.find((team) => team.id === id)?.name ?? "";
-
-const matchRows = (
-	eventId: number,
-	fixtures: readonly CoreFixtureData[],
-	core: Pick<CoreLiveIdentitySnapshot, "teams">
-) =>
-	fixtures
-		.filter((fixture) => fixture.eventId === eventId)
-		.map((fixture) => ({
-			fixtureId: fixture.id,
-			eventId,
-			homeTeamId: fixture.teamHId,
-			homeTeamName: teamName(core, fixture.teamHId),
-			awayTeamId: fixture.teamAId,
-			awayTeamName: teamName(core, fixture.teamAId),
-			homeScore: fixture.teamHScore,
-			awayScore: fixture.teamAScore,
-			kickoffTime: fixture.kickoffTime,
-			minutes: fixture.minutes,
-			started: fixture.started === true,
-			finished: fixture.finished,
-			finishedProvisional: fixture.finishedProvisional,
-		}));
 
 type LiveWindowV2 = {
 	eventCore: CoreEventSnapshot;
@@ -532,83 +454,6 @@ export const liveDesksResolvers = {
 				revisions: publicationRevisionVector(publication),
 				times: publicationTimes(publication),
 				delivery: publicationDelivery(publication),
-			};
-		},
-		liveMatchdayDesk: async (
-			_parent: unknown,
-			args: { ref?: LiveRef | null },
-			context: GraphQLContext
-		) => {
-			const window = await readLiveWindowV2(context, args.ref?.eventId);
-			assertRef(context, args.ref, window.publication);
-			const publication = window.publication;
-			const eventId = window.eventId;
-			const fixtures =
-				publication?.fixtures.map((fixture) =>
-					toCoreFixture(fixture as unknown as Record<string, unknown>)
-				) ?? window.fixtureCore.fixtures;
-			const eventLives =
-				publication?.eventLives.map((row) =>
-					toLivePerformance(row as unknown as Record<string, unknown>)
-				) ?? [];
-			return {
-				season: context.currentSeason.seasonCode,
-				eventId,
-				scoreCoreRevision:
-					publication?.publication.revisions.scoreCore.revision ??
-					`pre-deadline:${window.fixtureCore.revision}`,
-				state: snapshotStateForPublication(publication?.publication ?? null),
-				windowState: windowStateForPublication(publication?.publication ?? null),
-				dataAvailability: publicationAvailability(publication),
-				sourceCheckedAt:
-					publication?.publication.sourceCheckedAt ?? window.fixtureCore.sourceCheckedAt,
-				publishedAt: publication?.publication.publishedAt ?? window.fixtureCore.sourceCheckedAt,
-				source: publicationSource(publication),
-				stale:
-					publicationDeliveryState(publication) === "STALE" ||
-					publicationDeliveryState(publication) === "DEGRADED" ||
-					publicationDeliveryState(publication) === "UNAVAILABLE",
-				nextRefreshAt: publication?.publication.expectedNextCheckAt ?? null,
-				revisions: publicationRevisionVector(publication),
-				times: publicationTimes(publication),
-				delivery: publicationDelivery(publication),
-				matches: matchRows(eventId, fixtures, window.core),
-				highlights: eventLives.sort((a, b) => b.totalPoints - a.totalPoints).slice(0, 10),
-			};
-		},
-		liveFixturePlayers: async (
-			_parent: unknown,
-			args: { ref: LiveRef; fixtureId: number },
-			context: GraphQLContext
-		) => {
-			const window = await readLiveWindowV2(context, args.ref.eventId);
-			assertRef(context, args.ref, window.publication);
-			if (!window.publication) {
-				throw new GraphQLError("Live Points V2 publication is unavailable", {
-					extensions: { code: "LIVE_POINTS_UNAVAILABLE" },
-				});
-			}
-			const fixture = (window.publication?.fixtures ?? []).find(
-				(candidate) => Number(candidate.id) === args.fixtureId
-			);
-			if (!fixture)
-				throw new GraphQLError("Fixture is not in this live publication", {
-					extensions: { code: "NOT_FOUND" },
-				});
-			const fixtureData = toCoreFixture(fixture as unknown as Record<string, unknown>);
-			const ids = new Set([fixtureData.teamHId, fixtureData.teamAId]);
-			return {
-				season: context.currentSeason.seasonCode,
-				eventId: args.ref.eventId,
-				scoreCoreRevision: window.publication.publication.revisions.scoreCore.revision,
-				fixtureId: args.fixtureId,
-				players: (window.publication?.eventLives ?? [])
-					.filter((row) =>
-						ids.has(
-							window.core.players.find((player) => player.id === Number(row.elementId))?.teamId ?? 0
-						)
-					)
-					.map((row) => toLivePerformance(row as unknown as Record<string, unknown>)),
 			};
 		},
 		entryLiveCompetitionBoard: async (

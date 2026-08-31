@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { graphql, getIntrospectionQuery } from "graphql";
 
 import { schema } from "../../../src/graphql/schema";
+import { resetLiveMatchProcessStateForTests } from "../../../src/domains/live-matches/repository";
 import {
 	buildCorePublication,
 	buildLivePublication,
@@ -12,6 +13,8 @@ import {
 } from "../../helpers/data-publication";
 
 describe("Live Points V2 GraphQL contract", () => {
+	beforeEach(() => resetLiveMatchProcessStateForTests());
+
 	it("publishes one coherent V2 event snapshot across live roots", async () => {
 		const core = buildTestCoreData(1, {
 			fixtures: buildTestCoreData(1).fixtures.map((fixture, index) =>
@@ -37,7 +40,6 @@ describe("Live Points V2 GraphQL contract", () => {
 					delivery { state servedFrom reasonCodes }
 				}
 				eventLive(eventId: 1) { performances { totalPoints } }
-				liveMatchdayDesk { eventId state windowState dataAvailability source stale matches { fixtureId minutes started } }
 			}`,
 			contextValue: buildSnapshotContext(
 				new TestRedis(buildCorePublication("2627", 7, core), live)
@@ -46,8 +48,7 @@ describe("Live Points V2 GraphQL contract", () => {
 
 		expect(result.errors).toBeUndefined();
 		const data = result.data as
-			| { liveSnapshot: unknown; eventLive: { performances: unknown[] }; liveMatchdayDesk: unknown }
-			| undefined;
+			{ liveSnapshot: unknown; eventLive: { performances: unknown[] } } | undefined;
 		expect(data?.liveSnapshot).toMatchObject({
 			season: "2627",
 			eventId: 1,
@@ -56,14 +57,6 @@ describe("Live Points V2 GraphQL contract", () => {
 			delivery: { state: "FRESH", servedFrom: "REDIS_CURRENT" },
 		});
 		expect(data?.eventLive.performances).toHaveLength(core.players.length);
-		expect(data?.liveMatchdayDesk).toMatchObject({
-			eventId: 1,
-			state: "LIVE_ACTIVE",
-			windowState: "LIVE_ACTIVE",
-			dataAvailability: "FRESH",
-			source: "REDIS_CURRENT",
-			stale: false,
-		});
 	});
 
 	it("exposes stale delivery without removing the last complete event data", async () => {
@@ -108,20 +101,25 @@ describe("Live Points V2 GraphQL contract", () => {
 		expect(data?.eventLive.performances).toEqual([]);
 	});
 
-	it("reports a missing publication as unavailable for a pinned live ref", async () => {
-		const core = buildTestCoreData(1);
+	it("reports an unavailable matchday without fabricating a snapshot", async () => {
 		const result = await graphql({
 			schema,
 			source: `query {
-				liveMatchdayDesk(ref: { season: "2627", eventId: 1, scoreCoreRevision: "missing" }) {
-					eventId
+				liveMatchday(eventId: 1) {
+					availability
+					delivery { state servedFrom }
+					snapshot { eventId }
 				}
 			}`,
-			contextValue: buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core))),
+			contextValue: buildSnapshotContext(new TestRedis()),
 		});
 
-		expect(result.data).toBeNull();
-		expect(result.errors?.[0]?.extensions?.code).toBe("LIVE_POINTS_UNAVAILABLE");
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toEqual({
+			availability: "UNAVAILABLE",
+			delivery: { state: "UNAVAILABLE", servedFrom: null },
+			snapshot: null,
+		});
 	});
 
 	it("does not expose retired V1 live fields or the retired revision input", async () => {

@@ -59,7 +59,7 @@ export const buildGraphQLRuntimeContext = async ({
 	requestId,
 	operationName,
 	limits,
-	livePointsHotPath = false,
+	readOnlyHotPath = false,
 }: {
 	currentSeasonProvider: CurrentSeasonProvider;
 	parsedBody: unknown;
@@ -69,17 +69,17 @@ export const buildGraphQLRuntimeContext = async ({
 	requestId: string;
 	operationName: string;
 	limits: AcceptedGraphQLLimits;
-	livePointsHotPath?: boolean;
+	readOnlyHotPath?: boolean;
 }): Promise<RuntimeContextResult> => {
 	let currentSeason: GraphQLContext["currentSeason"];
 	try {
 		currentSeason = await requestTiming.measure("season", () =>
-			livePointsHotPath
+			readOnlyHotPath
 				? Promise.resolve(currentSeasonProvider.get())
 				: currentSeasonProvider.refresh(database, 5_000)
 		);
 	} catch (error) {
-		if (livePointsHotPath) {
+		if (readOnlyHotPath) {
 			try {
 				// The season identity was pinned at startup. During a PostgreSQL
 				// incident, a V2 live request may continue against that identity;
@@ -164,7 +164,7 @@ export const buildGraphQLRuntimeContext = async ({
 	// for the full Core publication (or PostgreSQL) before the resolver can
 	// read its same-event current/previous/LKG data.  The V2 resolvers load only
 	// the identity slice they need and retain their own exact-event fallback.
-	if (livePointsHotPath) {
+	if (readOnlyHotPath) {
 		context.fullCoreLoaded = false;
 		return { ok: true, context, fullCoreLoaded: false };
 	}
