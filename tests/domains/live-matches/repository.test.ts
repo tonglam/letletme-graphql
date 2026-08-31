@@ -370,6 +370,23 @@ describe("Live Matches V2 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects publication timestamps that GraphQL DateTime cannot serialize", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+		const publication = JSON.parse(bundle.desk.active.publication) as {
+			sourceCheckedAt: string;
+		};
+		publication.sourceCheckedAt = "2026-08-31";
+		bundle.desk.active.publication = JSON.stringify(publication);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("does not let an explicit event read populate the active-event fallback", async () => {
 		const redis = new TestRedis();
 		const bundle = { ...buildBundle().bundle, eventId: 2 };
@@ -541,6 +558,35 @@ describe("Live Matches V2 read path", () => {
 		expect(result.detail?.fixtures).toHaveLength(2);
 	});
 
+	it("labels a previous detail fallback independently from the desk", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		if (bundle.detail.active.publication === null)
+			throw new Error("missing active detail publication");
+		const activePublication = JSON.parse(bundle.detail.active.publication) as unknown as {
+			fixtures: Array<{ key: string; sha256: string }>;
+		};
+		activePublication.fixtures[0].key = `llm:data:v2:fpl:other:${activePublication.fixtures[0].sha256}`;
+		bundle.detail.active.publication = JSON.stringify(activePublication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		bundle.detail.active.items[0].key = activePublication.fixtures[0].key;
+		attachBundle(redis, bundle);
+
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { snapshot { detailDelivery { servedFrom reasonCodes } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			snapshot: {
+				detailDelivery: { servedFrom: "REDIS_PREVIOUS", reasonCodes: ["DETAIL_PREVIOUS"] },
+			},
+		});
+	});
+
 	it("caps Redis detail fan-out before reading immutable item keys", () => {
 		expect(LIVE_MATCHES_READ_BUNDLE_LUA).toContain(
 			`#decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES}`
@@ -685,6 +731,35 @@ describe("Live Matches V2 read path", () => {
 		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(retained.detail?.servedFrom).toBe("PROCESS_LKG");
 		expect(retained.eventId).toBe(1);
+	});
+
+	it("revalidates an explicit event after Redis loses a complete active LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
+		const newerCheckpoint = buildCheckpointRow({ eventId: 1, deskGeneration: 3 });
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (_query, values) => {
+				databaseReads += 1;
+				expect(values).toEqual([2026, 1]);
+				return { rows: [newerCheckpoint] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context, 1);
+		expect(warm.desk?.publication.generation).toBe(2);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const recovered = await readLiveMatchday(context, 1);
+
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.desk?.publication.generation).toBe(3);
+		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.detail?.publication.generation).toBe(13);
+		expect(databaseReads).toBe(1);
 	});
 
 	it("revalidates the cached active event during a Redis outage", async () => {

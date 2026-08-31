@@ -51,6 +51,19 @@ const servedFromReason = (servedFrom: string): string => {
 	}
 };
 
+const detailServedFromReason = (servedFrom: string): string => {
+	switch (servedFrom) {
+		case "REDIS_PREVIOUS":
+			return "DETAIL_PREVIOUS";
+		case "PROCESS_LKG":
+			return "PROCESS_LKG";
+		case "POSTGRES_CHECKPOINT":
+			return "POSTGRES_CHECKPOINT";
+		default:
+			return "REDIS_CURRENT";
+	}
+};
+
 const detailFixtureMap = (
 	detail: MatchDetailCandidate | null
 ): Map<number, MatchDetailCandidate["fixtures"][number]> =>
@@ -233,7 +246,7 @@ const toResult = (read: LiveMatchdayRead) => {
 					: read.detail
 						? read.detail.servedFrom === "REDIS_CURRENT"
 							? []
-							: [servedFromReason(read.detail.servedFrom)]
+							: [detailServedFromReason(read.detail.servedFrom)]
 						: [detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE"],
 			},
 			matches: toMatches(read.desk, read.detail),

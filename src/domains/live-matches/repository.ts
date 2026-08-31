@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type Redis from "ioredis";
 import type { QueryResultRow } from "pg";
+import { DateTimeResolver } from "graphql-scalars";
 
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
@@ -189,6 +190,7 @@ type PostgresCheckpointRead = Readonly<{
 const processLkg = new Map<string, SelectedLkg>();
 const processActiveEvent = new Map<string, number>();
 const processActiveEventCheckedAt = new Map<string, number>();
+const processEventCheckedAt = new Map<string, number>();
 const postgresDetailMissUntil = new Map<string, number>();
 let postgresCircuitOpenUntil = 0;
 let postgresCircuitFailures = 0;
@@ -197,8 +199,15 @@ const postgresReadFlights = new Map<string, Promise<PostgresCheckpointRead | nul
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
-const isIso = (value: unknown): value is string =>
-	typeof value === "string" && Number.isFinite(Date.parse(value));
+const isIso = (value: unknown): value is string => {
+	if (typeof value !== "string") return false;
+	try {
+		DateTimeResolver.parseValue(value);
+		return true;
+	} catch {
+		return false;
+	}
+};
 
 const safeInteger = (value: unknown): number | null =>
 	typeof value === "number" && Number.isSafeInteger(value) ? value : null;
@@ -1472,6 +1481,24 @@ export const readLiveMatchday = async (
 	let postgresReadFailed = unscopedPostgres === null;
 	let postgres: PostgresCheckpointRead | null =
 		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
+	let scopedPostgresAttempted = false;
+	const scopedEventKey = lkgKey(season, selectedEventId);
+	if (
+		requested !== undefined &&
+		redisBundle === null &&
+		Date.now() - (processEventCheckedAt.get(scopedEventKey) ?? 0) >=
+			LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS
+	) {
+		postgres = await readPostgresCheckpoint(
+			context,
+			context.currentSeason.seasonId,
+			season,
+			selectedEventId
+		);
+		processEventCheckedAt.set(scopedEventKey, Date.now());
+		postgresReadFailed = postgres === null;
+		scopedPostgresAttempted = true;
+	}
 	const retainedDetail = initialDesk
 		? chooseDetail(initialDesk, [
 				...redisDetail,
@@ -1485,7 +1512,7 @@ export const readLiveMatchday = async (
 			retainedDetail === null &&
 			detailCheckpointMayBeRetried(season, selectedEventId, initialDesk))
 	) {
-		if (unscopedPostgres === undefined) {
+		if (unscopedPostgres === undefined && !scopedPostgresAttempted) {
 			postgres = await readPostgresCheckpoint(
 				context,
 				context.currentSeason.seasonId,
@@ -1534,6 +1561,7 @@ export const resetLiveMatchProcessStateForTests = (): void => {
 	processLkg.clear();
 	processActiveEvent.clear();
 	processActiveEventCheckedAt.clear();
+	processEventCheckedAt.clear();
 	postgresDetailMissUntil.clear();
 	postgresCircuitOpenUntil = 0;
 	postgresCircuitFailures = 0;
