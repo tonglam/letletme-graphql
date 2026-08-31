@@ -1509,6 +1509,79 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(4);
 	});
 
+	it("fails closed when completed knockout goals disagree between sides", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const match = (
+			(payload.knockout as Record<string, unknown>).matches as Array<Record<string, unknown>>
+		)[0]!;
+		match.winnerEntryId = 6953;
+		Object.assign(match.home as Record<string, unknown>, {
+			netPoints: 55,
+			goalsScored: 2,
+			goalsConceded: 0,
+		});
+		Object.assign(match.away as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 2,
+		});
+		const row = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadGameweekReview(context, {
+				tournamentId: 6953,
+				eventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("rejects a cached completed knockout match with inconsistent goals", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const match = (
+			(payload.knockout as Record<string, unknown>).matches as Array<Record<string, unknown>>
+		)[0]!;
+		match.winnerEntryId = 6953;
+		Object.assign(match.home as Record<string, unknown>, {
+			netPoints: 55,
+			goalsScored: 2,
+			goalsConceded: 1,
+		});
+		Object.assign(match.away as Record<string, unknown>, {
+			netPoints: 50,
+			goalsScored: 1,
+			goalsConceded: 2,
+		});
+		const publication = { ...base, payload, content_sha256: postgresJsonbContentHash(payload) };
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			knockout: { matches: Array<{ away: { goalsScored: number | null } }> };
+		};
+		cached.knockout.matches[0]!.away.goalsScored = 3;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.knockout?.matches[0]?.away?.goalsScored).toBe(1);
+		expect(databaseReads).toBe(4);
+	});
+
 	it("fails closed when a non-applicable knockout side retains tournament metrics", async () => {
 		const base = knockoutPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -2204,6 +2277,127 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		expect(variantPage.points?.rows[0]?.entryId).toBe(6954);
 		expect(canonicalPage.points?.rows[0]?.entryId).toBe(6954);
+		expect(publicationReads).toBe(2);
+	});
+
+	it("uses format-specific cursors for Season H2H pages", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		const standings = h2h.standings as Array<Record<string, unknown>>;
+		matches.push({
+			...matches[0],
+			matchId: "4-2",
+			home: {
+				...(matches[0]!.home as Record<string, unknown>),
+				entryId: 6954,
+				entryName: "Second XI",
+				rank: 2,
+			},
+		});
+		standings.push({
+			...standings[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			rank: 2,
+		});
+		const latest = h2hPublicationRow({
+			payload,
+			row_count: 2,
+			ready_subject_count: 2,
+			not_applicable_subject_count: 0,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		let publicationReads = 0;
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return { rows: [seasonMetadataRow(latest, [4])] };
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) {
+					publicationReads += 1;
+					return { rows: [latest] };
+				}
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		const firstPage = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+			first: 1,
+		});
+		const cursor = JSON.parse(
+			Buffer.from(firstPage.h2h!.nextCursor!, "base64url").toString("utf8")
+		) as { scope: string };
+		expect(cursor.scope).toBe('[2026,6953,4,"H2H","H2H"]');
+
+		const secondPage = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+			first: 1,
+			after: firstPage.h2h?.nextCursor,
+		});
+		expect(secondPage.h2h?.matches).toHaveLength(1);
+		expect(secondPage.h2h?.standings[0]?.entryId).toBe(6954);
+		expect(secondPage.h2h?.hasNextPage).toBe(false);
+		expect(publicationReads).toBe(2);
+	});
+
+	it("uses format-specific cursors for Season knockout pages", async () => {
+		const base = knockoutPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const knockout = payload.knockout as Record<string, unknown>;
+		const matches = knockout.matches as Array<Record<string, unknown>>;
+		const secondSide = matches[0]!.away;
+		matches[0] = { ...matches[0], away: null };
+		matches.push({
+			...matches[0],
+			matchId: 102,
+			playAgainstId: 103,
+			home: secondSide,
+		});
+		const latest = knockoutPublicationRow({
+			payload,
+			row_count: 2,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		let publicationReads = 0;
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return { rows: [seasonMetadataRow(latest, [4])] };
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) {
+					publicationReads += 1;
+					return { rows: [latest] };
+				}
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		const firstPage = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+			first: 1,
+		});
+		const cursor = JSON.parse(
+			Buffer.from(firstPage.knockout!.nextCursor!, "base64url").toString("utf8")
+		) as { scope: string };
+		expect(cursor.scope).toBe('[2026,6953,4,"KNOCKOUT","KNOCKOUT"]');
+
+		const secondPage = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+			first: 1,
+			after: firstPage.knockout?.nextCursor,
+		});
+		expect(secondPage.knockout?.matches).toHaveLength(1);
+		expect(secondPage.knockout?.matches[0]?.home?.entryId).toBe(6954);
+		expect(secondPage.knockout?.hasNextPage).toBe(false);
 		expect(publicationReads).toBe(2);
 	});
 

@@ -1119,8 +1119,8 @@ function reviewCursorCollection(
 	format: MyTournamentReviewFormat,
 	view: "GAMEWEEK" | "SEASON"
 ): string {
-	if (view === "SEASON") return "SEASON_POINTS";
-	return format === "POINTS" ? "GAMEWEEK_POINTS" : format === "H2H" ? "H2H" : "KNOCKOUT";
+	if (format === "POINTS") return view === "SEASON" ? "SEASON_POINTS" : "GAMEWEEK_POINTS";
+	return format === "H2H" ? "H2H" : "KNOCKOUT";
 }
 
 function decodePublicationCursor(
@@ -1502,7 +1502,7 @@ function knockoutEntryCoverageValid(
 
 function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId: unknown): boolean {
 	if (!isRecord(home) || !isRecord(away) || winnerEntryId === null) return true;
-	return [
+	const settled = [
 		home.netPoints,
 		home.goalsScored,
 		home.goalsConceded,
@@ -1510,6 +1510,9 @@ function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId:
 		away.goalsScored,
 		away.goalsConceded,
 	].every((value) => value !== null);
+	return (
+		settled && home.goalsScored === away.goalsConceded && away.goalsScored === home.goalsConceded
+	);
 }
 
 function knockoutScoreBreakdownValid(
