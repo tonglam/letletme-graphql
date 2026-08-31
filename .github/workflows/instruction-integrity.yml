@@ -1218,20 +1218,119 @@ jobs:
                       for item in ast.walk(expression)
                   )
 
-              def returns_true(statements):
+              def block_flow(statements):
+                  """Return (reachable True return, may fall through)."""
+
+                  found_true_return = False
+                  may_fall_through = True
+                  for statement in statements:
+                      if not may_fall_through:
+                          break
+                      if isinstance(statement, ast.Return):
+                          found_true_return = found_true_return or (
+                              isinstance(statement.value, ast.Constant)
+                              and statement.value.value is True
+                          )
+                          may_fall_through = False
+                      elif isinstance(statement, (ast.Break, ast.Continue, ast.Raise)):
+                          may_fall_through = False
+                      elif isinstance(statement, ast.If):
+                          if statically_false(statement.test):
+                              branch_true, branch_falls = block_flow(statement.orelse)
+                          elif statically_true(statement.test):
+                              branch_true, branch_falls = block_flow(statement.body)
+                          else:
+                              body_true, body_falls = block_flow(statement.body)
+                              else_true, else_falls = block_flow(statement.orelse)
+                              branch_true = body_true or else_true
+                              branch_falls = body_falls or else_falls
+                          found_true_return = found_true_return or branch_true
+                          may_fall_through = branch_falls
+                      elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                          if static_truth(statement.iter) is False:
+                              continue
+                          body_true, _ = block_flow(statement.body)
+                          else_true, _ = block_flow(statement.orelse)
+                          found_true_return = found_true_return or body_true or else_true
+                          may_fall_through = True
+                      elif isinstance(statement, ast.While):
+                          if statically_false(statement.test):
+                              continue
+                          body_true, _ = block_flow(statement.body)
+                          else_true, _ = block_flow(statement.orelse)
+                          found_true_return = found_true_return or body_true or else_true
+                          may_fall_through = True
+                      elif isinstance(statement, ast.Try):
+                          branches = [statement.body, statement.orelse]
+                          branches.extend(handler.body for handler in statement.handlers)
+                          branch_results = [block_flow(branch) for branch in branches]
+                          final_true, final_falls = block_flow(statement.finalbody)
+                          if not final_falls:
+                              found_true_return = found_true_return or final_true
+                              may_fall_through = False
+                          else:
+                              found_true_return = found_true_return or final_true or any(result[0] for result in branch_results)
+                              may_fall_through = any(result[1] for result in branch_results)
+                  return found_true_return, may_fall_through
+
+              def reachable_if_branches(statements):
+                  """Yield If nodes that can execute from this block."""
+
+                  def visit(block):
+                      for statement in block:
+                          if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+                              break
+                          if isinstance(statement, ast.If):
+                              if statically_false(statement.test):
+                                  yield from visit(statement.orelse)
+                                  if not block_flow(statement.orelse)[1]:
+                                      break
+                                  continue
+                              yield statement
+                              yield from visit(statement.body)
+                              body_falls = block_flow(statement.body)[1]
+                              if statically_true(statement.test):
+                                  if not body_falls:
+                                      break
+                                  continue
+                              yield from visit(statement.orelse)
+                              if not (body_falls or block_flow(statement.orelse)[1]):
+                                  break
+                          elif isinstance(statement, (ast.For, ast.AsyncFor)):
+                              if static_truth(statement.iter) is False:
+                                  continue
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                          elif isinstance(statement, ast.While):
+                              if statically_false(statement.test):
+                                  continue
+                              yield from visit(statement.body)
+                              yield from visit(statement.orelse)
+                          elif isinstance(statement, ast.Try):
+                              yield from visit(statement.body)
+                              for handler in statement.handlers:
+                                  yield from visit(handler.body)
+                              yield from visit(statement.orelse)
+                              yield from visit(statement.finalbody)
+
+                  yield from visit(statements)
+
+              def has_non_placeholder_guard(expression):
                   return any(
-                      isinstance(item, ast.Return)
-                      and isinstance(item.value, ast.Constant)
-                      and item.value.value is True
-                      for statement in statements
-                      for item in ast.walk(statement)
+                      isinstance(item, ast.UnaryOp)
+                      and isinstance(item.op, ast.Not)
+                      and isinstance(item.operand, ast.Call)
+                      and isinstance(item.operand.func, ast.Name)
+                      and item.operand.func.id == "_looks_like_placeholder"
+                      for item in ast.walk(expression)
                   )
+
+              def returns_true(statements):
+                  return block_flow(statements)[0]
 
               precheck = False
               placeholder_check = False
-              for branch in ast.walk(node):
-                  if not isinstance(branch, ast.If):
-                      continue
+              for branch in reachable_if_branches(node.body):
                   if (
                       not statically_false(branch.test)
                       and
@@ -1241,7 +1340,7 @@ jobs:
                       and returns_true(branch.body)
                   ):
                       precheck = True
-                  if calls_name(branch.test, "_looks_like_placeholder") and returns_true(branch.body):
+                  if has_non_placeholder_guard(branch.test) and returns_true(branch.body):
                       placeholder_check = True
               if not precheck:
                   raise SystemExit("approved validator has_secret does not propagate pre-check results")
@@ -1373,11 +1472,16 @@ jobs:
                           # keep following the enclosing block conservatively.
                           may_fall_through = True
                       elif isinstance(statement, ast.Try):
-                          branches = [statement.body, statement.orelse, statement.finalbody]
+                          branches = [statement.body, statement.orelse]
                           branches.extend(handler.body for handler in statement.handlers)
                           branch_results = [block_flow(branch) for branch in branches]
-                          found_true_return = found_true_return or any(result[0] for result in branch_results)
-                          may_fall_through = any(result[1] for result in branch_results)
+                          final_true, final_falls = block_flow(statement.finalbody)
+                          if not final_falls:
+                              found_true_return = found_true_return or final_true
+                              may_fall_through = False
+                          else:
+                              found_true_return = found_true_return or final_true or any(result[0] for result in branch_results)
+                              may_fall_through = any(result[1] for result in branch_results)
                   return found_true_return, may_fall_through
 
               def secret_search_names(expression):
@@ -1405,7 +1509,13 @@ jobs:
                           and isinstance(receiver.value, ast.Name)
                           and receiver.value.id == "SECRET_VALUE_RES"
                       ):
-                          names.add("SECRET_VALUE_RES")
+                          index = receiver.slice
+                          if isinstance(index, ast.UnaryOp) and isinstance(index.op, ast.USub) and isinstance(index.operand, ast.Constant):
+                              index = -index.operand.value
+                          if isinstance(index, ast.Constant):
+                              index = index.value
+                          if index == -1:
+                              names.add("SECRET_VALUE_RES")
                   return names
 
               def loop_search_names(loop):
@@ -1534,19 +1644,73 @@ jobs:
                   return block_flow(statements)[0]
 
               def reachable_placeholder_return(statements):
-                  """Require a reachable placeholder guard that returns True."""
+                  """Require a reachable non-placeholder return tied to a match."""
 
-                  def has_non_placeholder_guard(expression):
-                      return any(
-                          isinstance(item, ast.UnaryOp)
-                          and isinstance(item.op, ast.Not)
-                          and isinstance(item.operand, ast.Call)
-                          and isinstance(item.operand.func, ast.Name)
-                          and item.operand.func.id == "_looks_like_placeholder"
-                          for item in ast.walk(expression)
+                  def target_names(target):
+                      return {
+                          item.id
+                          for item in ast.walk(target)
+                          if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+                      }
+
+                  def has_non_placeholder_guard(expression, derived_names):
+                      for item in ast.walk(expression):
+                          if not (
+                              isinstance(item, ast.UnaryOp)
+                              and isinstance(item.op, ast.Not)
+                              and isinstance(item.operand, ast.Call)
+                              and isinstance(item.operand.func, ast.Name)
+                              and item.operand.func.id == "_looks_like_placeholder"
+                          ):
+                              continue
+                          arguments = list(item.operand.args) + [keyword.value for keyword in item.operand.keywords]
+                          if any(
+                              isinstance(name, ast.Name)
+                              and isinstance(name.ctx, ast.Load)
+                              and name.id in derived_names
+                              for argument in arguments
+                              for name in ast.walk(argument)
+                          ):
+                              return True
+                      return False
+
+                  def match_loop_call(statement):
+                      if not isinstance(statement, (ast.For, ast.AsyncFor)):
+                          return None
+                      return next(
+                          (
+                              item
+                              for item in ast.walk(statement.iter)
+                              if isinstance(item, ast.Call)
+                              and isinstance(item.func, ast.Attribute)
+                              and item.func.attr == "finditer"
+                              and consumes_primary_input(item)
+                          ),
+                          None,
                       )
 
-                  def scan(block):
+                  def assignment_derived_names(statement, derived_names):
+                      if isinstance(statement, ast.Assign):
+                          targets = statement.targets
+                          value = statement.value
+                      elif isinstance(statement, ast.AnnAssign):
+                          targets = [statement.target]
+                          value = statement.value
+                      else:
+                          return set()
+                      if value is None:
+                          return set()
+                      for item in ast.walk(value):
+                          if isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == "group":
+                              receiver = item.func.value
+                              if isinstance(receiver, ast.Name) and receiver.id in derived_names:
+                                  return {name for target in targets for name in target_names(target)}
+                          if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load) and item.id in derived_names:
+                              return {name for target in targets for name in target_names(target)}
+                      return set()
+
+                  def scan(block, derived_names):
+                      known = set(derived_names)
                       may_fall_through = True
                       for statement in block:
                           if not may_fall_through:
@@ -1554,46 +1718,59 @@ jobs:
                           if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
                               may_fall_through = False
                               continue
+                          if isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                              known.update(assignment_derived_names(statement, known))
+                              continue
                           if isinstance(statement, ast.If):
                               if statically_false(statement.test):
-                                  if scan(statement.orelse):
+                                  if scan(statement.orelse, known):
                                       return True
                                   may_fall_through = block_flow(statement.orelse)[1]
                                   continue
-                              if has_non_placeholder_guard(statement.test) and block_flow(statement.body)[0]:
+                              if has_non_placeholder_guard(statement.test, known) and block_flow(statement.body)[0]:
                                   return True
                               if statically_true(statement.test):
-                                  if scan(statement.body):
+                                  if scan(statement.body, known):
                                       return True
                                   may_fall_through = block_flow(statement.body)[1]
                                   continue
-                              if scan(statement.body) or scan(statement.orelse):
+                              if scan(statement.body, known) or scan(statement.orelse, known):
                                   return True
                               may_fall_through = block_flow(statement.body)[1] or block_flow(statement.orelse)[1]
                               continue
                           if isinstance(statement, (ast.For, ast.AsyncFor)):
                               if static_truth(statement.iter) is False:
                                   continue
-                              if scan(statement.body) or scan(statement.orelse):
+                              search_call = match_loop_call(statement)
+                              match_names = target_names(statement.target) if search_call else known
+                              if scan(statement.body, match_names) or scan(statement.orelse, known):
                                   return True
                               may_fall_through = True
                               continue
                           if isinstance(statement, ast.While):
                               if statically_false(statement.test):
                                   continue
-                              if scan(statement.body) or scan(statement.orelse):
+                              if scan(statement.body, known) or scan(statement.orelse, known):
                                   return True
                               may_fall_through = True
                               continue
                           if isinstance(statement, ast.Try):
-                              branches = [statement.body, statement.orelse, statement.finalbody]
+                              branches = [statement.body, statement.orelse]
                               branches.extend(handler.body for handler in statement.handlers)
-                              if any(scan(branch) for branch in branches):
-                                  return True
-                              may_fall_through = any(block_flow(branch)[1] for branch in branches)
+                              final_falls = block_flow(statement.finalbody)[1]
+                              if not final_falls:
+                                  if scan(statement.finalbody, known):
+                                      return True
+                                  may_fall_through = False
+                              else:
+                                  if any(scan(branch, known) for branch in branches):
+                                      return True
+                                  if scan(statement.finalbody, known):
+                                      return True
+                                  may_fall_through = any(block_flow(branch)[1] for branch in branches)
                       return False
 
-                  return scan(statements)
+                  return scan(statements, set())
 
               def reachable_detection_branches(statements):
                   """Yield credential control nodes from reachable code only."""
@@ -1632,10 +1809,12 @@ jobs:
                               yield from visit(statement.orelse)
                               continue
                           if isinstance(statement, ast.Try):
-                              yield from visit(statement.body)
-                              for handler in statement.handlers:
-                                  yield from visit(handler.body)
-                              yield from visit(statement.orelse)
+                              final_falls = block_flow(statement.finalbody)[1]
+                              if final_falls:
+                                  yield from visit(statement.body)
+                                  for handler in statement.handlers:
+                                      yield from visit(handler.body)
+                                  yield from visit(statement.orelse)
                               yield from visit(statement.finalbody)
 
                   yield from visit(statements)
@@ -1744,6 +1923,9 @@ jobs:
               ]
               if len(secret_value_res) != 1:
                   raise SystemExit("approved validator SECRET_VALUE_RES must have one module assignment")
+              secret_value_expression = secret_value_res[0]
+              if not isinstance(secret_value_expression, (ast.Tuple, ast.List)):
+                  raise SystemExit("approved validator SECRET_VALUE_RES must use a literal sequence")
               required_secret_patterns = {
                   "BASIC_AUTH_RE",
                   "CLI_CREDENTIAL_RE",
@@ -1751,7 +1933,7 @@ jobs:
               }
               pattern_refs = {
                   item.id
-                  for item in ast.walk(secret_value_res[0])
+                  for item in secret_value_expression.elts
                   if isinstance(item, ast.Name)
               }
               missing_secret_patterns = sorted(required_secret_patterns - pattern_refs)
