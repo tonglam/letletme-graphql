@@ -133,6 +133,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"publication.event_data_checked_at = head_event.data_checked_at"
 		);
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("tournament.setup_status = 'ready'");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT 500");
 	});
 
@@ -187,6 +188,16 @@ describe("My Tournament Review V2 repository", () => {
 					}),
 				],
 			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(repository.loadCatalog(context, "ACCESSIBLE")).rejects.toMatchObject({
+			extensions: { code: "DATA_INTEGRITY_ERROR" },
+		});
+	});
+
+	it("fails closed when READY points to an older finalized-event head", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [catalogRow({ latest_state: "READY" })] }),
 		});
 		const repository = createMyTournamentReviewRepository();
 		await expect(repository.loadCatalog(context, "ACCESSIBLE")).rejects.toMatchObject({
@@ -471,6 +482,82 @@ describe("My Tournament Review V2 repository", () => {
 			isAverage: true,
 			netPoints: 38,
 		});
+	});
+
+	it("fails closed when a non-bye H2H match pairs an entry with itself", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		const home = matches[0]!.home;
+		matches[0] = { ...matches[0], isBye: false, away: structuredClone(home) };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [{ ...base, payload, content_sha256: postgresJsonbContentHash(payload) }],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when a non-bye H2H match pairs two Average Teams", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		const average = {
+			entryId: null,
+			entryName: "Average Team",
+			isAverage: true,
+			netPoints: 38,
+			matchPoints: 0,
+			rank: null,
+		};
+		matches[0] = { ...matches[0], isBye: false, home: average, away: { ...average } };
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({
+				rows: [{ ...base, payload, content_sha256: postgresJsonbContentHash(payload) }],
+			}),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
+	it("fails closed when knockout matches repeat a match identity", async () => {
+		const match = {
+			round: 1,
+			name: "Round 1",
+			matchId: 101,
+			playAgainstId: 102,
+			home: { entryId: 6953, entryName: "Example XI" },
+			away: { entryId: 6954, entryName: "Second XI" },
+			winnerEntryId: null,
+		};
+		const payload = {
+			schemaVersion: "my-tournament-review-v2",
+			metricVersion: "descriptive-v1",
+			format: "KNOCKOUT",
+			knockout: { matches: [match, { ...match }] },
+		};
+		const row = publicationRow({
+			format: "KNOCKOUT",
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			row_count: 2,
+			payload,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 })
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
 	it("fails closed when a required H2H standing metric is null", async () => {

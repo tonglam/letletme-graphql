@@ -320,6 +320,7 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		LIMIT 1
 	) obligation ON true
 	WHERE tournament.season_id = $1
+	  AND tournament.setup_status = 'ready'
 	  AND (
 		$2 = 'ALL'
 		OR ($2 = 'MANAGED' AND tournament.admin_entry_id = $3)
@@ -1091,6 +1092,10 @@ function catalogCache(value: unknown): value is MyTournamentReviewCatalog {
 				(item.latestFinalizedEventId === null ||
 					item.latestAvailableEventId === null ||
 					Number(item.latestAvailableEventId) <= Number(item.latestFinalizedEventId)) &&
+				(item.state !== "READY" ||
+					(item.latestFinalizedEventId !== null &&
+						item.latestAvailableEventId !== null &&
+						Number(item.latestAvailableEventId) === Number(item.latestFinalizedEventId))) &&
 				(item.latestRevision === null ||
 					(/^\d+$/.test(String(item.latestRevision)) && Number(item.latestRevision) > 0)) &&
 				(item.latestFormat === null || reviewFormat(item.latestFormat) !== null) &&
@@ -1259,6 +1264,10 @@ function mapCatalogRow(row: CatalogRow): MyTournamentReviewCatalogItem {
 		(latestFinalizedEventId !== null &&
 			latestAvailableEventId !== null &&
 			latestAvailableEventId > latestFinalizedEventId) ||
+		(latestState === "READY" &&
+			(latestFinalizedEventId === null ||
+				latestAvailableEventId === null ||
+				latestAvailableEventId !== latestFinalizedEventId)) ||
 		(hasHead && (!latestRevision || !latestFormat || !publishedAt)) ||
 		(!hasHead && (latestRevision !== null || latestFormat !== null || publishedAt !== null)) ||
 		(!hasHead && latestState === "READY")
@@ -1508,19 +1517,30 @@ function mapH2H(value: unknown): {
 		? value.matches.map((raw) => {
 				if (!isRecord(raw)) throw integrityError("Review H2H match payload is invalid");
 				const groupId = Number(raw.groupId);
+				const home = raw.home === null ? null : mapH2HSide(raw.home);
+				const away = raw.away === null ? null : mapH2HSide(raw.away);
 				if (
 					typeof raw.matchId !== "string" ||
 					raw.matchId.length === 0 ||
 					!Number.isSafeInteger(groupId) ||
 					groupId <= 0 ||
 					typeof raw.isBye !== "boolean" ||
-					(raw.home !== null && !mapH2HSide(raw.home)) ||
-					(raw.away !== null && !mapH2HSide(raw.away)) ||
+					(raw.home !== null && !home) ||
+					(raw.away !== null && !away) ||
 					(raw.isBye
 						? (raw.home === null) === (raw.away === null)
 						: raw.home === null || raw.away === null)
 				) {
 					throw integrityError("Review H2H match payload is invalid");
+				}
+				if (
+					!raw.isBye &&
+					home &&
+					away &&
+					((!home.isAverage && !away.isAverage && home.entryId === away.entryId) ||
+						home.isAverage === away.isAverage)
+				) {
+					throw integrityError("Review H2H match sides are invalid");
 				}
 				const identity = JSON.stringify([groupId, raw.matchId]);
 				if (matchIdentities.has(identity)) {
@@ -1530,8 +1550,8 @@ function mapH2H(value: unknown): {
 				return {
 					matchId: raw.matchId,
 					groupId,
-					home: mapH2HSide(raw.home),
-					away: mapH2HSide(raw.away),
+					home,
+					away,
 					isBye: raw.isBye === true,
 				};
 			})
@@ -1627,6 +1647,7 @@ function mapKnockoutSide(value: unknown): MyTournamentReviewKnockoutSide | null 
 
 function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 	if (!isRecord(value) || !Array.isArray(value.matches)) return [];
+	const matchIdentities = new Set<string>();
 	return value.matches.map((raw) => {
 		if (!isRecord(raw)) throw integrityError("Review knockout match payload is invalid");
 		const matchId = positiveInt(raw.matchId);
@@ -1652,6 +1673,11 @@ function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 		) {
 			throw integrityError("Review knockout match payload is invalid");
 		}
+		const identity = `${matchId}:${playAgainstId}`;
+		if (matchIdentities.has(identity)) {
+			throw integrityError("Review knockout matches contain duplicate identities");
+		}
+		matchIdentities.add(identity);
 		return {
 			round,
 			name: typeof raw.name === "string" ? raw.name : null,
