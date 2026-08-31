@@ -1279,6 +1279,12 @@ function pointsRowCache(value: unknown): value is MyTournamentReviewPointsRow {
 		value.seasonNetPoints,
 		value.eventRank,
 	];
+	const optionalRanks = [value.previousRank, value.eventRank, value.overallRank];
+	if (
+		optionalRanks.some((candidate) => candidate !== null && strictPositiveInt(candidate) === null)
+	) {
+		return false;
+	}
 	if (!value.applicable) return tournamentMetrics.every((candidate) => candidate === null);
 	return (
 		strictPositiveInt(value.groupId) !== null &&
@@ -2010,6 +2016,13 @@ function mapPointsRows(value: unknown): MyTournamentReviewPointsRow[] {
 		) {
 			throw integrityError("Review applicable points row has invalid group or rank");
 		}
+		if (
+			[mapped.previousRank, mapped.eventRank, mapped.overallRank].some(
+				(rank) => rank !== null && strictPositiveInt(rank) === null
+			)
+		) {
+			throw integrityError("Review points row has an invalid optional rank");
+		}
 		if (mapped.applicable && !pointsRowMetricsValid(mapped)) {
 			throw integrityError(
 				"Review applicable points row has inconsistent gross, cost, or net points"
@@ -2686,6 +2699,11 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadGameweekReview(context, args) {
+		if (strictPositiveInt(args.eventId) === null) {
+			throw new GraphQLError("eventId must be a positive integer", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
 		const first = boundedFirst(args.first, 50);
 		const revision = args.revision?.trim() || null;
 		if (
@@ -2775,6 +2793,11 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 	},
 
 	async loadSeasonReview(context, args) {
+		if (strictPositiveInt(args.throughEventId) === null) {
+			throw new GraphQLError("throughEventId must be a positive integer", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
 		const first = boundedFirst(args.first, 100);
 		const metadataResult = await context.database.query<SeasonMetadataRow>(
 			MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,

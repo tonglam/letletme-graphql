@@ -510,6 +510,30 @@ describe("My Tournament Review V2 repository", () => {
 		});
 	});
 
+	it("rejects nonpositive review event arguments before querying availability", async () => {
+		let databaseReads = 0;
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 0 })
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
+		await expect(
+			repository.loadGameweekReview(context, { tournamentId: 6953, eventId: -1 })
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
+		await expect(
+			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 0 })
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
+		await expect(
+			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: -1 })
+		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
+		expect(databaseReads).toBe(0);
+	});
+
 	it("does not pair a missing Gameweek head with a READY obligation from another snapshot", async () => {
 		let metadataReads = 0;
 		const context = buildSnapshotContext(new TestRedis(), {
@@ -965,6 +989,30 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
+	it("fails closed when an optional points rank is nonpositive", async () => {
+		const base = publicationRow();
+		for (const field of ["previousRank", "eventRank", "overallRank"] as const) {
+			const payload = structuredClone(base.payload) as Record<string, unknown>;
+			const rowPayload = payload.points as Record<string, unknown>;
+			const row = (rowPayload.rows as Array<Record<string, unknown>>)[0]!;
+			row[field] = 0;
+			const publication = {
+				...base,
+				payload,
+				content_sha256: postgresJsonbContentHash(payload),
+			};
+			const context = buildSnapshotContext(new TestRedis(), {
+				databaseQuery: async () => ({ rows: [publication] }),
+			});
+			await expect(
+				createMyTournamentReviewRepository().loadGameweekReview(context, {
+					tournamentId: 6953,
+					eventId: 4,
+				})
+			).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+		}
+	});
+
 	it("fails closed when points aggregates disagree with applicable rows", async () => {
 		const base = publicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
@@ -1041,6 +1089,45 @@ describe("My Tournament Review V2 repository", () => {
 			eventId: 4,
 		});
 		expect(result.points?.rows[0]?.applicable).toBe(true);
+		expect(databaseReads).toBe(4);
+	});
+
+	it("rejects cached points rows with nonpositive optional ranks", async () => {
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [publication] };
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: {
+				rows: Array<{
+					previousRank: number | null;
+					eventRank: number | null;
+					overallRank: number | null;
+				}>;
+			};
+		};
+		const cachedRow = cached.points.rows[0]!;
+		cachedRow.previousRank = 0;
+		cachedRow.eventRank = -1;
+		cachedRow.overallRank = 0;
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.points?.rows[0]?.previousRank).toBeNull();
+		expect(result.points?.rows[0]?.eventRank).toBeNull();
+		expect(result.points?.rows[0]?.overallRank).toBeNull();
 		expect(databaseReads).toBe(4);
 	});
 
