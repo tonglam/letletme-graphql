@@ -61,7 +61,7 @@ jobs:
             -o IdentitiesOnly=yes \
             -o UserKnownHostsFile="$SSH_DIR/known_hosts" \
             "$VPS_USER@$VPS_HOST" \
-            "set -euo pipefail; sleep 20; active=\$(tr -d '[:space:]' < $remote_active_slot_file); case \"\$active\" in blue) project=letletme_graphql_blue; port=4000;; green) project=letletme_graphql_green; port=4002;; *) echo 'invalid active slot' >&2; exit 1;; esac; cd $remote_workdir; APP_ENV_FILE=.env.deploy.\$active GRAPHQL_PORT=\$port docker compose -p \"\$project\" exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
+            "set -euo pipefail; active=\$(tr -d '[:space:]' < $remote_active_slot_file); case \"\$active\" in blue) project=letletme_graphql_blue; port=4000;; green) project=letletme_graphql_green; port=4002;; *) echo 'invalid active slot' >&2; exit 1;; esac; cd $remote_workdir; APP_ENV_FILE=.env.deploy.\$active GRAPHQL_PORT=\$port docker compose -p \"\$project\" exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
             > "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
             (.policy == "graphql-v3" or .policy == "graphql-v4") and
