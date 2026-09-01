@@ -1,4 +1,4 @@
-import { createHmac } from "crypto";
+import { createHmac, randomUUID } from "crypto";
 import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -107,17 +107,24 @@ type TelemetryMarkerEntry = Readonly<{
 	date: string;
 	policyVersion: GraphQLRateLimitPolicyVersion;
 	key: string;
+	fileName: string;
+	ownerPid: number | null;
+	ownerGeneration: string | null;
 }>;
+
+const telemetryProcessGeneration = randomUUID();
 
 const markerFileName = (
 	kind: TelemetryMarkerKind,
 	date: string,
-	policyVersion: GraphQLRateLimitPolicyVersion
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	ownerPid = process.pid,
+	ownerGeneration = telemetryProcessGeneration
 ): string =>
 	kind === "overflow"
 		? `overflow.${policyNamespace(policyVersion)}.${date}`
 		: kind === "dirty-window"
-			? `dirty.${policyNamespace(policyVersion)}.${date}`
+			? `dirty.${policyNamespace(policyVersion)}.${date}.${ownerPid}.${ownerGeneration}`
 			: `${policyNamespace(policyVersion)}.${date}`;
 
 const markerFilePath = (
@@ -127,7 +134,9 @@ const markerFilePath = (
 ): string => join(rateLimitTelemetrySpoolDirectory, markerFileName(kind, date, policyVersion));
 
 const markerEntryFromFileName = (name: string): TelemetryMarkerEntry | null => {
-	const match = name.match(/^(?:(overflow|dirty)\.)?(v3|v4)\.(\d{4}-\d{2}-\d{2})$/);
+	const match = name.match(
+		/^(?:(overflow|dirty)\.)?(v3|v4)\.(\d{4}-\d{2}-\d{2})(?:\.(\d+)\.([A-Za-z0-9-]+))?$/
+	);
 	if (!match) return null;
 	const kind: TelemetryMarkerKind =
 		match[1] === "overflow"
@@ -138,6 +147,15 @@ const markerEntryFromFileName = (name: string): TelemetryMarkerEntry | null => {
 	const namespace = match[2];
 	const date = match[3];
 	if (!namespace || !date) return null;
+	const ownerPid = match[4] ? Number(match[4]) : null;
+	const ownerGeneration = match[5] ?? null;
+	if (
+		(kind === "dirty-window" &&
+			((ownerPid !== null && (!Number.isSafeInteger(ownerPid) || ownerPid <= 0)) ||
+				(ownerPid === null) !== (ownerGeneration === null))) ||
+		(kind !== "dirty-window" && (ownerPid !== null || ownerGeneration !== null))
+	)
+		return null;
 	const parsed = new Date(`${date}T00:00:00.000Z`);
 	if (rateLimitAggregateDate(parsed) !== date) return null;
 	const policyVersion: GraphQLRateLimitPolicyVersion =
@@ -146,6 +164,9 @@ const markerEntryFromFileName = (name: string): TelemetryMarkerEntry | null => {
 		kind,
 		date,
 		policyVersion,
+		fileName: name,
+		ownerPid,
+		ownerGeneration,
 		key:
 			kind === "overflow"
 				? rateLimitTelemetryOverflowKey(date, policyVersion)
@@ -160,6 +181,16 @@ const isNodeErrorWithCode = (error: unknown, code: string): boolean =>
 	error !== null &&
 	"code" in error &&
 	(error as { code?: unknown }).code === code;
+
+const isProcessAlive = (pid: number | null): boolean => {
+	if (pid === null) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error: unknown) {
+		return isNodeErrorWithCode(error, "EPERM");
+	}
+};
 
 const readTelemetryMarkerEntries = async (): Promise<readonly TelemetryMarkerEntry[]> => {
 	let names: string[];
@@ -195,6 +226,34 @@ const readRateLimitTelemetryMarkerSpool = async (
 	].sort();
 };
 
+const readOrphanedDirtyWindowDates = async (
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	dates?: readonly string[]
+): Promise<readonly string[]> => {
+	const allowedDates = dates === undefined ? null : new Set(dates);
+	const entries = (await readTelemetryMarkerEntries()).filter(
+		(entry) =>
+			entry.kind === "dirty-window" &&
+			entry.policyVersion === policyVersion &&
+			(allowedDates === null || allowedDates.has(entry.date))
+	);
+	return [
+		...new Set(
+			entries
+				.filter((entry) => {
+					if (
+						entry.ownerPid === process.pid &&
+						entry.ownerGeneration === telemetryProcessGeneration
+					)
+						return false;
+					if (entry.ownerPid === process.pid) return true;
+					return !isProcessAlive(entry.ownerPid);
+				})
+				.map((entry) => entry.date)
+		),
+	].sort();
+};
+
 /** Read durable persistence-failure marker obligations. */
 export const readRateLimitTelemetryPersistenceFailureSpool = async (
 	policyVersion: GraphQLRateLimitPolicyVersion,
@@ -213,8 +272,7 @@ export const readRateLimitTelemetryOverflowSpool = async (
 export const readRateLimitTelemetryDirtyWindowSpool = async (
 	policyVersion: GraphQLRateLimitPolicyVersion,
 	dates?: readonly string[]
-): Promise<readonly string[]> =>
-	readRateLimitTelemetryMarkerSpool("dirty-window", policyVersion, dates);
+): Promise<readonly string[]> => readOrphanedDirtyWindowDates(policyVersion, dates);
 
 export type RateLimitReportSummary = {
 	totalDecisions: number;
@@ -536,7 +594,11 @@ const ensureDirtyWindowMarker = (record: RateLimitAggregateRecord): void => {
 		const date = rateLimitAggregateDate(record.date);
 		writeFileSync(
 			markerFilePath("dirty-window", date, record.policyVersion),
-			`${rateLimitTelemetryDirtyWindowKey(date, record.policyVersion)}\n`,
+			JSON.stringify({
+				key: rateLimitTelemetryDirtyWindowKey(date, record.policyVersion),
+				pid: process.pid,
+				generation: telemetryProcessGeneration,
+			}) + "\n",
 			{ encoding: "utf8", flag: "wx" }
 		);
 		ownedDirtyWindowMarkers.add(windowKey);
@@ -920,6 +982,10 @@ export const enqueueRateLimitAggregate = (input: {
 	logger: Logger;
 }): void => {
 	const record = recordShape(input);
+	// Write crash evidence before starting any asynchronous retry or flush work.
+	// A SIGKILL/OOM after admission therefore leaves an owner-scoped marker for
+	// the next report process to classify as orphaned.
+	ensureDirtyWindowMarker(record);
 	schedulePersistedMarkerRetry(record);
 	metrics.graphqlRateLimitV3Decisions
 		.labels(record.trafficClass, record.workload, record.scope, record.outcome)
@@ -929,7 +995,6 @@ export const enqueueRateLimitAggregate = (input: {
 		void persistOverflowMarker(record);
 		return;
 	}
-	ensureDirtyWindowMarker(record);
 	pendingTelemetry.push(record);
 	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_BATCH_SIZE) {
 		void startTelemetryFlush();

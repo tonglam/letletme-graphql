@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type Redis from "ioredis";
 import {
 	rateLimitAggregateDate,
@@ -272,6 +275,43 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		expect(summary.shadowDecisions).toBe(0);
 	});
 
+	it("ignores active dirty windows but reports orphaned process markers", async () => {
+		const date = "2026-08-24";
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const orphanPath = join(spoolDirectory, `dirty.v3.${date}.2147483647.orphan-test`);
+		await mkdir(spoolDirectory, { recursive: true });
+		await writeFile(orphanPath, "orphan\n", { encoding: "utf8" });
+		try {
+			const redis = {
+				pipeline: () => ({
+					hincrby: () => undefined,
+					expire: () => undefined,
+					zincrby: () => undefined,
+					exec: async () => [],
+				}),
+			} as unknown as Redis;
+			enqueueRateLimitAggregate({
+				redis,
+				trafficClass: "web_rsc",
+				workload: "fixtures",
+				scope: "workload",
+				outcome: "allowed",
+				fingerprint: "abc123abc123",
+				date: new Date("2026-08-25T00:00:00.000Z"),
+				logger: { warn: () => undefined } as never,
+			});
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", ["2026-08-25"])).toEqual(
+				[]
+			);
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [date])).toEqual([date]);
+			await flushRateLimitAggregateTelemetry();
+		} finally {
+			await unlink(orphanPath).catch(() => undefined);
+		}
+	});
+
 	it("fails shutdown when telemetry persistence rejects before the bound", async () => {
 		let markerArguments: unknown[] | null = null;
 		const date = new Date("2026-08-20T00:00:00.000Z");
@@ -303,9 +343,10 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
 			"rate-limit telemetry persistence failed"
 		);
-		expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", ["2026-08-20"])).toEqual([
-			"2026-08-20",
-		]);
+		expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", ["2026-08-20"])).toEqual([]);
+		expect(
+			await readRateLimitTelemetryPersistenceFailureSpool("graphql-v3", ["2026-08-20"])
+		).toEqual([]);
 		expect(markerArguments?.[0] as string | undefined).toBe(
 			rateLimitTelemetryPersistenceFailureKey(rateLimitAggregateDate(date))
 		);
