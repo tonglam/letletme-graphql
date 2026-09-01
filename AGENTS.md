@@ -9,7 +9,7 @@
 
 ## Trust, data, and schema invariants
 
-- Every non-health request must pin the single PostgreSQL current-season authority for its execution. Startup fails closed on catalog/read-model drift, missing or invalid active Data publication, incorrect `bauth` grants, or a runtime login broader than `letletme_graphql_reader`.
+- Every admitted GraphQL execution must pin the single PostgreSQL current-season authority. Startup fails closed on catalog/read-model drift, missing or invalid active Data publication, incorrect `bauth` grants, or a runtime login broader than `letletme_graphql_reader`.
 - Accept only the existing trusted request classes: Web-signed ingress with optional signed user context, Web public-RSC service token, or a Web-issued Mini bearer inside verified signed ingress. Do not accept unsigned direct GraphQL, cookie fallback, self-issued sessions, or client bypass of the Web proxy.
 - Protected fields authorize the resolved principal and verified entry/tournament relationship, not caller-supplied IDs alone. Preserve explicit public exceptions narrowly; a new root field must declare its auth class and rate-limit budget in executable policy.
 - PostgreSQL is business truth. Data Redis publications are accepted only as complete, field-exact, revision-coherent units; reject corrupt/partial candidates and use only a coherent PostgreSQL fallback. GraphQL may request narrowly defined producer work through existing authenticated Data clients, but must not write Data tables, run DDL, or repair Data Redis directly.
