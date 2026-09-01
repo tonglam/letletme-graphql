@@ -537,6 +537,14 @@ describe("Live Matches V3 read path", () => {
 		);
 	});
 
+	it("does not materialize checkpoint payloads for HEAD or DESK cold reads", () => {
+		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).toContain("jsonb_build_object(");
+		expect(LIVE_MATCH_CHECKPOINT_DESK_SQL).toContain("jsonb_build_object(");
+		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).not.toContain("to_jsonb(checkpoint)");
+		expect(LIVE_MATCH_CHECKPOINT_DESK_SQL.match(/to_jsonb\(checkpoint\)/g)).toHaveLength(1);
+		expect(LIVE_MATCH_CHECKPOINT_SQL.match(/to_jsonb\(checkpoint\)/g)).toHaveLength(2);
+	});
+
 	it("uses metadata-only PostgreSQL projections for HEAD and DESK reads", async () => {
 		const coldRead = async (mode: "HEAD" | "DESK" | "FULL") => {
 			resetLiveMatchProcessStateForTests();

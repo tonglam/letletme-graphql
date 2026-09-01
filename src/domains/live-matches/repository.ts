@@ -492,12 +492,35 @@ const liveMatchCheckpointSql = (
 	includeDeskPayload: boolean,
 	includeDetailPayload: boolean
 ): string => {
+	const metadataProjection = (alias: string, includeDetailColumns: boolean): string => {
+		const detailColumns = includeDetailColumns
+			? `
+    'observed_desk_generation', ${alias}.observed_desk_generation,
+    'fixture_identity_revision', ${alias}.fixture_identity_revision,`
+			: "";
+		return `jsonb_build_object(
+    'contract_version', ${alias}.contract_version,
+    'publication_id', ${alias}.publication_id,
+    'generation', ${alias}.generation,
+    'state', ${alias}.state,${detailColumns}
+    'manifest', ${alias}.manifest,
+    'revisions', ${alias}.revisions,
+    'row_count', ${alias}.row_count,
+    'payload_bytes', ${alias}.payload_bytes,
+    'payload_sha256', ${alias}.payload_sha256,
+    'source_checked_at', ${alias}.source_checked_at,
+    'published_at', ${alias}.published_at,
+    'checkpointed_at', ${alias}.checkpointed_at,
+    'expected_next_check_at', ${alias}.expected_next_check_at,
+    'stale_at', ${alias}.stale_at
+  )`;
+	};
 	const deskProjection = includeDeskPayload
 		? "to_jsonb(checkpoint)"
-		: "to_jsonb(checkpoint) - 'payload'";
+		: metadataProjection("checkpoint", false);
 	const detailProjection = includeDetailPayload
 		? "to_jsonb(checkpoint)"
-		: "to_jsonb(checkpoint) - 'payload'";
+		: metadataProjection("checkpoint", true);
 	return `
 WITH target_event AS (
   SELECT COALESCE(
