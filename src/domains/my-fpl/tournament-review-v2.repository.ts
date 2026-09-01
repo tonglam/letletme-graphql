@@ -437,7 +437,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
   AND (CASE
          WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
-         THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::integer
+         THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::numeric
          ELSE -1
        END) = jsonb_array_length(CASE
          WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
@@ -446,9 +446,17 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
        END)
   AND (CASE
          WHEN ${publicationAlias}.format IN ('POINTS', 'H2H') THEN
-           (${publicationAlias}.payload->'manifest'->>'sectionCount')::integer = 2
+           CASE
+             WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
+             THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::numeric = 2
+             ELSE false
+           END
          WHEN ${publicationAlias}.format = 'KNOCKOUT' THEN
-           (${publicationAlias}.payload->'manifest'->>'sectionCount')::integer = 1
+           CASE
+             WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
+             THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::numeric = 1
+             ELSE false
+           END
          ELSE false
        END)
   AND NOT EXISTS (
@@ -482,10 +490,10 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   )
   AND (CASE
          WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
-         THEN (${publicationAlias}.payload->'manifest'->>'chunkCount')::integer
+         THEN (${publicationAlias}.payload->'manifest'->>'chunkCount')::numeric
          ELSE -1
        END) = (
-    SELECT count(*)::integer
+    SELECT count(*)::numeric
     FROM competition.tournament_review_publication_chunks chunk
     WHERE chunk.season_id = ${publicationAlias}.season_id
       AND chunk.tournament_id = ${publicationAlias}.tournament_id
@@ -494,17 +502,23 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   )
   AND (
     SELECT COALESCE(
-      sum((descriptor->>'chunkCount')::integer) FILTER (
-        WHERE descriptor->>'chunkCount' ~ '^[0-9]+$'
-      ),
+      sum(CASE
+        WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+        THEN (descriptor->>'chunkCount')::numeric
+        ELSE 0
+      END),
       0
-    )::integer
+    )::numeric
     FROM jsonb_array_elements(CASE
       WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
       THEN ${publicationAlias}.payload->'manifest'->'sections'
       ELSE '[]'::jsonb
     END) descriptor
-  ) = (${publicationAlias}.payload->'manifest'->>'chunkCount')::integer
+  ) = CASE
+        WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
+        THEN (${publicationAlias}.payload->'manifest'->>'chunkCount')::numeric
+        ELSE -1
+      END
   AND NOT EXISTS (
     SELECT 1
     FROM jsonb_array_elements(CASE
@@ -522,7 +536,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
        OR jsonb_typeof(descriptor->'chunkHashes') IS DISTINCT FROM 'array'
        OR (CASE
              WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
-             THEN (descriptor->>'chunkCount')::integer
+             THEN (descriptor->>'chunkCount')::numeric
              ELSE -1
            END) <> jsonb_array_length(CASE
              WHEN jsonb_typeof(descriptor->'chunkHashes') = 'array'
@@ -531,10 +545,10 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            END)
        OR (CASE
              WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
-             THEN (descriptor->>'chunkCount')::integer
+             THEN (descriptor->>'chunkCount')::numeric
              ELSE -1
            END) <> (
-         SELECT count(*)::integer
+         SELECT count(*)::numeric
          FROM competition.tournament_review_publication_chunks chunk
          WHERE chunk.season_id = ${publicationAlias}.season_id
            AND chunk.tournament_id = ${publicationAlias}.tournament_id
@@ -544,10 +558,10 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
        )
        OR (CASE
              WHEN descriptor->>'itemCount' ~ '^[0-9]+$'
-             THEN (descriptor->>'itemCount')::integer
+             THEN (descriptor->>'itemCount')::numeric
              ELSE -1
            END) <> (
-         SELECT COALESCE(sum(chunk.item_count), 0)::integer
+         SELECT COALESCE(sum(chunk.item_count), 0)::numeric
          FROM competition.tournament_review_publication_chunks chunk
          WHERE chunk.season_id = ${publicationAlias}.season_id
            AND chunk.tournament_id = ${publicationAlias}.tournament_id
@@ -565,7 +579,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.section_key = descriptor->>'sectionKey'
        ) <> CASE
          WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
-              AND (descriptor->>'chunkCount')::integer > 0 THEN 0
+              AND (descriptor->>'chunkCount')::numeric > 0 THEN 0
          ELSE -1
        END
        OR (
@@ -578,7 +592,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.section_key = descriptor->>'sectionKey'
        ) <> (CASE
          WHEN (descriptor->>'chunkCount') ~ '^[0-9]+$'
-         THEN (descriptor->>'chunkCount')::integer - 1
+         THEN (descriptor->>'chunkCount')::numeric - 1
          ELSE -1
        END)
        OR (
@@ -595,7 +609,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
          AND (
            (CASE
              WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
-             THEN (descriptor->>'chunkCount')::integer
+             THEN (descriptor->>'chunkCount')::numeric
              ELSE -1
            END) <> 1
            OR (CASE
