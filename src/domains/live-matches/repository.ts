@@ -2061,8 +2061,8 @@ export const readLiveMatchday = async (
 	const recentScopedCheck = !redisDeskAvailable
 		? requested !== undefined
 			? recentScopedEventCheckpointCheck(scopedCheckpointCheckKey)
-			: selectedEventId === cachedActiveEvent && recentActiveEventCheck !== null
-				? recentActiveEventCheck
+			: selectedEventId === cachedActiveEvent
+				? (recentActiveEventCheck ?? recentScopedEventCheckpointCheck(scopedCheckpointCheckKey))
 				: null
 		: null;
 	if (recentScopedCheck !== null) {

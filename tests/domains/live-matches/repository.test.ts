@@ -1588,6 +1588,34 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
+	it("reuses the scoped checkpoint cooldown after Redis fails with a cached active event", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		const head = await readLiveMatchday(context, undefined, "HEAD");
+		expect(head.eventId).toBe(1);
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+
+		const firstFull = await readLiveMatchday(context, undefined, "FULL");
+		const secondFull = await readLiveMatchday(context, undefined, "FULL");
+
+		expect(firstFull.desk).toBeNull();
+		expect(secondFull.desk).toBeNull();
+		expect(firstFull.postgresReadFailed).toBe(false);
+		expect(secondFull.postgresReadFailed).toBe(false);
+		expect(databaseReads).toBe(1);
+	});
+
 	it("retains PostgreSQL metadata in a separate process LKG for HEAD reads", async () => {
 		const redis = new TestRedis();
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
