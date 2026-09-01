@@ -204,13 +204,31 @@ const seasonMetadataRow = (
 describe("My Tournament Review V2 repository", () => {
 	it("keeps the catalog on the current event checkpoint and bounds ALL reads", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
-			"publication.event_data_checked_at = head_event.data_checked_at"
+			"date_trunc('milliseconds', publication.event_data_checked_at) ="
+		);
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
+			"date_trunc('milliseconds', head_event.data_checked_at)"
 		);
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("tournament.setup_status = 'ready'");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT 500");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"head_obligation.ready_revision = review_head.revision"
 		);
+	});
+
+	it("normalizes PostgreSQL checkpoint precision on every publication read path", () => {
+		const readQueries = [
+			MY_TOURNAMENT_REVIEW_CATALOG_SQL,
+			MY_TOURNAMENT_REVIEW_PUBLICATION_SQL,
+			MY_TOURNAMENT_REVIEW_SEASON_SQL,
+			MY_TOURNAMENT_REVIEW_HEAD_SQL,
+			MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
+			MY_TOURNAMENT_REVIEW_STATUS_SQL,
+		];
+		for (const query of readQueries) {
+			expect(query).toContain("date_trunc('milliseconds', publication.event_data_checked_at)");
+			expect(query).toMatch(/date_trunc\('milliseconds', (?:head_event|event)\.data_checked_at\)/);
+		}
 	});
 
 	it("reads a publication through the captured immutable identity", () => {
@@ -236,7 +254,10 @@ describe("My Tournament Review V2 repository", () => {
 			"publication.content_sha256 = review_head.content_sha256"
 		);
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
-			"publication.event_data_checked_at = event.data_checked_at"
+			"date_trunc('milliseconds', publication.event_data_checked_at) ="
+		);
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
+			"date_trunc('milliseconds', event.data_checked_at)"
 		);
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("publication.format = obligation.format");
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
