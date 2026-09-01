@@ -3,6 +3,7 @@ import { GraphQLError } from "graphql";
 import {
 	createMyFplRepository,
 	myFplTestables,
+	parseSnapshotEntryContractRow,
 	parseSnapshotEntryPayload,
 	parseSnapshotPublicationRow,
 	type MyFplRepository,
@@ -520,6 +521,20 @@ const snapshotPublicationRow = {
 	algorithm_version: "live-points-v2-algorithm-1",
 	source_min_checked_at: "2026-08-22T10:45:00.000Z",
 	source_max_checked_at: "2026-08-22T10:45:00.000Z",
+	lifecycle_finished: true,
+	lifecycle_data_checked: true,
+	finalization_started_at: "2099-08-22T10:45:00.000Z",
+	finalization_due_at: "2099-08-22T12:00:00.000Z",
+	status_expected_entry_count: 1,
+	observed_entry_count: 1,
+	pending_correction_entry_count: 0,
+	status_expected_tournament_count: 1,
+	observed_tournament_count: 1,
+	coverage_state: "COMPLETE",
+	expected_entry_scope_sha256: "1".repeat(64),
+	observed_entry_scope_sha256: "1".repeat(64),
+	expected_tournament_scope_sha256: "2".repeat(64),
+	observed_tournament_scope_sha256: "2".repeat(64),
 };
 
 const snapshotPick = (element: number) => ({
@@ -1011,6 +1026,81 @@ describe("My FPL review repository", () => {
 		).toBeNull();
 	});
 
+	it("exposes scope correction separately from snapshot structure", () => {
+		const correction = parseSnapshotPublicationRow({
+			...snapshotPublicationRow,
+			status_expected_entry_count: 2,
+			observed_entry_count: 1,
+			pending_correction_entry_count: 1,
+			coverage_state: "CORRECTION_PENDING",
+			expected_entry_scope_sha256: "3".repeat(64),
+			observed_entry_scope_sha256: "1".repeat(64),
+		});
+		expect(correction).toMatchObject({
+			settlementState: "FINALIZING",
+			coverageState: "CORRECTION_PENDING",
+			expectedEntryCount: 2,
+			observedEntryCount: 1,
+		});
+		expect(parseSnapshotEntryContractRow(snapshotEntryRow(), correction!, 123, 1)).not.toBeNull();
+	});
+
+	it("rejects impossible snapshot status metadata before nested cache reads", () => {
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				status_expected_entry_count: 1,
+				observed_entry_count: 2,
+				pending_correction_entry_count: 0,
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				finalization_due_at: "2099-08-22T12:00:01.000Z",
+			})
+		).toBeNull();
+	});
+
+	it("rejects a FINAL entry contract when any rank is null or negative", () => {
+		const finalPublication = parseSnapshotPublicationRow({
+			...snapshotPublicationRow,
+			kind: "FINAL",
+			score_source: "FPL_FINAL_RESULT",
+			live_publication_id: null,
+			live_revision: null,
+			algorithm_version: null,
+		});
+		expect(finalPublication?.settlementState).toBe("FINAL");
+		expect(parseSnapshotEntryContractRow(snapshotEntryRow(), finalPublication!, 123, 1)).toBeNull();
+
+		const negativeRankPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
+			entry: { overallRank: number };
+			gameweek: { result: { eventRank: number; overallRank: number } };
+			review: {
+				timeline: Array<{
+					status: "PROVISIONAL" | "FINAL";
+					eventRank: number | null;
+					overallRank: number | null;
+				}>;
+			};
+		};
+		negativeRankPayload.entry.overallRank = -1;
+		negativeRankPayload.gameweek.result!.eventRank = 1;
+		negativeRankPayload.gameweek.result!.overallRank = -1;
+		negativeRankPayload.review.timeline[0]!.status = "FINAL";
+		negativeRankPayload.review.timeline[0]!.eventRank = 1;
+		negativeRankPayload.review.timeline[0]!.overallRank = -1;
+		expect(
+			parseSnapshotEntryContractRow(
+				{ ...snapshotEntryRow(), payload: negativeRankPayload },
+				finalPublication!,
+				123,
+				1
+			)
+		).toBeNull();
+	});
+
 	it("rejects internally contradictory v2 manager payloads", () => {
 		const wrongGameweek = snapshotPayload();
 		wrongGameweek.gameweek.result.eventId = 2;
@@ -1071,22 +1161,22 @@ describe("My FPL review repository", () => {
 	it("keeps only the previous UTC+8 day inside the daily provisional grace window", () => {
 		const beforeObligation = new Date("2026-08-23T02:44:00.000Z");
 		const duringObligation = new Date("2026-08-23T03:00:00.000Z");
-		expect(myFplTestables.snapshotFreshness("2026-08-23", "PROVISIONAL", beforeObligation)).toBe(
+		expect(myFplTestables.snapshotTimeliness("2026-08-23", "PROVISIONAL", beforeObligation)).toBe(
 			"CURRENT"
 		);
-		expect(myFplTestables.snapshotFreshness("2026-08-22", "PROVISIONAL", beforeObligation)).toBe(
+		expect(myFplTestables.snapshotTimeliness("2026-08-22", "PROVISIONAL", beforeObligation)).toBe(
 			"CURRENT"
 		);
-		expect(myFplTestables.snapshotFreshness("2026-08-22", "PROVISIONAL", duringObligation)).toBe(
-			"GENERATING"
+		expect(myFplTestables.snapshotTimeliness("2026-08-22", "PROVISIONAL", duringObligation)).toBe(
+			"CURRENT"
 		);
-		expect(myFplTestables.snapshotFreshness("2026-08-21", "PROVISIONAL", beforeObligation)).toBe(
+		expect(myFplTestables.snapshotTimeliness("2026-08-21", "PROVISIONAL", beforeObligation)).toBe(
 			"STALE"
 		);
-		expect(myFplTestables.snapshotFreshness("2026-08-24", "PROVISIONAL", beforeObligation)).toBe(
+		expect(myFplTestables.snapshotTimeliness("2026-08-24", "PROVISIONAL", beforeObligation)).toBe(
 			"STALE"
 		);
-		expect(myFplTestables.snapshotFreshness("2026-01-01", "FINAL", beforeObligation)).toBe(
+		expect(myFplTestables.snapshotTimeliness("2026-01-01", "FINAL", beforeObligation)).toBe(
 			"CURRENT"
 		);
 	});
@@ -1111,7 +1201,7 @@ describe("My FPL review repository", () => {
 			const review = await fixture.repository.loadManagerReview(fixture.context, "42");
 			expect(review.state).toBe("READY");
 			expect(review.throughEventId).toBe(1);
-			expect(review.snapshotMeta).toMatchObject({ revision: "42", kind: "PROVISIONAL" });
+			expect(review.snapshotMeta).toMatchObject({ revision: "42", settlementState: "FINALIZING" });
 			expect(review.currentGameweek?.result?.picks).toHaveLength(15);
 			expect(review.timeline[0]?.review.formation).toBe("4-4-2");
 			// The historical snapshot has no recorded Core revision, so rule
@@ -1429,7 +1519,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v11:snapshot-entry:1:42:123");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v12:snapshot-entry:1:42:123");
 		await fixture.redis.set(key, JSON.stringify({ contractVersion: 1 }));
 		const desk = await fixture.repository.loadManagerReview(fixture.context);
 		expect(desk.state).toBe("READY");
@@ -1439,7 +1529,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v11:snapshot-entry:1:42:123");
+		const malformedKey = gqlCacheKey(malformed.context, "my-fpl:v12:snapshot-entry:1:42:123");
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadManagerReview(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
@@ -1451,7 +1541,7 @@ describe("My FPL review repository", () => {
 			publicationRows: [snapshotPublicationRow],
 			snapshotEntryRow: snapshotEntryRow(),
 		});
-		const key = gqlCacheKey(fixture.context, "my-fpl:v11:snapshot-entry:1:42:123");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v12:snapshot-entry:1:42:123");
 		await fixture.repository.loadManagerReview(fixture.context);
 		const cached = JSON.parse((await fixture.redis.get(key)) ?? "null") as {
 			payload: ReturnType<typeof snapshotPayload>;
@@ -2090,7 +2180,11 @@ describe("My FPL review repository", () => {
 				revision: "rev-1",
 				eventId: 1,
 				sourceCheckedAt: "2026-08-20T00:00:00.000Z",
-				freshness: "CURRENT",
+				settlementState: "PROVISIONAL",
+				coverageState: "COMPLETE",
+				timelinessState: "CURRENT",
+				expectedEntryCount: 1,
+				observedEntryCount: 1,
 			} as never,
 			{},
 			fixture.context

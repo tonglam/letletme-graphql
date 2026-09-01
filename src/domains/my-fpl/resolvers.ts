@@ -163,7 +163,9 @@ export const createMyFplResolvers = (
 				scopeKey: `season:${context.currentSeason.seasonCode}:event:${parent.eventId}`,
 				revision: parent.revision,
 				sourceCheckedAt: parent.sourceCheckedAt,
-				complete: parent.revision.length > 0 && parent.freshness !== "STALE",
+				expectedCount: parent.expectedEntryCount,
+				observedCount: parent.observedEntryCount,
+				complete: parent.revision.length > 0 && parent.coverageState === "COMPLETE",
 			}),
 	},
 });

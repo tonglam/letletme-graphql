@@ -7,7 +7,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		UNAVAILABLE
 	}
 
-	enum MyFplSnapshotKind {
+	enum MyFplTimelineStatus {
 		PROVISIONAL
 		FINAL
 	}
@@ -17,9 +17,20 @@ export const myFplTypeDefs = /* GraphQL */ `
 		FPL_FINAL_RESULT
 	}
 
-	enum MyFplSnapshotFreshness {
+	enum MyFplSettlementState {
+		PROVISIONAL
+		FINALIZING
+		FINAL
+		DELAYED
+	}
+
+	enum MyFplCoverageState {
+		COMPLETE
+		CORRECTION_PENDING
+	}
+
+	enum MyFplTimelinessState {
 		CURRENT
-		GENERATING
 		STALE
 	}
 
@@ -30,8 +41,13 @@ export const myFplTypeDefs = /* GraphQL */ `
 		snapshotDate: Date!
 		sourceCheckedAt: DateTime!
 		publishedAt: DateTime!
-		kind: MyFplSnapshotKind!
-		freshness: MyFplSnapshotFreshness!
+		settlementState: MyFplSettlementState!
+		coverageState: MyFplCoverageState!
+		timelinessState: MyFplTimelinessState!
+		expectedEntryCount: Int!
+		observedEntryCount: Int!
+		finalizationStartedAt: DateTime
+		finalizationDueAt: DateTime
 		scoreSource: MyFplScoreSource!
 		livePublicationId: String
 		liveRevision: String
@@ -107,7 +123,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 
 	type MyFplManagerTimelineRow {
 		eventId: Int!
-		status: MyFplSnapshotKind!
+		status: MyFplTimelineStatus!
 		eventPoints: Int!
 		eventRank: Int
 		overallPoints: Int!
@@ -206,7 +222,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 	type MyFplManagerChipReview {
 		chip: Chip!
 		eventId: Int!
-		status: MyFplSnapshotKind!
+		status: MyFplTimelineStatus!
 		eventNetPoints: Int!
 		otherGameweeksAverageNetPoints: Float
 		differenceFromOtherGameweeks: Float
