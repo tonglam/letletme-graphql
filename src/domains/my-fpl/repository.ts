@@ -2382,7 +2382,12 @@ const loadManagerReview = async (
 ): Promise<MyFplManagerReview> => {
 	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
-	const rules = loadedContext.selectionRules;
+	// A historical My FPL publication does not carry a Core publication
+	// revision for its rule set. Returning the current Core rules alongside a
+	// pinned snapshot would make the replay non-reproducible after a rules
+	// correction. Until Data records a Core revision with each publication,
+	// omit rules for explicit historical pins and fail closed on that field.
+	const rules = snapshotRevision?.trim() ? null : loadedContext.selectionRules;
 	const pinnedPublication = snapshotRevision?.trim()
 		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
 		: null;

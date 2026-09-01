@@ -1103,7 +1103,13 @@ describe("My FPL review repository", () => {
 			expect(review.snapshotMeta).toMatchObject({ revision: "42", kind: "PROVISIONAL" });
 			expect(review.currentGameweek?.result?.picks).toHaveLength(15);
 			expect(review.timeline[0]?.review.formation).toBe("4-4-2");
-			expect(review.rules?.chips[0]?.stopEvent).toBe(19);
+			// The historical snapshot has no recorded Core revision, so rule
+			// metadata is deliberately omitted instead of mixing current rules
+			// into a pinned replay.
+			expect(review.rules).toBeNull();
+
+			const currentReview = await fixture.repository.loadManagerReview(fixture.context);
+			expect(currentReview.rules?.chips[0]?.stopEvent).toBe(19);
 
 			const gameweek = await fixture.repository.loadManagerGameweek(fixture.context, 1, "42");
 			expect(gameweek.state).toBe("READY");
