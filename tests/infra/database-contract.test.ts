@@ -261,6 +261,7 @@ describe("GraphQL startup database contract", () => {
 			"reporting.tournament_selection_stat_publications"
 		);
 		expect(GRAPHQL_CONTRACT_RELATIONS).toContain("reporting.tournament_selection_stat_rows");
+		expect(GRAPHQL_CONTRACT_RELATIONS).toContain("competition.live_league_checkpoints");
 	});
 
 	it("requires read access to Web Mini Program auth relations", async () => {

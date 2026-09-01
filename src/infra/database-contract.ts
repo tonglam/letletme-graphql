@@ -66,6 +66,7 @@ export const GRAPHQL_CONTRACT_RELATIONS = [
 		"competition.tournament_review_publications",
 		"competition.tournament_review_heads",
 		"competition.tournament_review_obligations",
+		"competition.live_league_checkpoints",
 	]),
 ].sort();
 
