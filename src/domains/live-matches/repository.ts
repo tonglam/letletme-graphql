@@ -1615,7 +1615,7 @@ export const readLiveMatchday = async (
 		redisRoundtrips += 1;
 		return readRedisBundle(context.redis, season, requestedEvent, mode, pointer);
 	};
-	let activeBundle = await readRedis(requested, "active");
+	const activeBundle = await readRedis(requested, "active");
 	let redisReadFailed = activeBundle === null;
 
 	let postgresReadFailed = false;
