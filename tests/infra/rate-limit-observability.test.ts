@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Redis from "ioredis";
@@ -281,8 +281,13 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
 			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
 		const orphanPath = join(spoolDirectory, `dirty.v3.${date}.2147483647.orphan-test`);
+		const reusedPidPath = join(
+			spoolDirectory,
+			`dirty.v3.${date}.${process.pid}.previous-generation`
+		);
 		await mkdir(spoolDirectory, { recursive: true });
 		await writeFile(orphanPath, "orphan\n", { encoding: "utf8" });
+		await writeFile(reusedPidPath, "previous container\n", { encoding: "utf8" });
 		try {
 			const redis = {
 				pipeline: () => ({
@@ -309,6 +314,72 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 			await flushRateLimitAggregateTelemetry();
 		} finally {
 			await unlink(orphanPath).catch(() => undefined);
+			await unlink(reusedPidPath).catch(() => undefined);
+		}
+	});
+
+	it("retries a dirty-window marker after a transient spool write failure", async () => {
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const identityDate = new Date("2099-01-01T00:00:00.000Z");
+		const blockedDate = new Date("2099-01-02T00:00:00.000Z");
+		const identityDateText = rateLimitAggregateDate(identityDate);
+		const blockedDateText = rateLimitAggregateDate(blockedDate);
+		const identityPrefix = `dirty.v3.${identityDateText}.${process.pid}.`;
+		const blockedPrefix = `dirty.v3.${blockedDateText}.${process.pid}.`;
+		await mkdir(spoolDirectory, { recursive: true });
+		for (const name of await readdir(spoolDirectory)) {
+			if (name.startsWith(identityPrefix) || name.startsWith(blockedPrefix))
+				await unlink(join(spoolDirectory, name)).catch(() => undefined);
+		}
+
+		const pipeline = {
+			hincrby: () => pipeline,
+			expire: () => pipeline,
+			zincrby: () => pipeline,
+			exec: async () => [],
+		};
+		const redis = { pipeline: () => pipeline } as unknown as Redis;
+		const input = {
+			redis,
+			trafficClass: "web_rsc" as const,
+			workload: "fixtures" as const,
+			scope: "workload" as const,
+			outcome: "allowed" as const,
+			fingerprint: "abc123abc123",
+			logger: { warn: () => undefined } as never,
+		};
+
+		try {
+			enqueueRateLimitAggregate({ ...input, date: identityDate });
+			const identityMarker = (await readdir(spoolDirectory)).find((name) =>
+				name.startsWith(identityPrefix)
+			);
+			expect(identityMarker).toBeDefined();
+			const generation = identityMarker?.slice(identityPrefix.length);
+			expect(generation).toMatch(/^[A-Za-z0-9-]+$/);
+			await flushRateLimitAggregateTelemetry();
+
+			const blockedPath = join(spoolDirectory, `${blockedPrefix}${generation}`);
+			await mkdir(blockedPath);
+			enqueueRateLimitAggregate({ ...input, date: blockedDate });
+			await rmdir(blockedPath);
+			enqueueRateLimitAggregate({ ...input, date: blockedDate });
+
+			expect(await readFile(blockedPath, { encoding: "utf8" })).toContain(
+				rateLimitTelemetryDirtyWindowKey(blockedDateText)
+			);
+			await expect(flushRateLimitAggregateTelemetry()).rejects.toThrow(
+				"rate-limit telemetry persistence failed"
+			);
+			await expect(readFile(blockedPath, { encoding: "utf8" })).rejects.toThrow();
+		} finally {
+			for (const name of await readdir(spoolDirectory).catch(() => [] as string[])) {
+				if (name.startsWith(identityPrefix) || name.startsWith(blockedPrefix)) {
+					await unlink(join(spoolDirectory, name)).catch(() => undefined);
+				}
+			}
 		}
 	});
 

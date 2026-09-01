@@ -498,17 +498,15 @@ local function detail_candidate(pointer)
     if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
       return { publication = publication, manifest = manifest, items = {} }
     end
-    -- HEAD/DESK validate every immutable descriptor and its sidecar metadata,
-    -- but do not return or deserialize the player payload. FULL is the only
-    -- mode that pays the item-body read cost.
-    if mode ~= "HEAD" and mode ~= "DESK" then
-      table.insert(items, {
-        fixtureId = item.fixtureId,
-        key = item.key,
-        payload = read_string(item.key) or null_value(),
-        metadata = expected_metadata
-      })
-    end
+    -- Metadata reads return the immutable item bytes solely so the
+    -- TypeScript reader can verify SHA256/length/count before accepting
+    -- the manifest. They are not deserialized into player projections.
+    table.insert(items, {
+      fixtureId = item.fixtureId,
+      key = item.key,
+      payload = read_string(item.key) or null_value(),
+      metadata = expected_metadata
+    })
   end
   return { publication = publication, manifest = manifest or null_value(), items = items }
 end
@@ -925,6 +923,27 @@ const parsePayload = <T>(
 	return value;
 };
 
+/**
+ * Verify an immutable detail item without constructing its player projection.
+ * HEAD/DESK still need the body checksum: a same-length mutation must not make
+ * a manifest-only candidate look coherent.
+ */
+const validDetailMetadataPayload = (
+	raw: string | null,
+	item: Readonly<{ count: number; bytes: number; sha256: string }>
+): boolean => {
+	if (
+		raw === null ||
+		Buffer.byteLength(raw, "utf8") !== item.bytes ||
+		sha256Raw(raw) !== item.sha256
+	)
+		return false;
+	const value = parsedJson(raw);
+	return (
+		Array.isArray(value) && value.length === item.count && canonicalBytes(value) === item.bytes
+	);
+};
+
 const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFixture => {
 	if (!isRecord(value)) return false;
 	const fixtureId = safeInteger(value.fixtureId);
@@ -1184,7 +1203,24 @@ const decodeDetailMetadataCandidate = (
 ): MatchDetailCandidate | null => {
 	const publication = parseDetailPublication(raw.publication, season, eventId);
 	const manifest = parseDetailPublication(raw.manifest, season, eventId);
-	if (!publication || !manifest || !sameDetailMetadata(publication, manifest)) return null;
+	if (
+		!publication ||
+		!manifest ||
+		!sameDetailMetadata(publication, manifest) ||
+		raw.items.length !== publication.fixtures.length
+	)
+		return null;
+	for (const item of publication.fixtures) {
+		const rawItem = raw.items.find(
+			(candidate) => candidate.fixtureId === item.fixtureId && candidate.key === item.key
+		);
+		if (
+			!rawItem ||
+			rawItem.metadata !== `${item.count}|${item.bytes}|${item.sha256}` ||
+			!validDetailMetadataPayload(rawItem.payload, item)
+		)
+			return null;
+	}
 	return { publication, fixtures: [], payloadLoaded: false, servedFrom };
 };
 

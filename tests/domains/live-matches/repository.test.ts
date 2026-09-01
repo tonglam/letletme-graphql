@@ -504,6 +504,28 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects same-length detail corruption before accepting HEAD metadata", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const item = bundle.detail.active.items[0];
+		if (!item) throw new Error("missing active detail item");
+		const players = JSON.parse(item.payload) as Array<Record<string, unknown>>;
+		const firstPlayer = players[0];
+		if (!firstPlayer) throw new Error("missing detail player");
+		firstPlayer.totalPoints = 4;
+		const corruptedPayload = encode(players);
+		expect(Buffer.byteLength(corruptedPayload, "utf8")).toBe(
+			Buffer.byteLength(item.payload, "utf8")
+		);
+		item.payload = corruptedPayload;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("labels an invalid explicit event id instead of reporting an empty active window", async () => {
 		const redis = new TestRedis();
 		let databaseReads = 0;
@@ -1146,9 +1168,10 @@ describe("Live Matches V3 read path", () => {
 			detailScript.indexOf("payload = read_string(item.key)")
 		);
 		expect(detailScript.indexOf('read_string(item.key .. ":meta")')).toBeLessThan(
-			detailScript.indexOf('if mode ~= "HEAD" and mode ~= "DESK"')
+			detailScript.indexOf("payload = read_string(item.key)")
 		);
-		expect(detailScript).toContain('if mode ~= "HEAD" and mode ~= "DESK" then');
+		expect(detailScript).toContain("table.insert(items");
+		expect(detailScript).not.toContain('if mode ~= "HEAD" and mode ~= "DESK" then');
 	});
 
 	it("rejects a leading detail publication and keeps the desk available", async () => {

@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "crypto";
-import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -241,12 +241,11 @@ const readOrphanedDirtyWindowDates = async (
 		...new Set(
 			entries
 				.filter((entry) => {
-					if (
-						entry.ownerPid === process.pid &&
-						entry.ownerGeneration === telemetryProcessGeneration
-					)
-						return false;
-					if (entry.ownerPid === process.pid) return true;
+					// The generation is the durable owner identity carried by the
+					// marker filename. A replacement container can reuse PID 1, so
+					// PID equality alone must never classify an older marker as live.
+					if (entry.ownerPid === process.pid)
+						return entry.ownerGeneration !== telemetryProcessGeneration;
 					return !isProcessAlive(entry.ownerPid);
 				})
 				.map((entry) => entry.date)
@@ -587,7 +586,6 @@ const rememberTelemetryPersistenceFailure = (): void => {
 const ensureDirtyWindowMarker = (record: RateLimitAggregateRecord): void => {
 	const windowKey = telemetryWindowKey(record);
 	if (seenDirtyWindowMarkers.has(windowKey)) return;
-	seenDirtyWindowMarkers.add(windowKey);
 	dirtyWindowMarkerRecords.set(windowKey, record);
 	try {
 		mkdirSync(rateLimitTelemetrySpoolDirectory, { recursive: true });
@@ -601,12 +599,31 @@ const ensureDirtyWindowMarker = (record: RateLimitAggregateRecord): void => {
 			}) + "\n",
 			{ encoding: "utf8", flag: "wx" }
 		);
+		seenDirtyWindowMarkers.add(windowKey);
 		ownedDirtyWindowMarkers.add(windowKey);
 	} catch (error: unknown) {
-		// EEXIST means a previous process left evidence of an unclean window. It
-		// must not become owned by the new process or be auto-cleared after the
-		// new process flushes its own records.
-		if (isNodeErrorWithCode(error, "EEXIST")) return;
+		// EEXIST on a regular marker file means a previous process left evidence
+		// of an unclean window. It must not become owned by the new process or be
+		// auto-cleared after the new process flushes its own records. A directory
+		// or other non-regular target is a failed write and remains retryable.
+		if (isNodeErrorWithCode(error, "EEXIST")) {
+			try {
+				const markerPath = markerFilePath(
+					"dirty-window",
+					rateLimitAggregateDate(record.date),
+					record.policyVersion
+				);
+				if (lstatSync(markerPath).isFile()) {
+					seenDirtyWindowMarkers.add(windowKey);
+					return;
+				}
+			} catch {
+				// The marker may have disappeared between the failed write and the
+				// inspection; treat that as a persistence failure and retry later.
+			}
+		}
+		// Do not mark this window as seen before the write succeeds. A
+		// transient spool failure must remain retryable on the next enqueue.
 		rememberTelemetryPersistenceFailure();
 		metrics.rateLimitStorageFailures
 			.labels(telemetryMarkerMetricScope("dirty-window", record.policyVersion), "open")
