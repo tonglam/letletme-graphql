@@ -62,6 +62,11 @@ const CALC_LIVE_POINTS_MAX_AST_NODES = 320;
 // Scope the larger document allowance to this sole unaliased root; page-size,
 // weighted-complexity, depth and rate-limit guards remain unchanged.
 const ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES = 400;
+// Official H2H is one bounded publication containing the schedule, per-match
+// live state, and the independent standings overlay. Keep its wider document
+// allowance scoped to the exact unaliased root; complexity, depth, aliases,
+// root count, and publication-size limits remain unchanged.
+const TOURNAMENT_OFFICIAL_H2H_MAX_AST_NODES = 240;
 // Manager Review is one revision-coherent response: up to 38 timeline rows,
 // one fixed 15-player replay, transfer windows, holdings, and season rules.
 // The field projection is wide but every collection is server-bounded. Scope
@@ -1351,6 +1356,14 @@ export const validateGraphQLPayloadLimits = (
 				field.name === "entryLiveCompetitionBoard" &&
 				field.responseKey === "entryLiveCompetitionBoard"
 		);
+	const usesTournamentOfficialH2H =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "tournamentOfficialH2H" && field.responseKey === "tournamentOfficialH2H"
+		);
 	const usesMyFplManagerReview =
 		onlyReachableDefinitions &&
 		responseKeys.size === 1 &&
@@ -1388,13 +1401,15 @@ export const validateGraphQLPayloadLimits = (
 						? CALC_LIVE_POINTS_MAX_AST_NODES
 						: usesEntryLiveCompetitionBoard
 							? ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES
-							: usesMyFplManagerReview
-								? MY_FPL_MANAGER_REVIEW_MAX_AST_NODES
-								: usesMyFplManagerGameweek
-									? MY_FPL_MANAGER_GAMEWEEK_MAX_AST_NODES
-									: usesMyTournamentReview
-										? MY_TOURNAMENT_REVIEW_MAX_AST_NODES
-										: GRAPHQL_LIMITS.maxAstNodes;
+							: usesTournamentOfficialH2H
+								? TOURNAMENT_OFFICIAL_H2H_MAX_AST_NODES
+								: usesMyFplManagerReview
+									? MY_FPL_MANAGER_REVIEW_MAX_AST_NODES
+									: usesMyFplManagerGameweek
+										? MY_FPL_MANAGER_GAMEWEEK_MAX_AST_NODES
+										: usesMyTournamentReview
+											? MY_TOURNAMENT_REVIEW_MAX_AST_NODES
+											: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

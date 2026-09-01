@@ -1026,6 +1026,32 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
 	});
 
+	it("keeps the official H2H publication allowance scoped to one exact root", () => {
+		const fieldsWithinAllowance = Array.from({ length: 105 }, () => "__typename").join(" ");
+		const fieldsAboveAllowance = Array.from({ length: 125 }, () => "__typename").join(" ");
+		const root = (fields: string) =>
+			"tournamentOfficialH2H(tournamentId: 1, eventId: 1) { " + fields + " }";
+
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsWithinAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["tournamentOfficialH2H"] });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { h2h: " + root(fieldsWithinAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsAboveAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
 	it("allows standard introspection where Apollo has enabled it", () => {
 		const result = validateGraphQLRequestLimits({ query: getIntrospectionQuery() }, schema);
 		expect(result).toMatchObject({
