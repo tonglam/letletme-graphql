@@ -2964,10 +2964,7 @@ describe("My Tournament Review V2 repository", () => {
 				const sql = String(query);
 				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
 					return {
-						rows: [
-							seasonMetadataRow(latest, [3, 4]),
-							seasonMetadataRow(older, [3, 4]),
-						],
+						rows: [seasonMetadataRow(latest, [3, 4]), seasonMetadataRow(older, [3, 4])],
 					};
 				}
 				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
