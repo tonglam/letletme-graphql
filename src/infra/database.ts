@@ -1,4 +1,4 @@
-import type { QueryResult, QueryResultRow } from "pg";
+import type { PoolClient, QueryResult, QueryResultRow } from "pg";
 import { dbPool } from "./db-pool";
 import { postgresPoolWaitEvents } from "./metrics";
 
@@ -14,24 +14,36 @@ export interface QueryExecutor {
 	): Promise<QueryResult<Row>>;
 }
 
-type PoolQueueState = Readonly<{
-	waitingCount: number;
-}>;
-
 /**
- * A checkout with an idle client is briefly represented in pg-pool's pending
- * queue until its next-tick pulse hands that client over. Observe the queue in
- * the following check phase; only a request still queued after that handoff is
- * a real pool wait.
+ * pg-pool briefly puts every checkout behind an idle client into its pending
+ * queue before the next-tick pulse hands that client over. Compare the queue
+ * before and after this specific connect call, and use the pre-call idle count
+ * to exclude that normal handoff. A checkout added while no idle client exists
+ * is a real pool wait even if the busy client is released before a later event
+ * loop phase can observe the queue.
  */
-export const poolHasPendingCheckout = (waitingCount: number): boolean =>
-	Number.isSafeInteger(waitingCount) && waitingCount > 0;
+export const poolCheckoutWasQueued = (
+	waitingCountBefore: number,
+	waitingCountAfter: number,
+	idleCountBefore: number
+): boolean =>
+	Number.isSafeInteger(waitingCountBefore) &&
+	Number.isSafeInteger(waitingCountAfter) &&
+	Number.isSafeInteger(idleCountBefore) &&
+	waitingCountBefore >= 0 &&
+	waitingCountAfter >= 0 &&
+	idleCountBefore >= 0 &&
+	waitingCountAfter > waitingCountBefore &&
+	idleCountBefore === 0;
 
-const recordPoolWaitAfterPulse = (pool: PoolQueueState): void => {
-	if (!poolHasPendingCheckout(pool.waitingCount)) return;
-	setImmediate(() => {
-		if (poolHasPendingCheckout(pool.waitingCount)) postgresPoolWaitEvents.inc();
-	});
+const connectFromPool = (): Promise<PoolClient> => {
+	const waitingCountBefore = dbPool.waitingCount;
+	const idleCountBefore = dbPool.idleCount;
+	const checkout = dbPool.connect();
+	if (poolCheckoutWasQueued(waitingCountBefore, dbPool.waitingCount, idleCountBefore)) {
+		postgresPoolWaitEvents.inc();
+	}
+	return checkout;
 };
 
 /**
@@ -42,11 +54,14 @@ export const database: QueryExecutor = {
 	query: <Row extends QueryResultRow = QueryResultRow>(
 		text: string,
 		values: readonly unknown[] = []
-	): Promise<QueryResult<Row>> => {
-		const result = dbPool.query<Row>(text, [...values]);
-		recordPoolWaitAfterPulse(dbPool);
-		return result;
-	},
+	): Promise<QueryResult<Row>> =>
+		connectFromPool().then(async (client) => {
+			try {
+				return await client.query<Row>(text, [...values]);
+			} finally {
+				client.release();
+			}
+		}),
 };
 
 /**
@@ -79,7 +94,5 @@ export const runDatabaseHealthCheck = async (
 
 export const databaseHealthCheck = async (): Promise<void> =>
 	runDatabaseHealthCheck(() => {
-		const client = dbPool.connect() as unknown as Promise<DatabaseHealthClient>;
-		recordPoolWaitAfterPulse(dbPool);
-		return client;
+		return connectFromPool() as unknown as Promise<DatabaseHealthClient>;
 	}, 2_000);
