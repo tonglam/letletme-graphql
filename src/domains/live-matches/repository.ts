@@ -112,6 +112,8 @@ type MatchDeskFixtureCoverage = Readonly<{
 	startedFixtureIds: readonly number[];
 }>;
 
+type FixtureTeamIds = readonly [homeTeamId: number, awayTeamId: number];
+
 type MatchDetailPublication = Readonly<{
 	contractVersion: typeof LIVE_MATCHES_CONTRACT_VERSION;
 	publicationId: string;
@@ -138,6 +140,8 @@ type MatchDeskCandidate = Readonly<{
 	payloadLoaded?: boolean;
 	/** Compact identity/start coverage retained by metadata-only reads. */
 	fixtureCoverage?: MatchDeskFixtureCoverage;
+	/** Compact fixture team identity retained by metadata-only reads. */
+	fixtureTeamIds?: ReadonlyMap<number, FixtureTeamIds>;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
 
@@ -146,6 +150,8 @@ type MatchDetailCandidate = Readonly<{
 	fixtures: readonly MatchFixtureDetail[];
 	/** False for HEAD/DESK metadata reads; omitted means a full candidate. */
 	payloadLoaded?: boolean;
+	/** Player team IDs retained by metadata reads for desk compatibility checks. */
+	fixturePlayerTeamIds?: ReadonlyMap<number, readonly number[]>;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
 
@@ -949,7 +955,7 @@ const parsePayload = <T>(
 const validDetailMetadataPayload = (
 	raw: string | null,
 	item: Readonly<{ count: number; bytes: number; sha256: string }>
-): readonly unknown[] | null => {
+): readonly MatchDetailPlayer[] | null => {
 	if (
 		raw === null ||
 		Buffer.byteLength(raw, "utf8") !== item.bytes ||
@@ -962,7 +968,7 @@ const validDetailMetadataPayload = (
 		canonicalBytes(value) === item.bytes &&
 		new Set(value.map((player) => (isRecord(player) ? player.id : null))).size === value.length &&
 		value.every(validDetailPlayer)
-		? value
+		? (value as readonly MatchDetailPlayer[])
 		: null;
 };
 
@@ -1094,6 +1100,22 @@ const deskFixtureCoverage = (fixtures: readonly MatchDeskFixture[]): MatchDeskFi
 		.map((fixture) => fixture.fixtureId),
 });
 
+const deskFixtureTeamIds = (
+	fixtures: readonly MatchDeskFixture[]
+): ReadonlyMap<number, FixtureTeamIds> =>
+	new Map(
+		fixtures.map(
+			(fixture) => [fixture.fixtureId, [fixture.homeTeamId, fixture.awayTeamId] as const] as const
+		)
+	);
+
+const detailFixturePlayerTeamIds = (
+	fixtures: readonly MatchFixtureDetail[]
+): ReadonlyMap<number, readonly number[]> =>
+	new Map(
+		fixtures.map((fixture) => [fixture.fixtureId, fixture.players.map((player) => player.teamId)])
+	);
+
 const decodeDeskCandidate = (
 	raw: RedisDeskRaw,
 	season: string,
@@ -1119,6 +1141,7 @@ const decodeDeskCandidate = (
 				publication,
 				fixtures,
 				fixtureCoverage: deskFixtureCoverage(fixtures),
+				fixtureTeamIds: deskFixtureTeamIds(fixtures),
 				payloadLoaded: true,
 				servedFrom,
 			}
@@ -1139,6 +1162,7 @@ const decodeDeskMetadataCandidate = (
 				fixtures: [],
 				payloadLoaded: false,
 				fixtureCoverage: deskFixtureCoverage(candidate.fixtures),
+				fixtureTeamIds: deskFixtureTeamIds(candidate.fixtures),
 				servedFrom,
 			};
 };
@@ -1213,6 +1237,7 @@ const decodeDetailCandidate = (
 	return {
 		publication,
 		fixtures,
+		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
 		payloadLoaded: true,
 		servedFrom,
 	};
@@ -1233,7 +1258,9 @@ const decodeDetailMetadataCandidate = (
 		raw.items.length !== publication.fixtures.length
 	)
 		return null;
-	const fixturesForRevision: Array<{ fixtureId: number; players: readonly unknown[] }> = [];
+	const fixturesForRevision: Array<{ fixtureId: number; players: readonly MatchDetailPlayer[] }> =
+		[];
+	const fixturePlayerTeamIds = new Map<number, readonly number[]>();
 	for (const item of publication.fixtures) {
 		const rawItem = raw.items.find(
 			(candidate) => candidate.fixtureId === item.fixtureId && candidate.key === item.key
@@ -1246,9 +1273,19 @@ const decodeDetailMetadataCandidate = (
 		)
 			return null;
 		fixturesForRevision.push({ fixtureId: item.fixtureId, players });
+		fixturePlayerTeamIds.set(
+			item.fixtureId,
+			players.map((player) => player.teamId)
+		);
 	}
 	if (sha256(fixturesForRevision) !== publication.detail.revision) return null;
-	return { publication, fixtures: [], payloadLoaded: false, servedFrom };
+	return {
+		publication,
+		fixtures: [],
+		payloadLoaded: false,
+		fixturePlayerTeamIds,
+		servedFrom,
+	};
 };
 
 const readRedisBundle = async (
@@ -1463,6 +1500,20 @@ const compatibleDetailMetadata = (
 		})
 	)
 		return false;
+	for (const fixtureId of detailFixtureIds) {
+		const deskFixture = desk.fixtures.find((fixture) => fixture.fixtureId === fixtureId);
+		const deskTeamIds =
+			desk.fixtureTeamIds?.get(fixtureId) ??
+			(deskFixture ? ([deskFixture.homeTeamId, deskFixture.awayTeamId] as const) : undefined);
+		const playerTeamIds =
+			detail.fixturePlayerTeamIds?.get(fixtureId) ??
+			detail.fixtures
+				.find((fixture) => fixture.fixtureId === fixtureId)
+				?.players.map((player) => player.teamId);
+		if (!deskTeamIds || playerTeamIds === undefined) return false;
+		const allowedTeamIds = new Set(deskTeamIds);
+		if (playerTeamIds.some((teamId) => !allowedTeamIds.has(teamId))) return false;
+	}
 	return (
 		detail.publication.observedDeskGeneration <= desk.publication.generation &&
 		detail.publication.fixtureIdentityRevision ===
@@ -1613,6 +1664,7 @@ const buildPostgresDeskMetadata = (
 		publication: metadata.publication,
 		fixtures: [],
 		fixtureCoverage,
+		fixtureTeamIds: deskFixtureTeamIds(deskPayload),
 		payloadLoaded: false,
 		servedFrom: "POSTGRES_CHECKPOINT",
 	};
@@ -1639,6 +1691,7 @@ const buildPostgresDesk = (
 		publication: metadata.publication,
 		fixtures: payload,
 		fixtureCoverage: deskFixtureCoverage(payload),
+		fixtureTeamIds: deskFixtureTeamIds(payload),
 		servedFrom: "POSTGRES_CHECKPOINT",
 	};
 };
@@ -1728,7 +1781,12 @@ const buildPostgresDetail = (
 		)
 			return null;
 	}
-	return { publication: metadata.publication, fixtures, servedFrom: "POSTGRES_CHECKPOINT" };
+	return {
+		publication: metadata.publication,
+		fixtures,
+		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
 };
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {

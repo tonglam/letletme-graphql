@@ -114,6 +114,8 @@ const servingProcessIdentitySlots = env.isProduction
 	? ["blue", "green"]
 	: [...new Set(["default", "blue", "green", env.RATE_LIMIT_TELEMETRY_SLOT])];
 
+const servingProcessProofPattern = /^(blue|green)\|(\d+)\|([A-Za-z0-9-]+)\|(\d+)$/u;
+
 type TelemetryMarkerKind = "overflow" | "persistence-failure" | "dirty-window";
 
 type TelemetryMarkerEntry = Readonly<{
@@ -133,6 +135,12 @@ type RateLimitTelemetryServingProcessIdentity = Readonly<{
 	generation: string;
 	heartbeatAt: string;
 }>;
+
+type ServingProcessIdentityWithSlot = Readonly<
+	RateLimitTelemetryServingProcessIdentity & {
+		slot: string;
+	}
+>;
 
 let servingProcessHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let servingProcessExitHandlerRegistered = false;
@@ -331,17 +339,17 @@ const readServingProcessIdentity = async (
 };
 
 const readServingProcessIdentities = async (): Promise<
-	readonly RateLimitTelemetryServingProcessIdentity[]
+	readonly ServingProcessIdentityWithSlot[]
 > => {
 	const identities = await Promise.all(
 		servingProcessIdentitySlots.map((slot) =>
 			readServingProcessIdentity(
 				join(rateLimitTelemetrySpoolDirectory, `serving-process.${slot}.json`)
-			)
+			).then((identity) => (identity ? { ...identity, slot } : null))
 		)
 	);
 	return identities.filter(
-		(identity): identity is RateLimitTelemetryServingProcessIdentity => identity !== null
+		(identity): identity is ServingProcessIdentityWithSlot => identity !== null
 	);
 };
 
@@ -370,6 +378,46 @@ const isServingProcessAlive = (pid: number): boolean => {
 		// failure means the identity cannot be treated as a live owner.
 		return isNodeErrorWithCode(error, "EPERM");
 	}
+};
+
+/**
+ * Parse liveness proofs produced inside each blue/green container. A report
+ * runs in only one PID namespace, so a PID from the other slot is meaningful
+ * only when that slot's own namespace has just validated it.
+ */
+export const parseRateLimitTelemetryServingProcessProofs = (
+	raw = env.RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS,
+	now = Date.now()
+): ReadonlySet<string> => {
+	const proofs = new Set<string>();
+	for (const token of raw.split(",")) {
+		const match = token.trim().match(servingProcessProofPattern);
+		if (!match) continue;
+		const pid = Number(match[2]);
+		const checkedAt = Number(match[4]);
+		if (
+			!Number.isSafeInteger(pid) ||
+			pid <= 0 ||
+			!Number.isSafeInteger(checkedAt) ||
+			checkedAt - now > RATE_LIMIT_TELEMETRY_SERVING_PROCESS_CLOCK_SKEW_MS ||
+			now - checkedAt > RATE_LIMIT_TELEMETRY_REPORT_LEASE_SETTLE_MS
+		)
+			continue;
+		proofs.add(`${match[1]}:${pid}:${match[3]}`);
+	}
+	return proofs;
+};
+
+/**
+ * Emit a proof only after checking the identity PID from this container's
+ * namespace. The monitor passes this value to the active-slot report; it is
+ * never used as a substitute for the local PID check.
+ */
+export const readRateLimitTelemetryServingProcessProof = async (): Promise<string | null> => {
+	const identity = await readServingProcessIdentity(rateLimitTelemetryServingProcessIdentityFile);
+	if (!identity || !isServingProcessLeaseLive(identity) || !isServingProcessAlive(identity.pid))
+		return null;
+	return `${env.RATE_LIMIT_TELEMETRY_SLOT}|${identity.pid}|${identity.generation}|${Date.now()}`;
 };
 
 const readTelemetryMarkerEntries = async (): Promise<readonly TelemetryMarkerEntry[]> => {
@@ -418,9 +466,13 @@ const readOrphanedDirtyWindowDates = async (
 			(allowedDates === null || allowedDates.has(entry.date))
 	);
 	const servingIdentities = await readServingProcessIdentities();
-	const liveServingIdentities = servingIdentities.filter(
-		(identity) => isServingProcessLeaseLive(identity) && isServingProcessAlive(identity.pid)
-	);
+	const verifiedRemoteProofs = parseRateLimitTelemetryServingProcessProofs();
+	const liveServingIdentities = servingIdentities.filter((identity) => {
+		if (!isServingProcessLeaseLive(identity)) return false;
+		if (!env.isProduction || identity.slot === env.RATE_LIMIT_TELEMETRY_SLOT)
+			return isServingProcessAlive(identity.pid);
+		return verifiedRemoteProofs.has(`${identity.slot}:${identity.pid}:${identity.generation}`);
+	});
 	return [
 		...new Set(
 			entries

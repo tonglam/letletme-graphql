@@ -1033,7 +1033,7 @@ function semanticError(body: unknown): string | null {
 			if (
 				typeof playerValue.price !== "number" ||
 				!Number.isSafeInteger(playerValue.price) ||
-				playerValue.price <= 0
+				playerValue.price < 0
 			)
 				return "invalid_player_price";
 			if (!Array.isArray(playerValue.stats)) return "missing_stats";

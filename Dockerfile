@@ -52,6 +52,7 @@ COPY --chown=bun:bun scripts/check-database-contract.ts ./scripts/check-database
 COPY --chown=bun:bun scripts/check-redis-connectivity.ts ./scripts/check-redis-connectivity.ts
 COPY --chown=bun:bun scripts/lib ./scripts/lib
 COPY --chown=bun:bun scripts/rate-limit-report.ts ./scripts/rate-limit-report.ts
+COPY --chown=bun:bun scripts/rate-limit-serving-process-check.ts ./scripts/rate-limit-serving-process-check.ts
 
 RUN mkdir -p "$RATE_LIMIT_TELEMETRY_SPOOL_DIR" && \
 	chown -R bun:bun "$RATE_LIMIT_TELEMETRY_SPOOL_DIR"

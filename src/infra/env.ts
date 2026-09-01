@@ -22,7 +22,8 @@ type EnvKey =
 	| "CORS_ORIGIN"
 	| "GRAPHQL_RATE_LIMIT_MODE"
 	| "RATE_LIMIT_TELEMETRY_SPOOL_DIR"
-	| "RATE_LIMIT_TELEMETRY_SLOT";
+	| "RATE_LIMIT_TELEMETRY_SLOT"
+	| "RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS";
 
 const readEnv = (key: EnvKey): string | undefined => readRuntimeEnv(key);
 
@@ -231,4 +232,6 @@ export const env = {
 	// process-scoped default when this is empty.
 	RATE_LIMIT_TELEMETRY_SPOOL_DIR: readEnv("RATE_LIMIT_TELEMETRY_SPOOL_DIR")?.trim() ?? "",
 	RATE_LIMIT_TELEMETRY_SLOT,
+	RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS:
+		readEnv("RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS")?.trim() ?? "",
 } as const;

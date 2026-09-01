@@ -11,6 +11,7 @@ import {
 	retryRateLimitTelemetryPersistenceFailureMarkers,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
+	parseRateLimitTelemetryServingProcessProofs,
 	RATE_LIMIT_TELEMETRY_REPORT_LEASE_SETTLE_MS,
 	summarizeRateLimitTotals,
 	type GraphQLRateLimitPolicyVersion,
@@ -105,11 +106,16 @@ const readLiveRateLimitMetrics = async (
 	persistedTelemetryDirtyWindowDates: readonly string[];
 }> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
-	// This command runs in a separate report process. Wait through the full
-	// serving-process lease plus clock-skew allowance before accepting a dirty
-	// window as orphaned; otherwise a just-stopped SIGKILLed slot can be counted
-	// as live because its last heartbeat is still fresh.
-	await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_TELEMETRY_REPORT_LEASE_SETTLE_MS));
+	// This command runs in a separate report process. Normally wait through the
+	// full serving-process lease plus clock-skew allowance before accepting a
+	// dirty window as orphaned. The blue/green monitor supplies fresh proofs from
+	// each slot's own PID namespace after that settle window; when such a proof
+	// is present, avoid adding another 20 seconds to the monitor run.
+	if (parseRateLimitTelemetryServingProcessProofs().size === 0) {
+		await new Promise((resolve) =>
+			setTimeout(resolve, RATE_LIMIT_TELEMETRY_REPORT_LEASE_SETTLE_MS)
+		);
+	}
 	// A previous process may have persisted a marker obligation locally after
 	// Redis was unavailable. The report process is also a safe recovery worker:
 	// retry those obligations before deciding whether the window is healthy.

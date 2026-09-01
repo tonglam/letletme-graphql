@@ -14,6 +14,7 @@ import {
 	rateLimitTelemetryPersistenceFailureKey,
 	rateLimitTelemetryDirtyWindowKey,
 	rateLimitTelemetryServingProcessIdentityFile,
+	parseRateLimitTelemetryServingProcessProofs,
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
@@ -478,6 +479,23 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 			await unlink(identityPath).catch(() => undefined);
 			await unlink(markerPath).catch(() => undefined);
 		}
+	});
+
+	it("accepts only recent, structurally valid slot liveness proofs", () => {
+		const now = 1_800_000_000_000;
+		expect(
+			parseRateLimitTelemetryServingProcessProofs(
+				[
+					`blue|1|blue-generation|${now - 1_000}`,
+					`green|2|green-generation|${now - 5_000}`,
+					`green|3|too-old|${now - 20_001}`,
+					`blue|4|too-future|${now + 5_001}`,
+					"blue|0|zero-pid|1800000000000",
+					"not-a-proof",
+				].join(","),
+				now
+			)
+		).toEqual(new Set(["blue:1:blue-generation", "green:2:green-generation"]));
 	});
 
 	it("retries a dirty-window marker after a transient spool write failure", async () => {

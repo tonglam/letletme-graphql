@@ -14,6 +14,7 @@
 		"data:contract:check": "bun scripts/check-data-main-compatibility.ts",
 		"redis:check": "bun scripts/check-redis-connectivity.ts",
 		"rate-limit:report": "bun scripts/rate-limit-report.ts",
+		"rate-limit:serving-process-check": "bun scripts/rate-limit-serving-process-check.ts",
 		"rate-limit:profile": "bun scripts/generate-rate-limit-profile.ts",
 		"rate-limit:profile:v4": "bun scripts/generate-rate-limit-profile-v4.ts",
 		"rate-limit:load": "bun scripts/rate-limit-load.ts",

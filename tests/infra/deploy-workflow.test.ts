@@ -322,11 +322,14 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("candidate_port=4000");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_blue");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_green");
+		expect(monitorWorkflow).toContain("rate-limit:serving-process-check");
+		expect(monitorWorkflow).toContain("RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS");
 	});
 
 	test("gives each blue/green slot its own telemetry identity", () => {
 		expect(compose).toContain("RATE_LIMIT_TELEMETRY_SLOT: ${RATE_LIMIT_TELEMETRY_SLOT:-default}");
 		expect(deployScript).toContain('RATE_LIMIT_TELEMETRY_SLOT="$inactive_slot"');
+		expect(dockerfile).toContain("scripts/rate-limit-serving-process-check.ts");
 	});
 
 	test("attaches both slots to the shared primary Redis network", () => {
