@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
-	poolCheckoutWasQueued,
+	poolCheckoutNeedsWaitMetric,
 	runDatabaseHealthCheck,
 	type DatabaseHealthClient,
 } from "../../src/infra/database";
@@ -22,11 +22,13 @@ const makeClient = (failOn?: string) => {
 
 describe("PostgreSQL health probe", () => {
 	it("recognizes the specific checkout queued behind a busy pool client", () => {
-		expect(poolCheckoutWasQueued(0, 1, 0)).toBe(true);
-		expect(poolCheckoutWasQueued(1, 2, 0)).toBe(true);
-		expect(poolCheckoutWasQueued(0, 1, 1)).toBe(false);
-		expect(poolCheckoutWasQueued(1, 1, 0)).toBe(false);
-		expect(poolCheckoutWasQueued(-1, 1, 0)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(0, 1, 0, 0)).toBe(true);
+		expect(poolCheckoutNeedsWaitMetric(1, 2, 0, 0)).toBe(true);
+		expect(poolCheckoutNeedsWaitMetric(0, 1, 1, 0)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(0, 1, 1, 1)).toBe(true);
+		expect(poolCheckoutNeedsWaitMetric(0, 1, 2, 1)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(1, 1, 0, 0)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(-1, 1, 0, 0)).toBe(false);
 	});
 
 	it("scopes a two-second statement timeout to a checked-out transaction", async () => {

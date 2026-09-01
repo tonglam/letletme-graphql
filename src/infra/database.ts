@@ -22,26 +22,45 @@ export interface QueryExecutor {
  * is a real pool wait even if the busy client is released before a later event
  * loop phase can observe the queue.
  */
-export const poolCheckoutWasQueued = (
+export const poolCheckoutNeedsWaitMetric = (
 	waitingCountBefore: number,
 	waitingCountAfter: number,
-	idleCountBefore: number
+	idleCountBefore: number,
+	idleHandoffReservationsBefore: number
 ): boolean =>
 	Number.isSafeInteger(waitingCountBefore) &&
 	Number.isSafeInteger(waitingCountAfter) &&
 	Number.isSafeInteger(idleCountBefore) &&
+	Number.isSafeInteger(idleHandoffReservationsBefore) &&
 	waitingCountBefore >= 0 &&
 	waitingCountAfter >= 0 &&
 	idleCountBefore >= 0 &&
+	idleHandoffReservationsBefore >= 0 &&
 	waitingCountAfter > waitingCountBefore &&
-	idleCountBefore === 0;
+	idleCountBefore <= idleHandoffReservationsBefore;
+
+let idleHandoffReservations = 0;
 
 const connectFromPool = (): Promise<PoolClient> => {
 	const waitingCountBefore = dbPool.waitingCount;
 	const idleCountBefore = dbPool.idleCount;
 	const checkout = dbPool.connect();
-	if (poolCheckoutWasQueued(waitingCountBefore, dbPool.waitingCount, idleCountBefore)) {
+	if (
+		poolCheckoutNeedsWaitMetric(
+			waitingCountBefore,
+			dbPool.waitingCount,
+			idleCountBefore,
+			idleHandoffReservations
+		)
+	) {
 		postgresPoolWaitEvents.inc();
+	}
+	if (dbPool.waitingCount > waitingCountBefore && idleCountBefore > idleHandoffReservations) {
+		idleHandoffReservations += 1;
+		const releaseIdleHandoffReservation = (): void => {
+			idleHandoffReservations = Math.max(0, idleHandoffReservations - 1);
+		};
+		void checkout.then(releaseIdleHandoffReservation, releaseIdleHandoffReservation);
 	}
 	return checkout;
 };
