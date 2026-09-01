@@ -107,6 +107,11 @@ type FixtureDetailItem = Readonly<{
 	sha256: string;
 }>;
 
+type MatchDeskFixtureCoverage = Readonly<{
+	fixtureIds: readonly number[];
+	startedFixtureIds: readonly number[];
+}>;
+
 type MatchDetailPublication = Readonly<{
 	contractVersion: typeof LIVE_MATCHES_CONTRACT_VERSION;
 	publicationId: string;
@@ -131,6 +136,8 @@ type MatchDeskCandidate = Readonly<{
 	fixtures: readonly MatchDeskFixture[];
 	/** False for HEAD metadata reads; omitted means a full desk payload. */
 	payloadLoaded?: boolean;
+	/** Compact identity/start coverage retained by metadata-only reads. */
+	fixtureCoverage?: MatchDeskFixtureCoverage;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
 
@@ -518,11 +525,32 @@ const liveMatchCheckpointSql = (
     'observed_desk_generation', ${alias}.observed_desk_generation,
     'fixture_identity_revision', ${alias}.fixture_identity_revision,`
 			: "";
+		const deskCoverage = includeDetailColumns
+			? ""
+			: `
+    'fixture_coverage', CASE
+      WHEN jsonb_typeof(${alias}.payload) = 'array' THEN jsonb_build_object(
+        'fixture_ids', COALESCE((
+          SELECT jsonb_agg(fixture_item->'fixtureId' ORDER BY fixture_item->>'fixtureId')
+          FROM jsonb_array_elements(${alias}.payload) AS fixture_item
+        ), '[]'::jsonb),
+        'started_fixture_ids', COALESCE((
+          SELECT jsonb_agg(fixture_item->'fixtureId' ORDER BY fixture_item->>'fixtureId')
+          FROM jsonb_array_elements(${alias}.payload) AS fixture_item
+          WHERE fixture_item->>'started' = 'true'
+             OR fixture_item->>'finished' = 'true'
+             OR fixture_item->>'finishedProvisional' = 'true'
+             OR (fixture_item->>'minutes') ~ '^[1-9][0-9]*$'
+        ), '[]'::jsonb)
+      )
+      ELSE NULL
+    END,`;
 		return `jsonb_build_object(
     'contract_version', ${alias}.contract_version,
     'publication_id', ${alias}.publication_id,
     'generation', ${alias}.generation,
     'state', ${alias}.state,${detailColumns}
+    ${deskCoverage}
     'manifest', ${alias}.manifest,
     'revisions', ${alias}.revisions,
     'row_count', ${alias}.row_count,
@@ -991,6 +1019,16 @@ const validDetailForDesk = (
 	});
 };
 
+const deskFixtureCoverage = (fixtures: readonly MatchDeskFixture[]): MatchDeskFixtureCoverage => ({
+	fixtureIds: fixtures.map((fixture) => fixture.fixtureId),
+	startedFixtureIds: fixtures
+		.filter(
+			(fixture) =>
+				fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
+		)
+		.map((fixture) => fixture.fixtureId),
+});
+
 const decodeDeskCandidate = (
 	raw: RedisDeskRaw,
 	season: string,
@@ -1012,7 +1050,13 @@ const decodeDeskCandidate = (
 	return fixtures &&
 		fixtures.length === publication.desk.count &&
 		deskRevisionsMatchPayload(publication, fixtures)
-		? { publication, fixtures, payloadLoaded: true, servedFrom }
+		? {
+				publication,
+				fixtures,
+				fixtureCoverage: deskFixtureCoverage(fixtures),
+				payloadLoaded: true,
+				servedFrom,
+			}
 		: null;
 };
 
@@ -1025,7 +1069,13 @@ const decodeDeskMetadataCandidate = (
 	const candidate = decodeDeskCandidate(raw, season, eventId, servedFrom);
 	return candidate === null
 		? null
-		: { ...candidate, fixtures: [], payloadLoaded: false, servedFrom };
+		: {
+				...candidate,
+				fixtures: [],
+				payloadLoaded: false,
+				fixtureCoverage: deskFixtureCoverage(candidate.fixtures),
+				servedFrom,
+			};
 };
 
 const sameDetailMetadata = (
@@ -1305,6 +1355,24 @@ const compatibleDetailMetadata = (
 ): detail is MatchDetailCandidate => {
 	if (!detail) return false;
 	if (desk.servedFrom === "REDIS_PREVIOUS" && detail.servedFrom === "REDIS_CURRENT") return false;
+	const coverage =
+		desk.fixtureCoverage ??
+		(desk.fixtures.length === desk.publication.desk.count
+			? deskFixtureCoverage(desk.fixtures)
+			: null);
+	if (!coverage) return false;
+	const deskFixtureIds = new Set(coverage.fixtureIds);
+	const detailFixtureIds = detail.publication.fixtures.map((item) => item.fixtureId);
+	const detailFixtureIdSet = new Set(detailFixtureIds);
+	// A manifest is useful for revision observation only after its fixture set is
+	// proven to describe this exact desk. Do not let metadata-only reads hide a
+	// missing started fixture or introduce a foreign fixture.
+	if (
+		detailFixtureIdSet.size !== detailFixtureIds.length ||
+		detailFixtureIds.some((fixtureId) => !deskFixtureIds.has(fixtureId)) ||
+		coverage.startedFixtureIds.some((fixtureId) => !detailFixtureIdSet.has(fixtureId))
+	)
+		return false;
 	return (
 		detail.publication.observedDeskGeneration <= desk.publication.generation &&
 		detail.publication.fixtureIdentityRevision ===
@@ -1354,10 +1422,36 @@ const checkpointManifest = (value: unknown): string | null => {
 
 type PostgresDeskMetadata = Readonly<{
 	publication: MatchDeskPublication;
+	fixtureCoverage: MatchDeskFixtureCoverage;
 	rowCount: number;
 	bytes: number;
 	checksum: string;
 }>;
+
+const parseDeskFixtureCoverage = (value: unknown): MatchDeskFixtureCoverage | null => {
+	if (
+		!isRecord(value) ||
+		!Array.isArray(value.fixture_ids) ||
+		!Array.isArray(value.started_fixture_ids)
+	)
+		return null;
+	const fixtureIds = value.fixture_ids.map(safeInteger);
+	const startedFixtureIds = value.started_fixture_ids.map(safeInteger);
+	if (
+		fixtureIds.some((fixtureId) => fixtureId === null || fixtureId <= 0) ||
+		startedFixtureIds.some((fixtureId) => fixtureId === null || fixtureId <= 0)
+	)
+		return null;
+	const normalizedFixtureIds = fixtureIds as number[];
+	const normalizedStartedFixtureIds = startedFixtureIds as number[];
+	if (
+		new Set(normalizedFixtureIds).size !== normalizedFixtureIds.length ||
+		new Set(normalizedStartedFixtureIds).size !== normalizedStartedFixtureIds.length ||
+		normalizedStartedFixtureIds.some((fixtureId) => !normalizedFixtureIds.includes(fixtureId))
+	)
+		return null;
+	return { fixtureIds: normalizedFixtureIds, startedFixtureIds: normalizedStartedFixtureIds };
+};
 
 const parsePostgresDeskMetadata = (
 	row: unknown,
@@ -1399,7 +1493,9 @@ const parsePostgresDeskMetadata = (
 		publication.desk.sha256 !== checksum
 	)
 		return null;
-	return { publication, rowCount, bytes, checksum };
+	const fixtureCoverage = parseDeskFixtureCoverage(row.fixture_coverage);
+	if (!fixtureCoverage || fixtureCoverage.fixtureIds.length !== rowCount) return null;
+	return { publication, fixtureCoverage, rowCount, bytes, checksum };
 };
 
 const buildPostgresDeskMetadata = (
@@ -1412,6 +1508,7 @@ const buildPostgresDeskMetadata = (
 	return {
 		publication: metadata.publication,
 		fixtures: [],
+		fixtureCoverage: metadata.fixtureCoverage,
 		payloadLoaded: false,
 		servedFrom: "POSTGRES_CHECKPOINT",
 	};
@@ -1437,6 +1534,7 @@ const buildPostgresDesk = (
 	return {
 		publication: metadata.publication,
 		fixtures: payload,
+		fixtureCoverage: deskFixtureCoverage(payload),
 		servedFrom: "POSTGRES_CHECKPOINT",
 	};
 };

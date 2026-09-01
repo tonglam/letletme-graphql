@@ -282,6 +282,18 @@ const buildCheckpointRow = (
 			state: built.deskPublication.state,
 			manifest: built.deskPublication,
 			revisions: built.deskPublication.revisions,
+			fixture_coverage: {
+				fixture_ids: built.deskFixtures.map((fixture) => fixture.fixtureId),
+				started_fixture_ids: built.deskFixtures
+					.filter(
+						(fixture) =>
+							fixture.started ||
+							fixture.finished ||
+							fixture.finishedProvisional ||
+							fixture.minutes > 0
+					)
+					.map((fixture) => fixture.fixtureId),
+			},
 			payload: built.deskFixtures,
 			row_count: built.deskFixtures.length,
 			payload_bytes: Buffer.byteLength(encode(built.deskFixtures), "utf8"),
@@ -588,6 +600,24 @@ describe("Live Matches V3 read path", () => {
 		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
 
 		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects metadata detail that omits a started desk fixture", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (!bundle.detail.active.publication) throw new Error("missing detail publication");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: unknown[];
+		};
+		publication.fixtures = publication.fixtures.slice(0, 1);
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).not.toBeNull();
 		expect(result.detail).toBeNull();
 	});
 
@@ -1928,6 +1958,10 @@ describe("Live Matches V3 read path", () => {
 		};
 		row.desk.manifest = deskManifest;
 		row.desk.revisions = deskManifest.revisions;
+		row.desk.fixture_coverage = {
+			fixture_ids: deskFixtures.map((fixture) => fixture.fixtureId),
+			started_fixture_ids: deskFixtures.map((fixture) => fixture.fixtureId),
+		};
 		row.desk.payload = deskFixtures;
 		row.desk.row_count = deskFixtures.length;
 		row.desk.payload_bytes = Buffer.byteLength(encode(deskFixtures), "utf8");
