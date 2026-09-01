@@ -590,6 +590,21 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.revision = ${publicationAlias}.revision
            AND chunk.section_key = descriptor->>'sectionKey'
        ) IS DISTINCT FROM descriptor->'chunkHashes'
+       OR (
+         descriptor->>'itemCount' = '0'
+         AND (
+           (CASE
+             WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+             THEN (descriptor->>'chunkCount')::integer
+             ELSE -1
+           END) <> 1
+           OR (CASE
+             WHEN jsonb_typeof(descriptor->'chunkHashes') = 'array'
+             THEN jsonb_array_length(descriptor->'chunkHashes')
+             ELSE -1
+           END) <> 1
+         )
+       )
   )
   AND NOT EXISTS (
     SELECT 1
@@ -1954,6 +1969,7 @@ function materializeReviewChunks(
 			rawChunkHashes.some(
 				(hash: unknown) => typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)
 			) ||
+			(itemCount === 0 && (chunkCount !== 1 || rawChunkHashes.length !== 1)) ||
 			expectedSections.has(value.sectionKey)
 		) {
 			throw integrityError("Review publication section descriptor is invalid");

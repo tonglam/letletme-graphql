@@ -220,6 +220,13 @@ const seasonMetadataRow = (
 });
 
 describe("My Tournament Review V2 repository", () => {
+	it("requires an explicit zero-item chunk for an empty section", () => {
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain("descriptor->>'itemCount' = '0'");
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain(
+			"THEN jsonb_array_length(descriptor->'chunkHashes')"
+		);
+	});
+
 	it("keeps the catalog on the current event checkpoint and bounds ALL reads", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"date_trunc('milliseconds', publication.event_data_checked_at) ="
