@@ -2951,6 +2951,37 @@ describe("My Tournament Review V2 repository", () => {
 		expect(result.h2h?.standings).toHaveLength(2);
 	});
 
+	it("rejects Season H2H metadata beyond two standings per match", async () => {
+		const latest = publicationRow();
+		const older = h2hPublicationRow({
+			event_id: 3,
+			expected_subject_count: 3,
+			ready_subject_count: 3,
+			not_applicable_subject_count: 0,
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return {
+						rows: [
+							seasonMetadataRow(latest, [3, 4]),
+							seasonMetadataRow(older, [3, 4]),
+						],
+					};
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadSeasonReview(context, {
+				tournamentId: 6953,
+				throughEventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+	});
+
 	it("uses format-specific cursors for Season knockout pages", async () => {
 		const base = knockoutPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;

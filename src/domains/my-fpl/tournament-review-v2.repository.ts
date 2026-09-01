@@ -2200,8 +2200,13 @@ function seasonCountMetadataValid(row: SeasonMetadataRow): boolean {
 		readySubjectCount >= 0 &&
 		// POINTS rows are one-per-subject, so applicability cannot exceed the
 		// row count. H2H and KNOCKOUT use row_count for matches/fixtures while
-		// ready_subject_count counts participating entries and may be larger.
-		(format !== "POINTS" || readySubjectCount <= rowCount)
+		// ready_subject_count counts participating entries and may be larger;
+		// H2H still has a hard two-sides-per-match coverage bound.
+		(format === "POINTS"
+			? readySubjectCount <= rowCount
+			: format === "H2H"
+				? readySubjectCount <= rowCount * 2
+				: true)
 	);
 }
 
