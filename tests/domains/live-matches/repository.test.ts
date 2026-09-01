@@ -1109,9 +1109,13 @@ describe("Live Matches V3 read path", () => {
 		control.set(missingPointer);
 
 		const recovered = await readLiveMatchday(context);
+		const retained = await readLiveMatchday(context);
 
-		expect(recovered.eventId).toBeNull();
-		expect(recovered.desk).toBeNull();
+		expect(recovered.eventId).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.eventId).toBe(1);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(databaseReads).toBe(1);
 	});
 
@@ -1119,8 +1123,12 @@ describe("Live Matches V3 read path", () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
 		const newer = buildCheckpointRow({ eventId: 2 });
+		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => ({ rows: [newer] }),
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [newer] };
+			},
 		});
 
 		await readLiveMatchday(context);
@@ -1133,9 +1141,13 @@ describe("Live Matches V3 read path", () => {
 		control.set(missingPointer);
 
 		const recovered = await readLiveMatchday(context);
+		const retained = await readLiveMatchday(context);
 
 		expect(recovered.eventId).toBe(2);
 		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(retained.eventId).toBe(2);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(1);
 	});
 
 	it("retains a complete PostgreSQL candidate in process LKG for HEAD reads", async () => {

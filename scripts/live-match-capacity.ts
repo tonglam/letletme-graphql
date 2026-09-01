@@ -181,13 +181,17 @@ const percentile = (values: readonly number[], rank: number): number | null => {
 	return sorted[Math.max(0, index)] ?? null;
 };
 
-const summarize = (values: readonly number[]): MetricSummary => ({
-	count: values.length,
-	p50: percentile(values, 0.5),
-	p95: percentile(values, 0.95),
-	p99: percentile(values, 0.99),
-	max: values.length > 0 ? Math.max(...values) : null,
-});
+const summarize = (values: readonly number[]): MetricSummary => {
+	let max: number | null = null;
+	for (const value of values) max = max === null ? value : Math.max(max, value);
+	return {
+		count: values.length,
+		p50: percentile(values, 0.5),
+		p95: percentile(values, 0.95),
+		p99: percentile(values, 0.99),
+		max,
+	};
+};
 
 type HeaderValue = string | string[] | number | number[] | undefined;
 
@@ -747,8 +751,10 @@ const capacityGate = {
 	stage300P95Under800Ms: (capacityStage?.e2eMs.p95 ?? Number.POSITIVE_INFINITY) < 800,
 	stage300P99Under2s: (capacityStage?.e2eMs.p99 ?? Number.POSITIVE_INFINITY) < 2_000,
 	non429ErrorRateUnderPoint1Percent: (capacityStage?.non429ErrorRate ?? 1) < 0.001,
+	rateLimited429IsZero: (capacityStage?.rateLimited429 ?? 1) === 0,
 	global429IsZero: (capacityStage?.global429 ?? 1) === 0 && (capacityStage?.unknown429 ?? 1) === 0,
 	unknown429IsZero: (capacityStage?.unknown429 ?? 1) === 0,
+	readyValidationRequired: requireReady,
 	dbPoolWaitingIsZero:
 		metricObservations.length > 0 && metricObservations.every((sample) => sample.poolWaiting === 0),
 	metricsObserved: metricObservations.length > 0,
@@ -762,8 +768,10 @@ const capacityGatePassed = [
 	capacityGate.stage300P95Under800Ms,
 	capacityGate.stage300P99Under2s,
 	capacityGate.non429ErrorRateUnderPoint1Percent,
+	capacityGate.rateLimited429IsZero,
 	capacityGate.global429IsZero,
 	capacityGate.unknown429IsZero,
+	capacityGate.readyValidationRequired,
 	capacityGate.dbPoolWaitingIsZero,
 	capacityGate.metricsObserved,
 ].every(Boolean);

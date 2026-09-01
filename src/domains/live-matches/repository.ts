@@ -1605,6 +1605,8 @@ export const readLiveMatchday = async (
 		};
 
 	const cachedActiveEvent = processActiveEvent.get(season);
+	const cachedActiveEventKey =
+		cachedActiveEvent === undefined ? null : lkgKey(season, cachedActiveEvent);
 	let redisRoundtrips = 0;
 	const readRedis = async (
 		requestedEvent: number | undefined,
@@ -1620,8 +1622,20 @@ export const readLiveMatchday = async (
 	let unscopedPostgres: PostgresCheckpointRead | null | undefined;
 	const redisPointerMissing =
 		requested === undefined && activeBundle !== null && activeBundle.eventId === null;
+	const recentActiveEventCheck =
+		redisPointerMissing && cachedActiveEventKey !== null
+			? recentScopedEventCheckpointCheck(cachedActiveEventKey)
+			: null;
 	let selectedEventId =
-		requested ?? activeBundle?.eventId ?? (redisPointerMissing ? null : cachedActiveEvent) ?? null;
+		requested ??
+		activeBundle?.eventId ??
+		(redisPointerMissing
+			? recentActiveEventCheck !== null
+				? cachedActiveEvent
+				: null
+			: cachedActiveEvent) ??
+		null;
+	if (recentActiveEventCheck !== null) postgresReadFailed = recentActiveEventCheck.failed;
 	if (
 		requested === undefined &&
 		activeBundle?.eventId !== null &&
@@ -1638,8 +1652,11 @@ export const readLiveMatchday = async (
 			null
 		);
 		postgresReadFailed = unscopedPostgres === null;
-		selectedEventId = unscopedPostgres?.eventId ?? null;
-		if (selectedEventId !== null) rememberActiveEvent(season, selectedEventId);
+		selectedEventId = unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
+		if (selectedEventId !== null) {
+			rememberActiveEvent(season, selectedEventId);
+			rememberScopedEventCheckpointCheck(lkgKey(season, selectedEventId), postgresReadFailed);
+		}
 	}
 
 	if (selectedEventId === null) {
