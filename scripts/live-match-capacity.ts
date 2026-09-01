@@ -301,6 +301,9 @@ type Http2CapacityEvidence = Readonly<{
 
 const http2Sessions: Http2SessionSlot[] = [];
 let http2SessionPromise: Promise<ClientHttp2Session> | null = null;
+let http2CapacityTarget: number | null = null;
+let http2EnsurePromise: Promise<Http2CapacityEvidence> | null = null;
+let http2Closing = false;
 let http2RoundRobin = 0;
 const http2UnusableSessions = new WeakSet<ClientHttp2Session>();
 let http2CapacityEvidence: Http2CapacityEvidence | null = null;
@@ -313,6 +316,7 @@ const removeHttp2Session = (session: ClientHttp2Session): void => {
 	if (index < 0) return;
 	http2Sessions.splice(index, 1);
 	if (http2RoundRobin >= http2Sessions.length) http2RoundRobin = 0;
+	scheduleHttp2CapacityReplenish();
 };
 
 const usableHttp2Slots = (): Http2SessionSlot[] => {
@@ -322,10 +326,16 @@ const usableHttp2Slots = (): Http2SessionSlot[] => {
 	return http2Sessions.filter((slot) => isHttp2SessionUsable(slot.session));
 };
 
+const http2CapacityOf = (slots: readonly Http2SessionSlot[]): number =>
+	slots.reduce((total, slot) => total + slot.maxConcurrentStreams, 0);
+
 const createHttp2Session = (): Promise<ClientHttp2Session> =>
 	new Promise((resolve, reject) => {
 		let session: ClientHttp2Session | null = null;
 		let settled = false;
+		let connected = false;
+		let settingsReceived = false;
+		let advertisedMaxConcurrentStreams: number | null = null;
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		const finishReject = (error: Error) => {
 			if (settled) return;
@@ -341,37 +351,61 @@ const createHttp2Session = (): Promise<ClientHttp2Session> =>
 			return;
 		}
 		session.on("error", onError);
-		session.once("connect", () => {
-			if (settled || session === null) return;
-			const maxConcurrentStreams = session.remoteSettings.maxConcurrentStreams;
+		const maybeResolve = () => {
 			if (
-				typeof maxConcurrentStreams !== "number" ||
-				!Number.isSafeInteger(maxConcurrentStreams) ||
-				maxConcurrentStreams <= 0
-			) {
-				finishReject(new Error("http2 peer did not advertise a usable maxConcurrentStreams"));
-				if (!session.closed && !session.destroyed) session.destroy();
+				settled ||
+				session === null ||
+				!connected ||
+				!settingsReceived ||
+				advertisedMaxConcurrentStreams === null
+			)
 				return;
-			}
 			settled = true;
 			if (timer !== null) clearTimeout(timer);
-			http2Sessions.push({ session, maxConcurrentStreams, activeStreams: 0 });
+			http2Sessions.push({
+				session,
+				maxConcurrentStreams: advertisedMaxConcurrentStreams,
+				activeStreams: 0,
+			});
 			resolve(session);
-		});
-		session.once("close", () => removeHttp2Session(session!));
-		session.on("remoteSettings", (settings: Settings) => {
+		};
+		const onRemoteSettings = (settings: Settings) => {
+			const currentSession = session;
+			if (currentSession === null) return;
 			const maxConcurrentStreams = settings.maxConcurrentStreams;
 			if (
 				typeof maxConcurrentStreams !== "number" ||
 				!Number.isSafeInteger(maxConcurrentStreams) ||
 				maxConcurrentStreams <= 0
-			)
+			) {
+				if (!settingsReceived) {
+					finishReject(new Error("http2 peer did not advertise a usable maxConcurrentStreams"));
+					if (!currentSession.closed && !currentSession.destroyed) currentSession.destroy();
+				}
 				return;
-			const index = http2Sessions.findIndex((slot) => slot.session === session);
+			}
+			advertisedMaxConcurrentStreams = maxConcurrentStreams;
+			settingsReceived = true;
+			const index = http2Sessions.findIndex((slot) => slot.session === currentSession);
 			if (index >= 0) {
 				const slot = http2Sessions[index]!;
 				http2Sessions[index] = { ...slot, maxConcurrentStreams };
+				if (
+					http2CapacityTarget !== null &&
+					http2CapacityOf(usableHttp2Slots()) < http2CapacityTarget
+				)
+					scheduleHttp2CapacityReplenish();
 			}
+			maybeResolve();
+		};
+		session.once("connect", () => {
+			connected = true;
+			maybeResolve();
+		});
+		session.on("remoteSettings", onRemoteSettings);
+		session.once("close", () => {
+			removeHttp2Session(session!);
+			if (!settled) finishReject(new Error("http2 session closed before peer settings"));
 		});
 		session.on("goaway", () => {
 			http2UnusableSessions.add(session!);
@@ -385,17 +419,8 @@ const createHttp2Session = (): Promise<ClientHttp2Session> =>
 		}, timeoutMs);
 	});
 
-function getHttp2Session(): Promise<ClientHttp2Session> {
-	const slots = usableHttp2Slots();
-	if (slots.length > 0) {
-		const available = slots.filter((slot) => slot.activeStreams < slot.maxConcurrentStreams);
-		const candidates = available.length > 0 ? available : slots;
-		const slot = candidates[http2RoundRobin % candidates.length];
-		http2RoundRobin = (http2RoundRobin + 1) % candidates.length;
-		return Promise.resolve(slot!.session);
-	}
+const createSharedHttp2Session = (): Promise<ClientHttp2Session> => {
 	if (http2SessionPromise) return http2SessionPromise;
-
 	http2SessionPromise = createHttp2Session();
 	const pending = http2SessionPromise;
 	void pending.then(
@@ -407,6 +432,22 @@ function getHttp2Session(): Promise<ClientHttp2Session> {
 		}
 	);
 	return pending;
+};
+
+async function getHttp2Session(): Promise<ClientHttp2Session> {
+	let slots = usableHttp2Slots();
+	if (http2CapacityTarget !== null && http2CapacityOf(slots) < http2CapacityTarget) {
+		await ensureHttp2Capacity(http2CapacityTarget);
+		slots = usableHttp2Slots();
+	}
+	if (slots.length > 0) {
+		const available = slots.filter((slot) => slot.activeStreams < slot.maxConcurrentStreams);
+		const candidates = available.length > 0 ? available : slots;
+		const slot = candidates[http2RoundRobin % candidates.length];
+		http2RoundRobin = (http2RoundRobin + 1) % candidates.length;
+		return slot!.session;
+	}
+	return createSharedHttp2Session();
 }
 
 const reserveHttp2Stream = (session: ClientHttp2Session): void => {
@@ -423,38 +464,56 @@ const releaseHttp2Stream = (session: ClientHttp2Session): void => {
 	http2Sessions[index] = { ...slot, activeStreams: Math.max(0, slot.activeStreams - 1) };
 };
 
-const ensureHttp2Capacity = async (): Promise<Http2CapacityEvidence> => {
-	const requestedConcurrency = Math.max(...stages);
-	await getHttp2Session();
-	while (
-		usableHttp2Slots().reduce((total, slot) => total + slot.maxConcurrentStreams, 0) <
-			requestedConcurrency &&
-		http2Sessions.length < MAX_HTTP2_SESSIONS
-	) {
-		await createHttp2Session();
+async function ensureHttp2Capacity(
+	requestedConcurrency = Math.max(...stages)
+): Promise<Http2CapacityEvidence> {
+	if (http2Closing) throw new Error("HTTP/2 capacity pool is closing");
+	const target = Math.max(http2CapacityTarget ?? 0, requestedConcurrency);
+	http2CapacityTarget = target;
+	if (http2EnsurePromise) return http2EnsurePromise;
+	const pending = Promise.resolve().then(async (): Promise<Http2CapacityEvidence> => {
+		while (
+			http2CapacityOf(usableHttp2Slots()) < (http2CapacityTarget ?? target) &&
+			http2Sessions.length < MAX_HTTP2_SESSIONS
+		) {
+			await createSharedHttp2Session();
+		}
+		const slots = usableHttp2Slots();
+		const effectiveConcurrentStreams = http2CapacityOf(slots);
+		const finalTarget = http2CapacityTarget ?? target;
+		const evidence: Http2CapacityEvidence = {
+			requestedConcurrency: finalTarget,
+			sessionCount: slots.length,
+			remoteMaxConcurrentStreams: slots.map((slot) => slot.maxConcurrentStreams),
+			effectiveConcurrentStreams,
+			capacitySatisfied: effectiveConcurrentStreams >= finalTarget,
+		};
+		http2CapacityEvidence = evidence;
+		if (!evidence.capacitySatisfied) {
+			throw new Error(
+				`HTTP/2 peer stream capacity ${effectiveConcurrentStreams} is below requested concurrency ${finalTarget}`
+			);
+		}
+		return evidence;
+	});
+	http2EnsurePromise = pending;
+	try {
+		return await pending;
+	} finally {
+		if (http2EnsurePromise === pending) http2EnsurePromise = null;
 	}
-	const slots = usableHttp2Slots();
-	const effectiveConcurrentStreams = slots.reduce(
-		(total, slot) => total + slot.maxConcurrentStreams,
-		0
-	);
-	const evidence: Http2CapacityEvidence = {
-		requestedConcurrency,
-		sessionCount: slots.length,
-		remoteMaxConcurrentStreams: slots.map((slot) => slot.maxConcurrentStreams),
-		effectiveConcurrentStreams,
-		capacitySatisfied: effectiveConcurrentStreams >= requestedConcurrency,
-	};
-	http2CapacityEvidence = evidence;
-	if (!evidence.capacitySatisfied) {
-		throw new Error(
-			`HTTP/2 peer stream capacity ${effectiveConcurrentStreams} is below requested concurrency ${requestedConcurrency}`
-		);
-	}
-	return evidence;
-};
+}
+
+function scheduleHttp2CapacityReplenish(): void {
+	if (http2Closing || http2CapacityTarget === null || http2EnsurePromise !== null) return;
+	void ensureHttp2Capacity(http2CapacityTarget).catch(() => {
+		http2CapacityEvidence = null;
+	});
+}
 
 function closeHttp2Session(): void {
+	http2Closing = true;
+	http2CapacityTarget = null;
 	const sessions = http2Sessions.map((slot) => slot.session);
 	http2Sessions.length = 0;
 	http2RoundRobin = 0;

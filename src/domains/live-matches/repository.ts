@@ -252,6 +252,15 @@ const statIdentifierKey = (value: unknown): string | null =>
 	typeof value === "string" && value.trim().length > 0 ? value.trim().toLowerCase() : null;
 
 const LIVE_MATCH_DETAIL_STAT_KEYS = ["identifier", "value", "awardedPoints"] as const;
+const LIVE_MATCH_DETAIL_PLAYER_KEYS = [
+	"id",
+	"webName",
+	"position",
+	"teamId",
+	"price",
+	"totalPoints",
+	"stats",
+] as const;
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
 	const actualKeys = Object.keys(value);
@@ -539,16 +548,18 @@ const liveMatchCheckpointSql = (
     'fixture_coverage', CASE
       WHEN jsonb_typeof(${alias}.payload) = 'array' THEN jsonb_build_object(
         'fixture_ids', COALESCE((
-          SELECT jsonb_agg(fixture_item->'fixtureId' ORDER BY fixture_item->>'fixtureId')
-          FROM jsonb_array_elements(${alias}.payload) AS fixture_item
+          SELECT jsonb_agg(elements.fixture_item->'fixtureId' ORDER BY elements.fixture_ordinality)
+          FROM jsonb_array_elements(${alias}.payload) WITH ORDINALITY
+            AS elements(fixture_item, fixture_ordinality)
         ), '[]'::jsonb),
         'started_fixture_ids', COALESCE((
-          SELECT jsonb_agg(fixture_item->'fixtureId' ORDER BY fixture_item->>'fixtureId')
-          FROM jsonb_array_elements(${alias}.payload) AS fixture_item
-          WHERE fixture_item->>'started' = 'true'
-             OR fixture_item->>'finished' = 'true'
-             OR fixture_item->>'finishedProvisional' = 'true'
-             OR (fixture_item->>'minutes') ~ '^[1-9][0-9]*$'
+          SELECT jsonb_agg(elements.fixture_item->'fixtureId' ORDER BY elements.fixture_ordinality)
+          FROM jsonb_array_elements(${alias}.payload) WITH ORDINALITY
+            AS elements(fixture_item, fixture_ordinality)
+          WHERE elements.fixture_item->>'started' = 'true'
+             OR elements.fixture_item->>'finished' = 'true'
+             OR elements.fixture_item->>'finishedProvisional' = 'true'
+             OR (elements.fixture_item->>'minutes') ~ '^[1-9][0-9]*$'
         ), '[]'::jsonb)
       )
       ELSE NULL
@@ -947,6 +958,7 @@ const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFi
 
 const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 	if (!isRecord(value)) return false;
+	if (!hasExactKeys(value, LIVE_MATCH_DETAIL_PLAYER_KEYS)) return false;
 	const id = safeInteger(value.id);
 	const position = safeInteger(value.position);
 	const teamId = safeInteger(value.teamId);
@@ -2113,7 +2125,7 @@ export const readLiveMatchday = async (
 		postgresReadFailed,
 		redisRoundtrips,
 	};
-	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
+	rememberActiveEvent(season, selectedEventId);
 	if (mode === "HEAD" && !processLkg.has(scopedEventKey)) {
 		rememberMetadataLkg(season, selectedEventId, { desk: effectiveDesk, detail });
 	}

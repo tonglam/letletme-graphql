@@ -22,7 +22,9 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("postgres_pool_wait_events_total");
 		expect(capacitySource).toContain("dbPoolWaitEventsZero");
 		expect(capacitySource).toContain('session.on("goaway"');
-		expect(capacitySource).toContain("remoteSettings.maxConcurrentStreams");
+		expect(capacitySource).toContain("settings.maxConcurrentStreams");
+		expect(capacitySource).toContain("settingsReceived");
+		expect(capacitySource).toContain("http2CapacityTarget");
 		expect(capacitySource).toContain("ensureHttp2Capacity");
 		expect(capacitySource).toContain("remoteMaxConcurrentStreams");
 		expect(capacitySource).not.toContain("gunzipSync");

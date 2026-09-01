@@ -680,6 +680,9 @@ describe("Live Matches V3 read path", () => {
 	it("does not materialize detail checkpoint payloads for HEAD or DESK cold reads", () => {
 		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).toContain("jsonb_build_object(");
 		expect(LIVE_MATCH_CHECKPOINT_DESK_SQL).toContain("jsonb_build_object(");
+		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).toContain("WITH ORDINALITY");
+		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).toContain("ORDER BY elements.fixture_ordinality");
+		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).not.toContain("ORDER BY fixture_item->>'fixtureId'");
 		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL.match(/'payload', checkpoint\.payload/g)).toHaveLength(1);
 		expect(LIVE_MATCH_CHECKPOINT_DESK_SQL.match(/to_jsonb\(checkpoint\)/g)).toHaveLength(1);
 		expect(LIVE_MATCH_CHECKPOINT_SQL.match(/to_jsonb\(checkpoint\)/g)).toHaveLength(2);
@@ -861,6 +864,58 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail?.publication.generation).toBe(12);
 	});
 
+	it("rejects retired player fields before serving V3 detail", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		if (bundle.detail.active.publication === null || bundle.detail.active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const first = publication.fixtures[0];
+		if (!first) throw new Error("missing first detail descriptor");
+		const invalidPlayers = [{ ...player(3), retiredField: true }];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = bundle.detail.active.items[0];
+		const invalidDescriptor = {
+			...first,
+			count: invalidPlayers.length,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+			key: first.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`),
+		};
+		publication.fixtures[0] = invalidDescriptor;
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		bundle.detail.active.items[0] = {
+			...item,
+			fixtureId: invalidDescriptor.fixtureId,
+			key: invalidDescriptor.key,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detail?.publication.generation).toBe(12);
+	});
+
 	it("rejects publication timestamps that GraphQL DateTime cannot serialize", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
@@ -878,7 +933,7 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
-	it("does not let an explicit event read replace the active-event authority", async () => {
+	it("seeds the active-event authority after an explicit current event read", async () => {
 		const redis = new TestRedis();
 		const bundle = { ...buildBundle({ eventId: 2 }).bundle, eventId: 2 };
 		let available = true;
@@ -892,9 +947,9 @@ describe("Live Matches V3 read path", () => {
 		available = false;
 
 		const fallback = await readLiveMatchday(context);
-		expect(fallback.eventId).toBeNull();
-		expect(fallback.desk).toBeNull();
-		expect(fallback.detail).toBeNull();
+		expect(fallback.eventId).toBe(2);
+		expect(fallback.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(fallback.detail?.servedFrom).toBe("PROCESS_LKG");
 	});
 
 	it("requires detail coverage for every started fixture", async () => {
