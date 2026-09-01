@@ -39,39 +39,20 @@ export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
 		publication.score_source, publication.live_publication_id,
 		publication.live_revision, publication.algorithm_version,
 		publication.source_min_checked_at, publication.source_max_checked_at,
-		COALESCE(status.finished, lifecycle.finished, false) AS lifecycle_finished,
-		COALESCE(status.data_checked, lifecycle.data_checked, false) AS lifecycle_data_checked,
-		COALESCE(status.finalization_started_at, lifecycle.data_checked_at) AS finalization_started_at,
-		COALESCE(
-			status.finalization_due_at,
-			CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
-				ELSE lifecycle.data_checked_at + interval '4500 seconds' END
-		) AS finalization_due_at,
-		COALESCE(status.expected_entry_count, publication.expected_entry_count) AS status_expected_entry_count,
-		COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
-			AS observed_entry_count,
-		COALESCE(
-			status.pending_correction_entry_count,
-			GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
-		) AS pending_correction_entry_count,
-		COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
-			AS status_expected_tournament_count,
-		COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
-			AS observed_tournament_count,
-		COALESCE(
-			status.coverage_state,
-			CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
-				AND publication.ready_tournament_count = publication.expected_tournament_count
-				THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
-		) AS coverage_state,
-		COALESCE(status.expected_entry_scope_sha256, publication.entry_scope_sha256)
-			AS expected_entry_scope_sha256,
-		COALESCE(status.observed_entry_scope_sha256, publication.entry_scope_sha256)
-			AS observed_entry_scope_sha256,
-		COALESCE(status.expected_tournament_scope_sha256, publication.tournament_scope_sha256)
-			AS expected_tournament_scope_sha256,
-		COALESCE(status.observed_tournament_scope_sha256, publication.tournament_scope_sha256)
-			AS observed_tournament_scope_sha256
+		status.finished AS lifecycle_finished,
+		status.data_checked AS lifecycle_data_checked,
+		status.finalization_started_at AS finalization_started_at,
+		status.finalization_due_at AS finalization_due_at,
+		status.expected_entry_count AS status_expected_entry_count,
+		status.observed_entry_count AS observed_entry_count,
+		status.pending_correction_entry_count AS pending_correction_entry_count,
+		status.expected_tournament_count AS status_expected_tournament_count,
+		status.observed_tournament_count AS observed_tournament_count,
+		status.coverage_state AS coverage_state,
+		status.expected_entry_scope_sha256 AS expected_entry_scope_sha256,
+		status.observed_entry_scope_sha256 AS observed_entry_scope_sha256,
+		status.expected_tournament_scope_sha256 AS expected_tournament_scope_sha256,
+		status.observed_tournament_scope_sha256 AS observed_tournament_scope_sha256
 	FROM competition.my_fpl_snapshot_publications publication
 	JOIN reporting.my_fpl_active_snapshot_status status
 		ON status.season_id = publication.season_id
@@ -94,39 +75,49 @@ export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
 		publication.score_source, publication.live_publication_id,
 		publication.live_revision, publication.algorithm_version,
 		publication.source_min_checked_at, publication.source_max_checked_at,
-		COALESCE(status.finished, lifecycle.finished, false) AS lifecycle_finished,
-		COALESCE(status.data_checked, lifecycle.data_checked, false) AS lifecycle_data_checked,
-		COALESCE(status.finalization_started_at, lifecycle.data_checked_at) AS finalization_started_at,
-		COALESCE(
-			status.finalization_due_at,
-			CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
-				ELSE lifecycle.data_checked_at + interval '4500 seconds' END
-		) AS finalization_due_at,
-		COALESCE(status.expected_entry_count, publication.expected_entry_count) AS status_expected_entry_count,
-		COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
-			AS observed_entry_count,
-		COALESCE(
-			status.pending_correction_entry_count,
-			GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
-		) AS pending_correction_entry_count,
-		COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
-			AS status_expected_tournament_count,
-		COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
-			AS observed_tournament_count,
-		COALESCE(
-			status.coverage_state,
-			CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
-				AND publication.ready_tournament_count = publication.expected_tournament_count
-				THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
-		) AS coverage_state,
-		COALESCE(status.expected_entry_scope_sha256, publication.entry_scope_sha256)
-			AS expected_entry_scope_sha256,
-		COALESCE(status.observed_entry_scope_sha256, publication.entry_scope_sha256)
-			AS observed_entry_scope_sha256,
-		COALESCE(status.expected_tournament_scope_sha256, publication.tournament_scope_sha256)
-			AS expected_tournament_scope_sha256,
-		COALESCE(status.observed_tournament_scope_sha256, publication.tournament_scope_sha256)
-			AS observed_tournament_scope_sha256
+		CASE WHEN publication.active THEN status.finished
+			ELSE COALESCE(status.finished, lifecycle.finished, false) END AS lifecycle_finished,
+		CASE WHEN publication.active THEN status.data_checked
+			ELSE COALESCE(status.data_checked, lifecycle.data_checked, false) END AS lifecycle_data_checked,
+		CASE WHEN publication.active THEN status.finalization_started_at
+			ELSE COALESCE(status.finalization_started_at, lifecycle.data_checked_at) END AS finalization_started_at,
+		CASE WHEN publication.active THEN status.finalization_due_at
+			ELSE COALESCE(
+				status.finalization_due_at,
+				CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
+					ELSE lifecycle.data_checked_at + interval '4500 seconds' END
+			) END AS finalization_due_at,
+		CASE WHEN publication.active THEN status.expected_entry_count
+			ELSE COALESCE(status.expected_entry_count, publication.expected_entry_count) END AS status_expected_entry_count,
+		CASE WHEN publication.active THEN status.observed_entry_count
+			ELSE COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
+			END AS observed_entry_count,
+		CASE WHEN publication.active THEN status.pending_correction_entry_count
+			ELSE COALESCE(
+				status.pending_correction_entry_count,
+				GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
+			) END AS pending_correction_entry_count,
+		CASE WHEN publication.active THEN status.expected_tournament_count
+			ELSE COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
+			END AS status_expected_tournament_count,
+		CASE WHEN publication.active THEN status.observed_tournament_count
+			ELSE COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
+			END AS observed_tournament_count,
+		CASE WHEN publication.active THEN status.coverage_state
+			ELSE COALESCE(
+				status.coverage_state,
+				CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
+					AND publication.ready_tournament_count = publication.expected_tournament_count
+					THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
+			) END AS coverage_state,
+		CASE WHEN publication.active THEN status.expected_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS expected_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS observed_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.expected_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS expected_tournament_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS observed_tournament_scope_sha256
 	FROM competition.my_fpl_snapshot_publications publication
 	LEFT JOIN reporting.my_fpl_active_snapshot_status status
 		ON status.season_id = publication.season_id
@@ -152,39 +143,49 @@ export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
 		publication.score_source, publication.live_publication_id,
 		publication.live_revision, publication.algorithm_version,
 		publication.source_min_checked_at, publication.source_max_checked_at,
-		COALESCE(status.finished, lifecycle.finished, false) AS lifecycle_finished,
-		COALESCE(status.data_checked, lifecycle.data_checked, false) AS lifecycle_data_checked,
-		COALESCE(status.finalization_started_at, lifecycle.data_checked_at) AS finalization_started_at,
-		COALESCE(
-			status.finalization_due_at,
-			CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
-				ELSE lifecycle.data_checked_at + interval '4500 seconds' END
-		) AS finalization_due_at,
-		COALESCE(status.expected_entry_count, publication.expected_entry_count) AS status_expected_entry_count,
-		COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
-			AS observed_entry_count,
-		COALESCE(
-			status.pending_correction_entry_count,
-			GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
-		) AS pending_correction_entry_count,
-		COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
-			AS status_expected_tournament_count,
-		COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
-			AS observed_tournament_count,
-		COALESCE(
-			status.coverage_state,
-			CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
-				AND publication.ready_tournament_count = publication.expected_tournament_count
-				THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
-		) AS coverage_state,
-		COALESCE(status.expected_entry_scope_sha256, publication.entry_scope_sha256)
-			AS expected_entry_scope_sha256,
-		COALESCE(status.observed_entry_scope_sha256, publication.entry_scope_sha256)
-			AS observed_entry_scope_sha256,
-		COALESCE(status.expected_tournament_scope_sha256, publication.tournament_scope_sha256)
-			AS expected_tournament_scope_sha256,
-		COALESCE(status.observed_tournament_scope_sha256, publication.tournament_scope_sha256)
-			AS observed_tournament_scope_sha256
+		CASE WHEN publication.active THEN status.finished
+			ELSE COALESCE(status.finished, lifecycle.finished, false) END AS lifecycle_finished,
+		CASE WHEN publication.active THEN status.data_checked
+			ELSE COALESCE(status.data_checked, lifecycle.data_checked, false) END AS lifecycle_data_checked,
+		CASE WHEN publication.active THEN status.finalization_started_at
+			ELSE COALESCE(status.finalization_started_at, lifecycle.data_checked_at) END AS finalization_started_at,
+		CASE WHEN publication.active THEN status.finalization_due_at
+			ELSE COALESCE(
+				status.finalization_due_at,
+				CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
+					ELSE lifecycle.data_checked_at + interval '4500 seconds' END
+			) END AS finalization_due_at,
+		CASE WHEN publication.active THEN status.expected_entry_count
+			ELSE COALESCE(status.expected_entry_count, publication.expected_entry_count) END AS status_expected_entry_count,
+		CASE WHEN publication.active THEN status.observed_entry_count
+			ELSE COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
+			END AS observed_entry_count,
+		CASE WHEN publication.active THEN status.pending_correction_entry_count
+			ELSE COALESCE(
+				status.pending_correction_entry_count,
+				GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
+			) END AS pending_correction_entry_count,
+		CASE WHEN publication.active THEN status.expected_tournament_count
+			ELSE COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
+			END AS status_expected_tournament_count,
+		CASE WHEN publication.active THEN status.observed_tournament_count
+			ELSE COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
+			END AS observed_tournament_count,
+		CASE WHEN publication.active THEN status.coverage_state
+			ELSE COALESCE(
+				status.coverage_state,
+				CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
+					AND publication.ready_tournament_count = publication.expected_tournament_count
+					THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
+			) END AS coverage_state,
+		CASE WHEN publication.active THEN status.expected_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS expected_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS observed_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.expected_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS expected_tournament_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS observed_tournament_scope_sha256
 	FROM competition.my_fpl_snapshot_publications publication
 	LEFT JOIN reporting.my_fpl_active_snapshot_status status
 		ON status.season_id = publication.season_id
@@ -2123,7 +2124,9 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 	}
 	if (
 		row.kind === "FINAL" &&
-		(row.coverage_state !== "COMPLETE" ||
+		(!row.lifecycle_finished ||
+			!row.lifecycle_data_checked ||
+			row.coverage_state !== "COMPLETE" ||
 			row.status_expected_entry_count !== row.observed_entry_count ||
 			row.status_expected_tournament_count !== row.observed_tournament_count ||
 			row.pending_correction_entry_count !== 0 ||

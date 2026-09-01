@@ -1060,6 +1060,21 @@ describe("My FPL review repository", () => {
 				finalization_due_at: "2099-08-22T12:00:01.000Z",
 			})
 		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				expected_entry_scope_sha256: null,
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				kind: "FINAL",
+				score_source: "FPL_FINAL_RESULT",
+				lifecycle_finished: false,
+				lifecycle_data_checked: true,
+			})
+		).toBeNull();
 	});
 
 	it("requires positive FINAL ranks except the authoritative first-event unranked case", () => {
