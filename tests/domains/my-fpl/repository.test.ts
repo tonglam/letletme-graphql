@@ -515,6 +515,8 @@ const snapshotPublicationRow = {
 	expected_tournament_count: 1,
 	ready_tournament_count: 1,
 	content_sha256: "0".repeat(64),
+	entry_scope_sha256: "1".repeat(64),
+	tournament_scope_sha256: "2".repeat(64),
 	score_source: "FPL_EVENT_LIVE" as const,
 	live_publication_id: "00000000-0000-4000-8000-000000000007",
 	live_revision: "8",
@@ -1079,6 +1081,36 @@ describe("My FPL review repository", () => {
 				score_source: "FPL_FINAL_RESULT",
 				lifecycle_finished: false,
 				lifecycle_data_checked: true,
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				lifecycle_finished: false,
+				lifecycle_data_checked: true,
+			})
+		).toBeNull();
+	});
+
+	it("binds status coverage to the immutable publication capture", () => {
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				observed_entry_count: 2,
+				status_expected_entry_count: 2,
+				pending_correction_entry_count: 0,
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				entry_scope_sha256: "9".repeat(64),
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				tournament_scope_sha256: "9".repeat(64),
 			})
 		).toBeNull();
 	});
@@ -1679,8 +1711,10 @@ describe("My FPL review repository", () => {
 		expect(first.state).toBe("READY");
 		const key = gqlCacheKey(fixture.context, "my-fpl:v12:snapshot-entry:1:42:123");
 		const cached = JSON.parse((await fixture.redis.get(key)) ?? "null") as {
+			publication: { settlementState: string };
 			payload: { entry: { overallRank: number | null } };
 		};
+		cached.publication.settlementState = "PROVISIONAL";
 		cached.payload.entry.overallRank = null;
 		await fixture.redis.set(key, JSON.stringify(cached));
 		const entryQueriesBefore = fixture.queries.filter(({ sql }) =>

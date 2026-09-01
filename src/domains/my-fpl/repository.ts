@@ -36,6 +36,7 @@ export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
 		publication.ready_entry_count, publication.empty_entry_count,
 		publication.not_applicable_entry_count, publication.expected_tournament_count,
 		publication.ready_tournament_count, publication.content_sha256,
+		publication.entry_scope_sha256, publication.tournament_scope_sha256,
 		publication.score_source, publication.live_publication_id,
 		publication.live_revision, publication.algorithm_version,
 		publication.source_min_checked_at, publication.source_max_checked_at,
@@ -72,6 +73,7 @@ export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
 		publication.ready_entry_count, publication.empty_entry_count,
 		publication.not_applicable_entry_count, publication.expected_tournament_count,
 		publication.ready_tournament_count, publication.content_sha256,
+		publication.entry_scope_sha256, publication.tournament_scope_sha256,
 		publication.score_source, publication.live_publication_id,
 		publication.live_revision, publication.algorithm_version,
 		publication.source_min_checked_at, publication.source_max_checked_at,
@@ -140,6 +142,7 @@ export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
 		publication.ready_entry_count, publication.empty_entry_count,
 		publication.not_applicable_entry_count, publication.expected_tournament_count,
 		publication.ready_tournament_count, publication.content_sha256,
+		publication.entry_scope_sha256, publication.tournament_scope_sha256,
 		publication.score_source, publication.live_publication_id,
 		publication.live_revision, publication.algorithm_version,
 		publication.source_min_checked_at, publication.source_max_checked_at,
@@ -457,6 +460,18 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			{
 				relation: "competition.my_fpl_snapshot_publications",
 				column: "content_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "entry_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "tournament_scope_sha256",
 				pgType: "text",
 				acceptedPgTypes: ["character varying"],
 			},
@@ -1251,6 +1266,8 @@ type DbSnapshotPublicationRow = QueryResultRow & {
 	expected_tournament_count: number;
 	ready_tournament_count: number;
 	content_sha256: string;
+	entry_scope_sha256: string | null;
+	tournament_scope_sha256: string | null;
 	score_source: MyFplScoreSource | null;
 	live_publication_id: string | null;
 	live_revision: string | null;
@@ -2079,10 +2096,12 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!Number.isSafeInteger(row.not_applicable_entry_count) ||
 		row.not_applicable_entry_count < 0 ||
 		row.ready_entry_count + row.empty_entry_count !== row.expected_entry_count ||
+		row.observed_entry_count !== row.expected_entry_count ||
 		!Number.isSafeInteger(row.expected_tournament_count) ||
 		row.expected_tournament_count < 0 ||
 		!Number.isSafeInteger(row.ready_tournament_count) ||
 		row.ready_tournament_count !== row.expected_tournament_count ||
+		row.observed_tournament_count !== row.ready_tournament_count ||
 		!Number.isSafeInteger(row.status_expected_entry_count) ||
 		row.status_expected_entry_count < 0 ||
 		row.status_expected_entry_count < row.expected_entry_count ||
@@ -2105,6 +2124,11 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 				!finalizationDueAt ||
 				Date.parse(finalizationDueAt) !== Date.parse(finalizationStartedAt) + 4_500_000
 			: finalizationStartedAt !== null || finalizationDueAt !== null) ||
+		(row.lifecycle_data_checked && !row.lifecycle_finished) ||
+		typeof row.entry_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.entry_scope_sha256) ||
+		typeof row.tournament_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.tournament_scope_sha256) ||
 		typeof row.expected_entry_scope_sha256 !== "string" ||
 		!/^[0-9a-f]{64}$/.test(row.expected_entry_scope_sha256) ||
 		typeof row.observed_entry_scope_sha256 !== "string" ||
@@ -2118,6 +2142,8 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!sourceMinCheckedAt ||
 		!sourceMaxCheckedAt ||
 		(row.coverage_state !== "COMPLETE" && row.coverage_state !== "CORRECTION_PENDING") ||
+		row.entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+		row.tournament_scope_sha256 !== row.observed_tournament_scope_sha256 ||
 		Date.parse(sourceCheckedAt) !== Date.parse(sourceMinCheckedAt) ||
 		Date.parse(sourceMinCheckedAt) > Date.parse(sourceMaxCheckedAt)
 	) {
@@ -2192,8 +2218,8 @@ const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublica
 	capturedExpectedEntryCount: row.expected_entry_count,
 	capturedExpectedTournamentCount: row.expected_tournament_count,
 	contentSha256: row.content_sha256,
-	entryScopeSha256: row.observed_entry_scope_sha256!,
-	tournamentScopeSha256: row.observed_tournament_scope_sha256!,
+	entryScopeSha256: row.entry_scope_sha256!,
+	tournamentScopeSha256: row.tournament_scope_sha256!,
 	expectedEntryScopeSha256: row.expected_entry_scope_sha256!,
 	expectedTournamentScopeSha256: row.expected_tournament_scope_sha256!,
 });
@@ -2254,6 +2280,7 @@ const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPubli
 		isSafeInteger(candidate.observedEntryCount) &&
 		candidate.observedEntryCount >= 0 &&
 		candidate.observedEntryCount <= candidate.expectedEntryCount &&
+		candidate.observedEntryCount === candidate.capturedExpectedEntryCount &&
 		candidate.readyTournamentCount <= candidate.expectedTournamentCount &&
 		candidate.coverageState ===
 			(candidate.observedEntryCount === candidate.expectedEntryCount &&
@@ -2584,11 +2611,14 @@ type LoadedSnapshotEntry = {
 	isEmpty: boolean;
 };
 
-const parseLoadedSnapshotEntryCache = (value: unknown): LoadedSnapshotEntry | null => {
+const parseLoadedSnapshotEntryCache = (
+	value: unknown,
+	authoritativeSettlementState: MyFplSettlementState
+): LoadedSnapshotEntry | null => {
 	if (!isRecord(value) || !isSnapshotPublicationCache(value.publication)) return null;
 	const payload = parseSnapshotEntryPayload(value.payload);
 	if (!payload || typeof value.isEmpty !== "boolean") return null;
-	if (!isFinalSnapshotEntryPayloadValid(payload, value.publication.settlementState)) return null;
+	if (!isFinalSnapshotEntryPayloadValid(payload, authoritativeSettlementState)) return null;
 	if (
 		value.isEmpty !== (payload.gameweek.state === "EMPTY") ||
 		payload.gameweek.eventId !== payload.review.throughEventId ||
@@ -2622,7 +2652,7 @@ const loadSnapshotEntry = async (
 		`my-fpl:${PROJECTION_VERSION}:snapshot-entry:${eventId}:${pinned}:${requireViewerEntryId(context)}`
 	);
 	const cached = await readMyFplCache(context, cacheKey, (value): value is LoadedSnapshotEntry => {
-		const parsed = parseLoadedSnapshotEntryCache(value);
+		const parsed = parseLoadedSnapshotEntryCache(value, publication.settlementState);
 		return Boolean(
 			parsed &&
 			parsed.publication.revision === publication.revision &&
