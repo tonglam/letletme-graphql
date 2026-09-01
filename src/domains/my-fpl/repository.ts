@@ -2117,6 +2117,7 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!sourceCheckedAt ||
 		!sourceMinCheckedAt ||
 		!sourceMaxCheckedAt ||
+		(row.coverage_state !== "COMPLETE" && row.coverage_state !== "CORRECTION_PENDING") ||
 		Date.parse(sourceCheckedAt) !== Date.parse(sourceMinCheckedAt) ||
 		Date.parse(sourceMinCheckedAt) > Date.parse(sourceMaxCheckedAt)
 	) {
@@ -2474,6 +2475,41 @@ const isAuthoritativeFinalUnrankedFirstEvent = (payload: SnapshotEntryPayload): 
 	);
 };
 
+const isFinalSnapshotEntryPayloadValid = (
+	payload: SnapshotEntryPayload,
+	settlementState: MyFplSettlementState
+): boolean => {
+	if (settlementState !== "FINAL" || payload.gameweek.state === "EMPTY") return true;
+	const allowUnrankedFirstEvent = isAuthoritativeFinalUnrankedFirstEvent(payload);
+	const gameweekResult = payload.gameweek.result;
+	const rankIsValid = (rank: unknown, allowZero: boolean): boolean =>
+		allowZero ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
+	return (
+		payload.entry.overallRank !== null &&
+		rankIsValid(payload.entry.overallRank, allowUnrankedFirstEvent) &&
+		rankIsValid(
+			gameweekResult?.eventRank ?? null,
+			allowUnrankedFirstEvent && gameweekResult?.eventId === payload.gameweek.eventId
+		) &&
+		rankIsValid(
+			gameweekResult?.overallRank ?? null,
+			allowUnrankedFirstEvent && gameweekResult?.eventId === payload.gameweek.eventId
+		) &&
+		payload.review.timeline.every(
+			(row) =>
+				row.status === "FINAL" &&
+				rankIsValid(
+					row.eventRank,
+					allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
+				) &&
+				rankIsValid(
+					row.overallRank,
+					allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
+				)
+		)
+	);
+};
+
 export type SnapshotEntryContractRow = Readonly<{
 	payload: SnapshotEntryPayload;
 	isEmpty: boolean;
@@ -2507,35 +2543,6 @@ export const parseSnapshotEntryContractRow = (
 	const picksCount = asInteger(value.picks_count);
 	const entryRowCount = asInteger(value.entry_row_count);
 	const aggregateRowCount = asInteger(value.aggregate_row_count);
-	const allowUnrankedFirstEvent = payload ? isAuthoritativeFinalUnrankedFirstEvent(payload) : false;
-	const gameweekResult = payload?.gameweek.result;
-	const rankIsValid = (rank: unknown, allowZero: boolean): boolean =>
-		allowZero ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
-	const finalRankContractValid =
-		publication.settlementState !== "FINAL" ||
-		payload?.gameweek.state === "EMPTY" ||
-		(payload?.entry.overallRank !== null &&
-			rankIsValid(payload?.entry.overallRank, allowUnrankedFirstEvent) &&
-			rankIsValid(
-				gameweekResult?.eventRank ?? null,
-				allowUnrankedFirstEvent && gameweekResult?.eventId === payload?.gameweek.eventId
-			) &&
-			rankIsValid(
-				gameweekResult?.overallRank ?? null,
-				allowUnrankedFirstEvent && gameweekResult?.eventId === payload?.gameweek.eventId
-			) &&
-			payload?.review.timeline.every(
-				(row) =>
-					row.status === "FINAL" &&
-					rankIsValid(
-						row.eventRank,
-						allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
-					) &&
-					rankIsValid(
-						row.overallRank,
-						allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
-					)
-			));
 	if (
 		!payload ||
 		typeof isEmpty !== "boolean" ||
@@ -2553,7 +2560,7 @@ export const parseSnapshotEntryContractRow = (
 		entryRowCount !==
 			publication.capturedExpectedEntryCount + publication.notApplicableEntryCount ||
 		aggregateRowCount !== publication.capturedExpectedTournamentCount ||
-		!finalRankContractValid
+		!isFinalSnapshotEntryPayloadValid(payload, publication.settlementState)
 	) {
 		return null;
 	}
@@ -2581,6 +2588,7 @@ const parseLoadedSnapshotEntryCache = (value: unknown): LoadedSnapshotEntry | nu
 	if (!isRecord(value) || !isSnapshotPublicationCache(value.publication)) return null;
 	const payload = parseSnapshotEntryPayload(value.payload);
 	if (!payload || typeof value.isEmpty !== "boolean") return null;
+	if (!isFinalSnapshotEntryPayloadValid(payload, value.publication.settlementState)) return null;
 	if (
 		value.isEmpty !== (payload.gameweek.state === "EMPTY") ||
 		payload.gameweek.eventId !== payload.review.throughEventId ||

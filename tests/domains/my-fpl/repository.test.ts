@@ -1069,6 +1069,12 @@ describe("My FPL review repository", () => {
 		expect(
 			parseSnapshotPublicationRow({
 				...snapshotPublicationRow,
+				coverage_state: "UNKNOWN",
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
 				kind: "FINAL",
 				score_source: "FPL_FINAL_RESULT",
 				lifecycle_finished: false,
@@ -1631,6 +1637,59 @@ describe("My FPL review repository", () => {
 		const desk = await fixture.repository.loadManagerReview(fixture.context);
 
 		expect(desk.state).toBe("READY");
+		expect(
+			fixture.queries.filter(({ sql }) => sql.includes("JOIN competition.my_fpl_snapshot_entries"))
+		).toHaveLength(entryQueriesBefore + 1);
+	});
+
+	it("does not serve a cached FINAL review with invalid ranks", async () => {
+		const finalPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
+			entry: { overallRank: number | null };
+			gameweek: { result: { eventRank: number | null; overallRank: number | null } };
+			review: {
+				summary: { provisionalGameweeks: number };
+				timeline: Array<{
+					status: "PROVISIONAL" | "FINAL";
+					eventRank: number | null;
+					overallRank: number | null;
+				}>;
+			};
+		};
+		finalPayload.gameweek.result!.eventRank = 10;
+		finalPayload.gameweek.result!.overallRank = 1000;
+		finalPayload.review.summary.provisionalGameweeks = 0;
+		finalPayload.review.timeline[0]!.status = "FINAL";
+		finalPayload.review.timeline[0]!.eventRank = 10;
+		finalPayload.review.timeline[0]!.overallRank = 1000;
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			publicationRows: [
+				{
+					...snapshotPublicationRow,
+					kind: "FINAL",
+					score_source: "FPL_FINAL_RESULT",
+					live_publication_id: null,
+					live_revision: null,
+					algorithm_version: null,
+				},
+			],
+			snapshotEntryRow: { ...snapshotEntryRow(), payload: finalPayload },
+		});
+		const first = await fixture.repository.loadManagerReview(fixture.context);
+		expect(first.state).toBe("READY");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v12:snapshot-entry:1:42:123");
+		const cached = JSON.parse((await fixture.redis.get(key)) ?? "null") as {
+			payload: { entry: { overallRank: number | null } };
+		};
+		cached.payload.entry.overallRank = null;
+		await fixture.redis.set(key, JSON.stringify(cached));
+		const entryQueriesBefore = fixture.queries.filter(({ sql }) =>
+			sql.includes("JOIN competition.my_fpl_snapshot_entries")
+		).length;
+
+		const second = await fixture.repository.loadManagerReview(fixture.context);
+
+		expect(second.state).toBe("READY");
 		expect(
 			fixture.queries.filter(({ sql }) => sql.includes("JOIN competition.my_fpl_snapshot_entries"))
 		).toHaveLength(entryQueriesBefore + 1);
