@@ -276,6 +276,7 @@ const persistRateLimitAggregateBatch = async (
 				const failure = results?.find(([error]) => error);
 				if (failure?.[0]) throw failure[0];
 			} catch (error) {
+				rememberTelemetryPersistenceFailure();
 				for (const record of group) failedPolicies.add(record.policyVersion);
 				for (const policyVersion of failedPolicies) {
 					metrics.rateLimitStorageFailures.labels(`${policyVersion}-aggregate`, "open").inc();
@@ -352,6 +353,11 @@ let telemetryFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let telemetryFlushPromise: Promise<void> | null = null;
 const persistedOverflowMarkers = new Set<string>();
 const overflowMarkerFlights = new Map<string, Promise<void>>();
+let telemetryPersistenceFailure = false;
+
+const rememberTelemetryPersistenceFailure = (): void => {
+	telemetryPersistenceFailure = true;
+};
 
 const clearTelemetryFlushTimer = (): void => {
 	if (telemetryFlushTimer === null) return;
@@ -397,6 +403,7 @@ const persistOverflowMarker = (record: RateLimitAggregateRecord): void => {
 	try {
 		markerWrite = record.redis.set(key, "1", "EX", RATE_LIMIT_AGGREGATE_RETENTION_SECONDS, "NX");
 	} catch (error: unknown) {
+		rememberTelemetryPersistenceFailure();
 		metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-overflow`, "open").inc();
 		record.logger.warn(
 			{ err: error, policyVersion: record.policyVersion },
@@ -413,6 +420,7 @@ const persistOverflowMarker = (record: RateLimitAggregateRecord): void => {
 			persistedOverflowMarkers.add(key);
 		})
 		.catch((error: unknown) => {
+			rememberTelemetryPersistenceFailure();
 			metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-overflow`, "open").inc();
 			record.logger.warn(
 				{ err: error, policyVersion: record.policyVersion },
@@ -473,6 +481,9 @@ export const flushRateLimitAggregateTelemetry = async (
 		// draining is not silently lost.
 		while (overflowMarkerFlights.size > 0) {
 			await Promise.allSettled([...overflowMarkerFlights.values()]);
+		}
+		if (telemetryPersistenceFailure) {
+			throw new Error("rate-limit telemetry persistence failed");
 		}
 	};
 	let timeout: ReturnType<typeof setTimeout> | undefined;

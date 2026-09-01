@@ -115,6 +115,9 @@ validateCapacityEndpoint(endpoint, transport);
 const metricsEndpointValue = process.env.LIVE_MATCH_LOAD_METRICS_URL?.trim();
 const metricsEndpoint = metricsEndpointValue ? new URL(metricsEndpointValue) : null;
 if (metricsEndpoint !== null) validateCapacityEndpoint(metricsEndpoint, "cold");
+const metricsDeployHealthEndpoint = metricsEndpoint
+	? new URL("/health/deploy", metricsEndpoint.origin)
+	: null;
 const stages = [
 	...new Set(
 		(process.env.LIVE_MATCH_LOAD_STAGES ?? "50,100,200,300")
@@ -699,6 +702,7 @@ class ResponseAccumulator {
 				[...this.statusCounts.entries()].map(([status, count]) => [String(status), count])
 			),
 			semanticFailures: this.semanticFailures,
+			non429Errors: this.non429Errors,
 			errorCodes: Object.fromEntries(this.errorCodes),
 			rateLimitScopeCounts: Object.fromEntries(this.rateLimitScopeCounts),
 			rateLimited429: this.rateLimited429,
@@ -802,6 +806,7 @@ function metricSum(text: string, metric: string, requiredLabel: string): number 
 
 type DeploymentIdentitySample = {
 	phase: string;
+	source: "graphql" | "metrics";
 	observedSha: string | null;
 	ok: boolean;
 };
@@ -809,10 +814,14 @@ type DeploymentIdentitySample = {
 const deploymentIdentitySamples: DeploymentIdentitySample[] = [];
 let deploymentIdentityFailure: string | null = null;
 
-const verifyDeploymentIdentity = async (phase: string): Promise<boolean> => {
+const verifyDeploymentIdentity = async (
+	phase: string,
+	healthEndpoint: URL,
+	source: "graphql" | "metrics"
+): Promise<boolean> => {
 	if (deploymentIdentityFailure !== null) return false;
 	try {
-		const response = await fetch(deployHealthEndpoint, {
+		const response = await fetch(healthEndpoint, {
 			headers: { accept: "application/json" },
 			signal: AbortSignal.timeout(timeoutMs),
 		});
@@ -822,17 +831,26 @@ const verifyDeploymentIdentity = async (phase: string): Promise<boolean> => {
 				? payload.deploySha.toLowerCase()
 				: null;
 		const ok = response.ok && observedSha === expectedDeploySha;
-		deploymentIdentitySamples.push({ phase, observedSha, ok });
+		deploymentIdentitySamples.push({ phase, source, observedSha, ok });
 		if (!ok) {
-			deploymentIdentityFailure = `${phase}: /health/deploy did not report expected deploy SHA`;
+			deploymentIdentityFailure = `${phase} (${source}): /health/deploy did not report expected deploy SHA`;
 			return false;
 		}
 		return true;
 	} catch (error) {
-		deploymentIdentitySamples.push({ phase, observedSha: null, ok: false });
-		deploymentIdentityFailure = `${phase}: /health/deploy identity check failed (${error instanceof Error ? error.message : String(error)})`;
+		deploymentIdentitySamples.push({ phase, source, observedSha: null, ok: false });
+		deploymentIdentityFailure = `${phase} (${source}): /health/deploy identity check failed (${error instanceof Error ? error.message : String(error)})`;
 		return false;
 	}
+};
+
+const verifyAllDeploymentIdentities = async (phase: string): Promise<boolean> => {
+	const graphqlOk = await verifyDeploymentIdentity(phase, deployHealthEndpoint, "graphql");
+	const metricsOk =
+		metricsDeployHealthEndpoint === null
+			? true
+			: await verifyDeploymentIdentity(`${phase}-metrics`, metricsDeployHealthEndpoint, "metrics");
+	return graphqlOk && metricsOk;
 };
 
 async function collectMetrics(): Promise<MetricObservation | null> {
@@ -878,7 +896,7 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 	return observation;
 }
 
-if (!(await verifyDeploymentIdentity("before-run"))) {
+if (!(await verifyAllDeploymentIdentities("before-run"))) {
 	throw new Error(deploymentIdentityFailure ?? "deployment identity check failed");
 }
 const initialMetrics = await collectMetrics();
@@ -895,13 +913,13 @@ if (transport === "warm") await getHttp2Session();
 const startedAt = new Date().toISOString();
 let stageExecutionAborted = false;
 for (const stage of stages) {
-	if (!(await verifyDeploymentIdentity(`before-stage-${stage}`))) {
+	if (!(await verifyAllDeploymentIdentities(`before-stage-${stage}`))) {
 		stageExecutionAborted = true;
 		break;
 	}
 	const deadline = Date.now() + stageSeconds * 1000;
 	await Promise.all(Array.from({ length: stage }, () => runWorker(stage, deadline)));
-	if (!(await verifyDeploymentIdentity(`after-stage-${stage}`))) {
+	if (!(await verifyAllDeploymentIdentities(`after-stage-${stage}`))) {
 		stageExecutionAborted = true;
 		break;
 	}
@@ -911,7 +929,7 @@ await monitor;
 await collectMetrics();
 closeHttp2Session();
 if (!stageExecutionAborted && deploymentIdentityFailure === null) {
-	await verifyDeploymentIdentity("after-run");
+	await verifyAllDeploymentIdentities("after-run");
 }
 
 const stageReports = stages.map((stage) => ({
@@ -921,6 +939,18 @@ const stageReports = stages.map((stage) => ({
 }));
 const overall = overallAccumulator.report();
 const capacityStage = stageReports.find((report) => report.concurrency === 300);
+const requiredCapacityStages = [50, 100, 200, 300];
+const requiredStageHealth = requiredCapacityStages.map((concurrency) => {
+	const report = stageReports.find((item) => item.concurrency === concurrency);
+	if (!report) {
+		return { concurrency, present: false, healthy: false, failures: ["stage_missing"] };
+	}
+	const failures: string[] = [];
+	if (report.semanticFailures > 0) failures.push("semantic_failures");
+	if (report.non429Errors > 0) failures.push("non429_errors");
+	if (report.rateLimited429 > 0) failures.push("rate_limited_429");
+	return { concurrency, present: true, healthy: failures.length === 0, failures };
+});
 const firstReadyStage = stageReports.find((report) => report.requests > 0);
 const globalDeniedObservationsComplete =
 	globalDeniedBaseline !== null &&
@@ -945,6 +975,8 @@ if (globalDeniedObservationsComplete) {
 }
 const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
+	requiredStagesHaveNoErrors: requiredStageHealth.every((stage) => stage.healthy),
+	requiredStageHealth,
 	stage300DurationSeconds: capacityStage?.durationSeconds ?? 0,
 	stage300DurationRequirementMet: (capacityStage?.durationSeconds ?? 0) >= 900,
 	stage300P95Under800Ms: (capacityStage?.e2eMs.p95 ?? Number.POSITIVE_INFINITY) < 800,
@@ -963,8 +995,10 @@ const capacityGate = {
 	globalDeniedIncludesShadow: true,
 	deploymentIdentityPinned:
 		deploymentIdentityFailure === null &&
-		deploymentIdentitySamples.length >= 2 &&
-		deploymentIdentitySamples.every((sample) => sample.ok),
+		["graphql", ...(metricsEndpoint === null ? [] : ["metrics"])].every((source) => {
+			const sourceSamples = deploymentIdentitySamples.filter((sample) => sample.source === source);
+			return sourceSamples.length >= 2 && sourceSamples.every((sample) => sample.ok);
+		}),
 	stageExecutionAborted: stageExecutionAborted,
 	readyValidationRequired: requireReady,
 	dbPoolWaitingIsZero:
@@ -976,6 +1010,7 @@ const capacityGate = {
 
 const capacityGatePassed = [
 	capacityGate.allRequiredStagesPresent,
+	capacityGate.requiredStagesHaveNoErrors,
 	capacityGate.stage300DurationRequirementMet,
 	capacityGate.stage300P95Under800Ms,
 	capacityGate.stage300P99Under2s,
@@ -1004,6 +1039,9 @@ const report = {
 	deploymentIdentity: {
 		expectedSha: expectedDeploySha,
 		healthEndpoint: `${deployHealthEndpoint.origin}${deployHealthEndpoint.pathname}`,
+		metricsHealthEndpoint: metricsDeployHealthEndpoint
+			? `${metricsDeployHealthEndpoint.origin}${metricsDeployHealthEndpoint.pathname}`
+			: null,
 		samples: deploymentIdentitySamples,
 		failure: deploymentIdentityFailure,
 	},
@@ -1025,6 +1063,8 @@ const report = {
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",
 		"Every capacity stage is bounded by /health/deploy identity checks for LIVE_MATCH_LOAD_DEPLOY_SHA; a mismatch aborts the run and fails the gate.",
+		"When metrics are configured, the metrics origin is independently pinned to the same deploy SHA before and around every required stage.",
+		"Any semantic, non-429, or client/workload 429 failure in a required stage fails the stepped capacity gate even if a later stage recovers.",
 		"Quantiles use a bounded uniform reservoir; request counters, status counts, semantic failures, and maxima remain exact.",
 	],
 };

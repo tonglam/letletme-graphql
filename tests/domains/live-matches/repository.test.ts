@@ -693,6 +693,71 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail?.publication.generation).toBe(12);
 	});
 
+	it("rejects retired stat fields before serving V3 detail", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		if (bundle.detail.active.publication === null || bundle.detail.active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const first = publication.fixtures[0];
+		if (!first) throw new Error("missing first detail descriptor");
+		const invalidPlayers = [
+			{
+				...player(3),
+				stats: [
+					{
+						identifier: "bps",
+						value: 30,
+						awardedPoints: 3,
+						points: 3,
+						pointsModification: 0,
+					},
+				],
+			},
+		];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = bundle.detail.active.items[0];
+		const invalidDescriptor = {
+			...first,
+			count: invalidPlayers.length,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+			key: first.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`),
+		};
+		publication.fixtures[0] = invalidDescriptor;
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		bundle.detail.active.items[0] = {
+			...item,
+			fixtureId: invalidDescriptor.fixtureId,
+			key: invalidDescriptor.key,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detail?.publication.generation).toBe(12);
+	});
+
 	it("rejects publication timestamps that GraphQL DateTime cannot serialize", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);

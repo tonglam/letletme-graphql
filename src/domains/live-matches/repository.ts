@@ -244,6 +244,25 @@ const nonEmptyString = (value: unknown): value is string =>
 const statIdentifierKey = (value: unknown): string | null =>
 	typeof value === "string" && value.trim().length > 0 ? value.trim().toLowerCase() : null;
 
+const LIVE_MATCH_DETAIL_STAT_KEYS = ["identifier", "value", "awardedPoints"] as const;
+
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
+	const actualKeys = Object.keys(value);
+	return (
+		actualKeys.length === keys.length &&
+		keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+	);
+};
+
+const validDetailStat = (value: unknown): value is MatchDetailStat => {
+	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DETAIL_STAT_KEYS)) return false;
+	return (
+		nonEmptyString(value.identifier) &&
+		finiteNumber(value.value) &&
+		finiteNumber(value.awardedPoints)
+	);
+};
+
 // Data's V3 checkpoint contract reserves a fixed-width publication identity.
 // Keep the reader boundary equally strict so an arbitrary non-empty value
 // cannot become a trusted publication reference after Redis/PG recovery.
@@ -912,14 +931,7 @@ const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 		value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&
 		new Set(value.stats.map((stat) => statIdentifierKey(isRecord(stat) ? stat.identifier : null)))
 			.size === value.stats.length &&
-		value.stats.every((stat) => {
-			if (!isRecord(stat)) return false;
-			return (
-				nonEmptyString(stat.identifier) &&
-				finiteNumber(stat.value) &&
-				finiteNumber(stat.awardedPoints)
-			);
-		})
+		value.stats.every(validDetailStat)
 	))
 		return false;
 	const stats = value.stats as readonly unknown[];

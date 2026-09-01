@@ -240,6 +240,30 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		expect(summary.shadowDecisions).toBe(0);
 	});
 
+	it("fails shutdown when telemetry persistence rejects before the bound", async () => {
+		const pipeline = {
+			hincrby: () => pipeline,
+			expire: () => pipeline,
+			zincrby: () => pipeline,
+			exec: async () => {
+				throw new Error("redis unavailable");
+			},
+		};
+		enqueueRateLimitAggregate({
+			redis: { pipeline: () => pipeline } as unknown as Redis,
+			trafficClass: "web_rsc",
+			workload: "fixtures",
+			scope: "workload",
+			outcome: "allowed",
+			fingerprint: "abc123abc123",
+			logger: { warn: () => undefined } as never,
+		});
+
+		await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
+			"rate-limit telemetry persistence failed"
+		);
+	});
+
 	it("fails a shutdown flush when telemetry persistence exceeds its bound", async () => {
 		const pipeline = {
 			hincrby: () => pipeline,
