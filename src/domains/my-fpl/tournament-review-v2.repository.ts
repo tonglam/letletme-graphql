@@ -407,30 +407,34 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND ${publicationAlias}.payload->>'metricVersion' = ${publicationAlias}.metric_version
   AND ${publicationAlias}.payload->>'format' = ${publicationAlias}.format
   AND ${publicationAlias}.content_sha256 ~ '^[0-9a-f]{64}$'
-  AND ${publicationAlias}.content_sha256 = encode(
-    extensions.digest(
-      convert_to(
-        (
-          (${publicationAlias}.payload - 'freshness' - 'observation' - 'observedAt' - 'lastObservedAt' - 'publishedAt' - 'updatedAt' - 'createdAt')::text
-          || E'\\n' ||
-          COALESCE(
-            (
-              SELECT string_agg(chunk.chunk_sha256, E'\\n' ORDER BY chunk.section_key, chunk.chunk_index)
-              FROM competition.tournament_review_publication_chunks chunk
-              WHERE chunk.season_id = ${publicationAlias}.season_id
-                AND chunk.tournament_id = ${publicationAlias}.tournament_id
-                AND chunk.event_id = ${publicationAlias}.event_id
-                AND chunk.revision = ${publicationAlias}.revision
-            ),
-            ''
-          )
-        ),
-        'UTF8'
-      ),
-      'sha256'
-    ),
-    'hex'
-  )
+	AND CASE
+	      WHEN jsonb_typeof(${publicationAlias}.payload) = 'object' THEN
+	        ${publicationAlias}.content_sha256 = encode(
+	          extensions.digest(
+	            convert_to(
+	              (
+	                (${publicationAlias}.payload - 'freshness' - 'observation' - 'observedAt' - 'lastObservedAt' - 'publishedAt' - 'updatedAt' - 'createdAt')::text
+	                || E'\\n' ||
+	                COALESCE(
+	                  (
+	                    SELECT string_agg(chunk.chunk_sha256, E'\\n' ORDER BY chunk.section_key, chunk.chunk_index)
+	                    FROM competition.tournament_review_publication_chunks chunk
+	                    WHERE chunk.season_id = ${publicationAlias}.season_id
+	                      AND chunk.tournament_id = ${publicationAlias}.tournament_id
+	                      AND chunk.event_id = ${publicationAlias}.event_id
+	                      AND chunk.revision = ${publicationAlias}.revision
+	                  ),
+	                  ''
+	                )
+	              ),
+	              'UTF8'
+	            ),
+	            'sha256'
+	          ),
+	          'hex'
+	        )
+	      ELSE false
+	    END
   AND jsonb_typeof(${publicationAlias}.payload->'manifest') = 'object'
   AND jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
   AND ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]{1,18}$'
@@ -462,19 +466,31 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND (
     (${publicationAlias}.format = 'POINTS' AND (
       SELECT count(*)
-      FROM jsonb_array_elements(${publicationAlias}.payload->'manifest'->'sections') descriptor
+	      FROM jsonb_array_elements(CASE
+	        WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
+	        THEN ${publicationAlias}.payload->'manifest'->'sections'
+	        ELSE '[]'::jsonb
+	      END) descriptor
       WHERE descriptor->>'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')
     ) = 2)
     OR (${publicationAlias}.format = 'H2H' AND (
       SELECT count(*)
-      FROM jsonb_array_elements(${publicationAlias}.payload->'manifest'->'sections') descriptor
+	      FROM jsonb_array_elements(CASE
+	        WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
+	        THEN ${publicationAlias}.payload->'manifest'->'sections'
+	        ELSE '[]'::jsonb
+	      END) descriptor
       WHERE descriptor->>'sectionKey' IN ('H2H_STANDINGS', 'H2H_FIXTURES')
-    ) = 2)
-    OR (${publicationAlias}.format = 'KNOCKOUT' AND (
-      SELECT count(*)
-      FROM jsonb_array_elements(${publicationAlias}.payload->'manifest'->'sections') descriptor
-      WHERE descriptor->>'sectionKey' = 'KNOCKOUT_BRACKET'
-    ) = 1)
+	    ) = 2)
+	    OR (${publicationAlias}.format = 'KNOCKOUT' AND (
+	      SELECT count(*)
+	      FROM jsonb_array_elements(CASE
+	        WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
+	        THEN ${publicationAlias}.payload->'manifest'->'sections'
+	        ELSE '[]'::jsonb
+	      END) descriptor
+	      WHERE descriptor->>'sectionKey' = 'KNOCKOUT_BRACKET'
+	    ) = 1)
   )
   AND NOT EXISTS (
     SELECT 1
@@ -661,9 +677,12 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
       )
   )
   AND ${eventAlias}.finished = true
-  AND ${eventAlias}.data_checked = true
-  AND ${eventAlias}.data_checked_at IS NOT NULL
-  AND date_trunc('milliseconds', ${publicationAlias}.event_data_checked_at) =
+	AND ${eventAlias}.data_checked = true
+	AND ${eventAlias}.data_checked_at IS NOT NULL
+	AND ${publicationAlias}.source_min_checked_at <= ${publicationAlias}.event_data_checked_at
+	AND ${publicationAlias}.event_data_checked_at <= ${publicationAlias}.source_max_checked_at
+	AND ${publicationAlias}.source_max_checked_at <= ${publicationAlias}.published_at
+	AND date_trunc('milliseconds', ${publicationAlias}.event_data_checked_at) =
       date_trunc('milliseconds', ${eventAlias}.data_checked_at)
 `;
 }
@@ -4234,16 +4253,6 @@ function mapGameweek(
 		h2h: null,
 		knockout: knockoutFromPayload(row, first, cursor),
 	};
-}
-
-function parsePublicationRows(value: unknown): PublicationRow[] {
-	if (!Array.isArray(value)) throw integrityError("Review season rows are invalid");
-	return value.map((row) => {
-		if (!isRecord(row) || !positiveInt(row.event_id)) {
-			throw integrityError("Review season row metadata is invalid");
-		}
-		return row as unknown as PublicationRow;
-	});
 }
 
 function parseFinalizedEventIds(value: unknown): number[] | null {
