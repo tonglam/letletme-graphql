@@ -278,6 +278,7 @@ const LIVE_MATCH_DETAIL_PLAYER_KEYS = [
 	"totalPoints",
 	"stats",
 ] as const;
+const LIVE_MATCH_DETAIL_FIXTURE_KEYS = ["fixtureId", "players"] as const;
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
 	const actualKeys = Object.keys(value);
@@ -948,17 +949,17 @@ const parsePayload = <T>(
 const validDetailMetadataPayload = (
 	raw: string | null,
 	item: Readonly<{ count: number; bytes: number; sha256: string }>
-): boolean => {
+): readonly unknown[] | null => {
 	if (
 		raw === null ||
 		Buffer.byteLength(raw, "utf8") !== item.bytes ||
 		sha256Raw(raw) !== item.sha256
 	)
-		return false;
+		return null;
 	const value = parsedJson(raw);
-	return (
-		Array.isArray(value) && value.length === item.count && canonicalBytes(value) === item.bytes
-	);
+	return Array.isArray(value) && value.length === item.count && canonicalBytes(value) === item.bytes
+		? value
+		: null;
 };
 
 const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFixture => {
@@ -1040,6 +1041,7 @@ const validDeskPayload = (value: unknown, eventId: number): value is readonly Ma
 
 const validFixtureDetail = (value: unknown): value is MatchFixtureDetail =>
 	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_DETAIL_FIXTURE_KEYS) &&
 	safeInteger(value.fixtureId) !== null &&
 	(safeInteger(value.fixtureId) as number) > 0 &&
 	Array.isArray(value.players) &&
@@ -1227,17 +1229,21 @@ const decodeDetailMetadataCandidate = (
 		raw.items.length !== publication.fixtures.length
 	)
 		return null;
+	const fixturesForRevision: Array<{ fixtureId: number; players: readonly unknown[] }> = [];
 	for (const item of publication.fixtures) {
 		const rawItem = raw.items.find(
 			(candidate) => candidate.fixtureId === item.fixtureId && candidate.key === item.key
 		);
+		const players = rawItem ? validDetailMetadataPayload(rawItem.payload, item) : null;
 		if (
 			!rawItem ||
 			rawItem.metadata !== `${item.count}|${item.bytes}|${item.sha256}` ||
-			!validDetailMetadataPayload(rawItem.payload, item)
+			players === null
 		)
 			return null;
+		fixturesForRevision.push({ fixtureId: item.fixtureId, players });
 	}
+	if (sha256(fixturesForRevision) !== publication.detail.revision) return null;
 	return { publication, fixtures: [], payloadLoaded: false, servedFrom };
 };
 

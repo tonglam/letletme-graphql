@@ -1,6 +1,6 @@
 import { createHmac, randomUUID } from "crypto";
-import { lstatSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
+import { lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Redis from "ioredis";
@@ -99,6 +99,10 @@ const rateLimitTelemetrySpoolDirectory =
 	(env.isProduction
 		? "/var/lib/letletme-graphql/rate-limit-telemetry"
 		: join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`));
+export const rateLimitTelemetryServingProcessIdentityFile = join(
+	rateLimitTelemetrySpoolDirectory,
+	"serving-process.json"
+);
 
 type TelemetryMarkerKind = "overflow" | "persistence-failure" | "dirty-window";
 
@@ -113,6 +117,37 @@ type TelemetryMarkerEntry = Readonly<{
 }>;
 
 const telemetryProcessGeneration = randomUUID();
+
+type RateLimitTelemetryServingProcessIdentity = Readonly<{
+	pid: number;
+	generation: string;
+}>;
+
+/**
+ * Persist the identity of the process that owns request admission. Reports
+ * run in a separate short-lived process and must compare dirty markers with
+ * this identity, not with the reporter's PID or module generation.
+ */
+export const registerRateLimitTelemetryServingProcess = (): void => {
+	mkdirSync(rateLimitTelemetrySpoolDirectory, { recursive: true });
+	const temporaryPath = `${rateLimitTelemetryServingProcessIdentityFile}.${process.pid}.${telemetryProcessGeneration}.tmp`;
+	try {
+		writeFileSync(
+			temporaryPath,
+			JSON.stringify({ pid: process.pid, generation: telemetryProcessGeneration }) + "\n",
+			{ encoding: "utf8", flag: "wx", mode: 0o600 }
+		);
+		renameSync(temporaryPath, rateLimitTelemetryServingProcessIdentityFile);
+	} catch (error: unknown) {
+		try {
+			unlinkSync(temporaryPath);
+		} catch {
+			// Preserve the registration error; the temporary file is only a
+			// best-effort cleanup artifact after startup has already failed.
+		}
+		throw error;
+	}
+};
 
 const markerFileName = (
 	kind: TelemetryMarkerKind,
@@ -192,6 +227,33 @@ const isProcessAlive = (pid: number | null): boolean => {
 	}
 };
 
+const readServingProcessIdentity =
+	async (): Promise<RateLimitTelemetryServingProcessIdentity | null> => {
+		try {
+			const raw = await readFile(rateLimitTelemetryServingProcessIdentityFile, {
+				encoding: "utf8",
+			});
+			const value: unknown = JSON.parse(raw);
+			if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+			const record = value as Record<string, unknown>;
+			const pid = record.pid;
+			const generation = record.generation;
+			if (
+				Object.keys(record).length !== 2 ||
+				typeof pid !== "number" ||
+				!Number.isSafeInteger(pid) ||
+				pid <= 0 ||
+				typeof generation !== "string" ||
+				!/^[A-Za-z0-9-]+$/.test(generation)
+			)
+				return null;
+			return { pid, generation };
+		} catch (error: unknown) {
+			if (isNodeErrorWithCode(error, "ENOENT")) return null;
+			return null;
+		}
+	};
+
 const readTelemetryMarkerEntries = async (): Promise<readonly TelemetryMarkerEntry[]> => {
 	let names: string[];
 	try {
@@ -237,13 +299,21 @@ const readOrphanedDirtyWindowDates = async (
 			entry.policyVersion === policyVersion &&
 			(allowedDates === null || allowedDates.has(entry.date))
 	);
+	const servingIdentity = await readServingProcessIdentity();
 	return [
 		...new Set(
 			entries
 				.filter((entry) => {
-					// The generation is the durable owner identity carried by the
-					// marker filename. A replacement container can reuse PID 1, so
-					// PID equality alone must never classify an older marker as live.
+					// The serving process identity is persisted by the long-lived
+					// server. The report command is a separate Bun process and its
+					// PID/module generation must never be used as the owner identity.
+					if (servingIdentity && isProcessAlive(servingIdentity.pid))
+						return (
+							entry.ownerPid !== servingIdentity.pid ||
+							entry.ownerGeneration !== servingIdentity.generation
+						);
+					// Keep the local/test fallback when no serving identity has been
+					// registered yet; production startup registers it before serving.
 					if (entry.ownerPid === process.pid)
 						return entry.ownerGeneration !== telemetryProcessGeneration;
 					return !isProcessAlive(entry.ownerPid);

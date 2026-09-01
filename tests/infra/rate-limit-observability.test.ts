@@ -13,6 +13,7 @@ import {
 	rateLimitTelemetryOverflowKey,
 	rateLimitTelemetryPersistenceFailureKey,
 	rateLimitTelemetryDirtyWindowKey,
+	rateLimitTelemetryServingProcessIdentityFile,
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
@@ -315,6 +316,56 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		} finally {
 			await unlink(orphanPath).catch(() => undefined);
 			await unlink(reusedPidPath).catch(() => undefined);
+		}
+	});
+
+	it("uses the serving process identity when a report process reuses its PID", async () => {
+		const activeDate = "2099-01-03";
+		const orphanedDate = "2099-01-04";
+		const servingGeneration = "serving-generation";
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const activePath = join(
+			spoolDirectory,
+			`dirty.v3.${activeDate}.${process.pid}.${servingGeneration}`
+		);
+		const orphanedPath = join(
+			spoolDirectory,
+			`dirty.v3.${orphanedDate}.${process.pid}.old-serving-generation`
+		);
+		let previousIdentity: string | null = null;
+		try {
+			previousIdentity = await readFile(rateLimitTelemetryServingProcessIdentityFile, {
+				encoding: "utf8",
+			});
+		} catch {
+			// This test process normally has no serving identity; restore that
+			// absence after the isolated report-process simulation.
+		}
+		await mkdir(spoolDirectory, { recursive: true });
+		await writeFile(
+			rateLimitTelemetryServingProcessIdentityFile,
+			JSON.stringify({ pid: process.pid, generation: servingGeneration }) + "\n",
+			{ encoding: "utf8" }
+		);
+		await writeFile(activePath, "active\n", { encoding: "utf8" });
+		await writeFile(orphanedPath, "orphaned\n", { encoding: "utf8" });
+		try {
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [activeDate])).toEqual([]);
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [orphanedDate])).toEqual([
+				orphanedDate,
+			]);
+		} finally {
+			await unlink(activePath).catch(() => undefined);
+			await unlink(orphanedPath).catch(() => undefined);
+			if (previousIdentity === null) {
+				await unlink(rateLimitTelemetryServingProcessIdentityFile).catch(() => undefined);
+			} else {
+				await writeFile(rateLimitTelemetryServingProcessIdentityFile, previousIdentity, {
+					encoding: "utf8",
+				});
+			}
 		}
 	});
 

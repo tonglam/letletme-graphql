@@ -14,6 +14,7 @@ import { metrics, metricsResponse, registerDatabasePoolMetrics } from "./infra/m
 import {
 	flushRateLimitAggregateTelemetry,
 	rateLimitFingerprint,
+	registerRateLimitTelemetryServingProcess,
 } from "./infra/rate-limit-observability";
 import { closeRedis, connectRedis } from "./infra/redis";
 import { CurrentSeasonProvider } from "./infra/season";
@@ -107,6 +108,7 @@ export const startServer = async (): Promise<void> => {
 	const apollo = createGraphQLApolloServer();
 
 	await apollo.start();
+	registerRateLimitTelemetryServingProcess();
 
 	const server = Bun.serve({
 		port: env.PORT,

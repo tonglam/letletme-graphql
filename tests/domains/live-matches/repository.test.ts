@@ -553,6 +553,25 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects a detail metadata candidate with a mismatched aggregate revision", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (!active.publication) throw new Error("missing active detail publication");
+		const publication = JSON.parse(active.publication) as {
+			detail: { revision: string };
+		};
+		publication.detail.revision = "f".repeat(64);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("labels an invalid explicit event id instead of reporting an empty active window", async () => {
 		const redis = new TestRedis();
 		let databaseReads = 0;
@@ -587,14 +606,18 @@ describe("Live Matches V3 read path", () => {
 		const result = await graphql({
 			schema,
 			contextValue: buildSnapshotContext(redis),
-			source: `query { liveMatchday(eventId: 1) { delivery { state } snapshot { detailDelivery { state servedFrom } } } }`,
+			source: `query { liveMatchday(eventId: 1) { delivery { state } snapshot { detailDelivery { state servedFrom reasonCodes } } } }`,
 		});
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.liveMatchday).toMatchObject({
 			delivery: { state: "FRESH" },
 			snapshot: {
-				detailDelivery: { state: "DEGRADED", servedFrom: "REDIS_CURRENT" },
+				detailDelivery: {
+					state: "DEGRADED",
+					servedFrom: "REDIS_CURRENT",
+					reasonCodes: ["DETAIL_METADATA_ONLY"],
+				},
 			},
 		});
 	});
@@ -1177,7 +1200,10 @@ describe("Live Matches V3 read path", () => {
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.liveMatchday).toMatchObject({
 			snapshot: {
-				detailDelivery: { servedFrom: "REDIS_PREVIOUS", reasonCodes: ["DETAIL_PREVIOUS"] },
+				detailDelivery: {
+					servedFrom: "REDIS_PREVIOUS",
+					reasonCodes: ["DETAIL_PREVIOUS", "DETAIL_METADATA_ONLY"],
+				},
 			},
 		});
 	});
@@ -2098,6 +2124,33 @@ describe("Live Matches V3 read path", () => {
 		const result = await readLiveMatchday(context, 1);
 
 		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("rejects a PostgreSQL detail checkpoint with retired fixture envelope fields", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const row = buildCheckpointRow();
+		const detailFixtures = structuredClone(row.detail.payload);
+		const firstFixture = detailFixtures[0] as Record<string, unknown> | undefined;
+		if (!firstFixture) throw new Error("missing detail fixture");
+		firstFixture.retiredField = true;
+		const detailRevision = { revision: digest(detailFixtures), contentUpdatedAt: later };
+		row.detail.manifest = { ...row.detail.manifest, detail: detailRevision };
+		row.detail.revisions = { detail: detailRevision };
+		row.detail.payload = detailFixtures;
+		row.detail.row_count = detailFixtures.length;
+		row.detail.payload_bytes = Buffer.byteLength(encode(detailFixtures), "utf8");
+		row.detail.payload_sha256 = detailRevision.revision;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+
+		const result = await readLiveMatchday(context, 1);
+
+		expect(result.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 		expect(result.detail).toBeNull();
 	});
 

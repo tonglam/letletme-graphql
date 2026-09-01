@@ -359,6 +359,20 @@ const toResult = (read: LiveMatchdayRead) => {
 		reasonCodes.push("DETAIL_FALLBACK");
 	if (!read.detail)
 		reasonCodes.push(detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE");
+	const detailReasonCodes = finalCheckpointPending
+		? ["FINAL_CHECKPOINT_PENDING"]
+		: read.detail
+			? [
+					...(read.detail.servedFrom === "REDIS_CURRENT"
+						? []
+						: [detailServedFromReason(read.detail.servedFrom)]),
+					...(mode !== "FULL" &&
+					read.detail.payloadLoaded === false &&
+					detailDeliveryState === "DEGRADED"
+						? ["DETAIL_METADATA_ONLY"]
+						: []),
+				].filter((reason): reason is string => reason !== undefined)
+			: [detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE"];
 	return {
 		availability: "READY",
 		delivery: {
@@ -378,13 +392,7 @@ const toResult = (read: LiveMatchdayRead) => {
 			detailDelivery: {
 				state: detailDeliveryState,
 				servedFrom: read.detail?.servedFrom ?? null,
-				reasonCodes: finalCheckpointPending
-					? ["FINAL_CHECKPOINT_PENDING"]
-					: read.detail
-						? read.detail.servedFrom === "REDIS_CURRENT"
-							? []
-							: [detailServedFromReason(read.detail.servedFrom)]
-						: [detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE"],
+				reasonCodes: [...new Set(detailReasonCodes)],
 			},
 			matches: toMatches(read.desk, read.detail, mode),
 		},
