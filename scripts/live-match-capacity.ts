@@ -17,6 +17,15 @@ type Transport = "cold" | "warm";
 // of actual network bodies/streams active for almost all of the observed
 // stage. Parsing and decompression are intentionally outside this counter.
 const NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT = 0.95;
+// JSON parsing, decompression, and semantic validation happen after the
+// network body closes. Keep a small pool of spare processors so those costs do
+// not reduce the number of live network streams below the requested stage.
+const NETWORK_SPARE_WORKER_RATIO = 0.05;
+
+const spareWorkersForStage = (stage: number): number =>
+	Math.max(1, Math.ceil(stage * NETWORK_SPARE_WORKER_RATIO));
+
+const workerCountForStage = (stage: number): number => stage + spareWorkersForStage(stage);
 
 type NetworkConcurrencyWindow = {
 	target: number;
@@ -1310,7 +1319,9 @@ for (const stage of stages) {
 	const deadline = Date.now() + stageSeconds * 1000;
 	beginNetworkConcurrencyStage(stage);
 	try {
-		await Promise.all(Array.from({ length: stage }, () => runWorker(stage, deadline)));
+		await Promise.all(
+			Array.from({ length: workerCountForStage(stage) }, () => runWorker(stage, deadline))
+		);
 	} finally {
 		finishNetworkConcurrencyStage(stage);
 	}
@@ -1330,6 +1341,8 @@ if (!stageExecutionAborted && deploymentIdentityFailure === null) {
 const stageReports = stages.map((stage) => ({
 	concurrency: stage,
 	durationSeconds: stageSeconds,
+	workerCount: workerCountForStage(stage),
+	spareWorkers: spareWorkersForStage(stage),
 	maxProcessingInFlight: maxInFlightByStage.get(stage) ?? 0,
 	maxNetworkInFlight: maxNetworkInFlightByStage.get(stage) ?? 0,
 	observedDurationSeconds: (networkConcurrencyEvidence.get(stage)?.stageDurationMs ?? 0) / 1_000,
@@ -1507,7 +1520,7 @@ const report = {
 	notes: [
 		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
 		"Warm HTTP/2 evidence records each peer maxConcurrentStreams and the summed effective capacity; the run fails before load if it cannot cover the requested stage concurrency.",
-		"Each stage keeps its target number of request workers active and immediately replaces every completed request; there is no think-time gap that lowers the offered concurrency.",
+		`Each stage keeps ${NETWORK_SPARE_WORKER_RATIO * 100}% spare processing workers in addition to the requested network target (${NETWORK_SPARE_WORKER_RATIO * 100}% rounded up, at least one); this keeps network streams replenished while decompression, parsing, and semantic validation run after body completion.`,
 		`Sustained-concurrency evidence is time-weighted coverage of the requested number of active HTTP/1 bodies or HTTP/2 streams, measured from request/stream creation through network body completion; at least ${NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT * 100}% of the observed stage must meet the target. Parsing and decompression are reported separately and cannot satisfy the network-concurrency gate.`,
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",

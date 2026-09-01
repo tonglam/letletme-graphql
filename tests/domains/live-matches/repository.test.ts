@@ -721,16 +721,14 @@ describe("Live Matches V3 read path", () => {
 		const head = await coldRead("HEAD");
 		expect(head.query).toBe(LIVE_MATCH_CHECKPOINT_HEAD_SQL);
 		expect(head.result.desk?.payloadLoaded).toBe(false);
-		expect(head.result.detail?.payloadLoaded).toBe(false);
+		expect(head.result.detail).toBeNull();
 		expect(head.result.desk?.fixtures).toEqual([]);
-		expect(head.result.detail?.fixtures).toEqual([]);
 
 		const desk = await coldRead("DESK");
 		expect(desk.query).toBe(LIVE_MATCH_CHECKPOINT_DESK_SQL);
 		expect(desk.result.desk?.payloadLoaded).not.toBe(false);
-		expect(desk.result.detail?.payloadLoaded).toBe(false);
+		expect(desk.result.detail).toBeNull();
 		expect(desk.result.desk?.fixtures).toHaveLength(2);
-		expect(desk.result.detail?.fixtures).toEqual([]);
 
 		const full = await coldRead("FULL");
 		expect(full.query).toBe(LIVE_MATCH_CHECKPOINT_SQL);
@@ -1147,6 +1145,10 @@ describe("Live Matches V3 read path", () => {
 		expect(detailScript.indexOf("local prefix =")).toBeLessThan(
 			detailScript.indexOf("payload = read_string(item.key)")
 		);
+		expect(detailScript.indexOf('read_string(item.key .. ":meta")')).toBeLessThan(
+			detailScript.indexOf('if mode ~= "HEAD" and mode ~= "DESK"')
+		);
+		expect(detailScript).toContain('if mode ~= "HEAD" and mode ~= "DESK" then');
 	});
 
 	it("rejects a leading detail publication and keeps the desk available", async () => {
@@ -1616,7 +1618,7 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
-	it("retains PostgreSQL metadata in a separate process LKG for HEAD reads", async () => {
+	it("does not accept PostgreSQL detail metadata without a payload in HEAD reads", async () => {
 		const redis = new TestRedis();
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
 			throw new Error("redis unavailable");
@@ -1634,11 +1636,10 @@ describe("Live Matches V3 read path", () => {
 
 		expect(first.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 		expect(first.desk?.payloadLoaded).toBe(false);
-		expect(first.detail?.payloadLoaded).toBe(false);
+		expect(first.detail).toBeNull();
 		expect(second.desk?.servedFrom).toBe("PROCESS_LKG");
-		expect(second.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(second.detail).toBeNull();
 		expect(second.desk?.payloadLoaded).toBe(false);
-		expect(second.detail?.payloadLoaded).toBe(false);
 		expect(databaseReads).toBe(1);
 	});
 
@@ -1665,11 +1666,12 @@ describe("Live Matches V3 read path", () => {
 		expect(queries).toEqual([LIVE_MATCH_CHECKPOINT_HEAD_SQL, LIVE_MATCH_CHECKPOINT_SQL]);
 	});
 
-	it("retains PostgreSQL metadata when Redis detail manifest is preferred", async () => {
+	it("does not accept PostgreSQL detail metadata when Redis detail is absent", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		bundle.desk.active = emptyDesk;
 		bundle.desk.previous = emptyDesk;
+		bundle.detail.active = emptyDetail;
 		bundle.detail.previous = emptyDetail;
 		attachBundle(redis, bundle);
 		let databaseReads = 0;
@@ -1682,7 +1684,7 @@ describe("Live Matches V3 read path", () => {
 
 		const first = await readLiveMatchday(context, 1, "HEAD");
 		expect(first.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(first.detail?.payloadLoaded).toBe(false);
+		expect(first.detail).toBeNull();
 
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
 			throw new Error("redis unavailable");
@@ -1690,9 +1692,7 @@ describe("Live Matches V3 read path", () => {
 		const recovered = await readLiveMatchday(context, 1, "HEAD");
 
 		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
-		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
-		expect(recovered.detail?.payloadLoaded).toBe(false);
-		expect(recovered.detail?.fixtures).toEqual([]);
+		expect(recovered.detail).toBeNull();
 		expect(databaseReads).toBe(1);
 	});
 

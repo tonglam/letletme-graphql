@@ -9,6 +9,7 @@ import {
 	parseRateLimitTelemetryOverflowTotal,
 	rateLimitTelemetryOverflowKey,
 	rateLimitTelemetryPersistenceFailureKey,
+	rateLimitTelemetryDirtyWindowKey,
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
@@ -16,6 +17,7 @@ import {
 	recordRateLimitAggregate,
 	readRateLimitTelemetryOverflowSpool,
 	readRateLimitTelemetryPersistenceFailureSpool,
+	readRateLimitTelemetryDirtyWindowSpool,
 	retryRateLimitTelemetryOverflowMarkers,
 	retryRateLimitTelemetryPersistenceFailureMarkers,
 	summarizeRateLimitTotals,
@@ -45,6 +47,9 @@ describe("rate-limit observability privacy", () => {
 		);
 		expect(rateLimitTelemetryPersistenceFailureKey("2026-08-20", "graphql-v4")).toBe(
 			"llm:gql:rate-limit:v4:persistence-failure:2026-08-20"
+		);
+		expect(rateLimitTelemetryDirtyWindowKey("2026-08-20", "graphql-v4")).toBe(
+			"llm:gql:rate-limit:v4:dirty-window:2026-08-20"
 		);
 	});
 
@@ -298,6 +303,9 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
 			"rate-limit telemetry persistence failed"
 		);
+		expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", ["2026-08-20"])).toEqual([
+			"2026-08-20",
+		]);
 		expect(markerArguments?.[0] as string | undefined).toBe(
 			rateLimitTelemetryPersistenceFailureKey(rateLimitAggregateDate(date))
 		);

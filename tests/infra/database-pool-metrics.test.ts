@@ -36,6 +36,9 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("observedDurationSeconds");
 		expect(capacitySource).toContain("maxNetworkInFlight");
 		expect(capacitySource).toContain("maxProcessingInFlight");
+		expect(capacitySource).toContain("NETWORK_SPARE_WORKER_RATIO");
+		expect(capacitySource).toContain("workerCountForStage");
+		expect(capacitySource).toContain("spareWorkers");
 		expect(capacitySource).not.toContain("report.maxInFlight");
 		expect(capacitySource).not.toContain("gunzipSync");
 		expect(capacitySource).not.toContain("brotliDecompressSync");

@@ -6,6 +6,7 @@ import {
 	rateLimitRecentAggregateKey,
 	rateLimitTelemetryOverflowKey,
 	rateLimitTelemetryPersistenceFailureKey,
+	readRateLimitTelemetryDirtyWindowSpool,
 	retryRateLimitTelemetryOverflowMarkers,
 	retryRateLimitTelemetryPersistenceFailureMarkers,
 	parseRateLimitStorageFailureTotal,
@@ -99,24 +100,30 @@ const readLiveRateLimitMetrics = async (
 	persistedTelemetryOverflowDates: readonly string[];
 	rateLimitTelemetryPersistenceFailures: number;
 	persistedTelemetryPersistenceFailureDates: readonly string[];
+	rateLimitTelemetryDirtyWindows: number;
+	persistedTelemetryDirtyWindowDates: readonly string[];
 }> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
 	// A previous process may have persisted a marker obligation locally after
 	// Redis was unavailable. The report process is also a safe recovery worker:
 	// retry those obligations before deciding whether the window is healthy.
-	const [localOverflowSpoolRemainingDates, localPersistenceFailureSpoolRemainingDates] =
-		await Promise.all([
-			retryRateLimitTelemetryOverflowMarkers({
-				redis,
-				policyVersion,
-				dates,
-			}),
-			retryRateLimitTelemetryPersistenceFailureMarkers({
-				redis,
-				policyVersion,
-				dates,
-			}),
-		]);
+	const [
+		localOverflowSpoolRemainingDates,
+		localPersistenceFailureSpoolRemainingDates,
+		localDirtyWindowDates,
+	] = await Promise.all([
+		retryRateLimitTelemetryOverflowMarkers({
+			redis,
+			policyVersion,
+			dates,
+		}),
+		retryRateLimitTelemetryPersistenceFailureMarkers({
+			redis,
+			policyVersion,
+			dates,
+		}),
+		readRateLimitTelemetryDirtyWindowSpool(policyVersion, dates),
+	]);
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
 		headers: { "X-Metrics-Token": env.METRICS_TOKEN },
 		signal: AbortSignal.timeout(5_000),
@@ -149,6 +156,7 @@ const readLiveRateLimitMetrics = async (
 			...localPersistenceFailureSpoolRemainingDates,
 		]),
 	].sort();
+	const allTelemetryDirtyWindowDates = [...new Set(localDirtyWindowDates)].sort();
 	const liveTelemetryOverflows = parseRateLimitTelemetryOverflowTotal(metricsText);
 	return {
 		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
@@ -156,6 +164,8 @@ const readLiveRateLimitMetrics = async (
 		persistedTelemetryOverflowDates: allTelemetryOverflowDates,
 		rateLimitTelemetryPersistenceFailures: allTelemetryPersistenceFailureDates.length,
 		persistedTelemetryPersistenceFailureDates: allTelemetryPersistenceFailureDates,
+		rateLimitTelemetryDirtyWindows: allTelemetryDirtyWindowDates.length,
+		persistedTelemetryDirtyWindowDates: allTelemetryDirtyWindowDates,
 	};
 };
 
@@ -283,7 +293,9 @@ try {
 		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0)) ||
 		(options.includeLiveStorageFailures &&
 			live !== null &&
-			(live.rateLimitTelemetryOverflows > 0 || live.rateLimitTelemetryPersistenceFailures > 0))
+			(live.rateLimitTelemetryOverflows > 0 ||
+				live.rateLimitTelemetryPersistenceFailures > 0 ||
+				live.rateLimitTelemetryDirtyWindows > 0))
 	) {
 		process.exitCode = 1;
 	}

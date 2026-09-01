@@ -1,4 +1,5 @@
 import { createHmac } from "crypto";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +48,9 @@ export const rateLimitFingerprint = (
 export const rateLimitAggregateDate = (date = new Date()): string =>
 	date.toISOString().slice(0, 10);
 
+const telemetryWindowKey = (record: RateLimitAggregateRecord): string =>
+	`${record.policyVersion}:${rateLimitAggregateDate(record.date)}`;
+
 const policyNamespace = (policyVersion: GraphQLRateLimitPolicyVersion): "v3" | "v4" =>
 	policyVersion === "graphql-v4" ? "v4" : "v3";
 
@@ -80,6 +84,12 @@ export const rateLimitTelemetryPersistenceFailureKey = (
 	policyVersion: GraphQLRateLimitPolicyVersion = "graphql-v3"
 ): string => `llm:gql:rate-limit:${policyNamespace(policyVersion)}:persistence-failure:${date}`;
 
+/** Durable marker for a telemetry window that may have been cut short by a restart. */
+export const rateLimitTelemetryDirtyWindowKey = (
+	date: string,
+	policyVersion: GraphQLRateLimitPolicyVersion = "graphql-v3"
+): string => `llm:gql:rate-limit:${policyNamespace(policyVersion)}:dirty-window:${date}`;
+
 // Marker obligations are intentionally kept as one small file per date and
 // policy. The deployment mounts this directory on a persistent Docker volume,
 // so a Redis outage cannot be forgotten when the GraphQL process is restarted.
@@ -90,7 +100,7 @@ const rateLimitTelemetrySpoolDirectory =
 		? "/var/lib/letletme-graphql/rate-limit-telemetry"
 		: join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`));
 
-type TelemetryMarkerKind = "overflow" | "persistence-failure";
+type TelemetryMarkerKind = "overflow" | "persistence-failure" | "dirty-window";
 
 type TelemetryMarkerEntry = Readonly<{
 	kind: TelemetryMarkerKind;
@@ -106,7 +116,9 @@ const markerFileName = (
 ): string =>
 	kind === "overflow"
 		? `overflow.${policyNamespace(policyVersion)}.${date}`
-		: `${policyNamespace(policyVersion)}.${date}`;
+		: kind === "dirty-window"
+			? `dirty.${policyNamespace(policyVersion)}.${date}`
+			: `${policyNamespace(policyVersion)}.${date}`;
 
 const markerFilePath = (
 	kind: TelemetryMarkerKind,
@@ -115,9 +127,14 @@ const markerFilePath = (
 ): string => join(rateLimitTelemetrySpoolDirectory, markerFileName(kind, date, policyVersion));
 
 const markerEntryFromFileName = (name: string): TelemetryMarkerEntry | null => {
-	const match = name.match(/^(?:(overflow)\.)?(v3|v4)\.(\d{4}-\d{2}-\d{2})$/);
+	const match = name.match(/^(?:(overflow|dirty)\.)?(v3|v4)\.(\d{4}-\d{2}-\d{2})$/);
 	if (!match) return null;
-	const kind: TelemetryMarkerKind = match[1] === "overflow" ? "overflow" : "persistence-failure";
+	const kind: TelemetryMarkerKind =
+		match[1] === "overflow"
+			? "overflow"
+			: match[1] === "dirty"
+				? "dirty-window"
+				: "persistence-failure";
 	const namespace = match[2];
 	const date = match[3];
 	if (!namespace || !date) return null;
@@ -132,7 +149,9 @@ const markerEntryFromFileName = (name: string): TelemetryMarkerEntry | null => {
 		key:
 			kind === "overflow"
 				? rateLimitTelemetryOverflowKey(date, policyVersion)
-				: rateLimitTelemetryPersistenceFailureKey(date, policyVersion),
+				: kind === "dirty-window"
+					? rateLimitTelemetryDirtyWindowKey(date, policyVersion)
+					: rateLimitTelemetryPersistenceFailureKey(date, policyVersion),
 	};
 };
 
@@ -189,6 +208,13 @@ export const readRateLimitTelemetryOverflowSpool = async (
 	dates?: readonly string[]
 ): Promise<readonly string[]> =>
 	readRateLimitTelemetryMarkerSpool("overflow", policyVersion, dates);
+
+/** Read durable dirty-window obligations left by an unclean queue shutdown. */
+export const readRateLimitTelemetryDirtyWindowSpool = async (
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	dates?: readonly string[]
+): Promise<readonly string[]> =>
+	readRateLimitTelemetryMarkerSpool("dirty-window", policyVersion, dates);
 
 export type RateLimitReportSummary = {
 	totalDecisions: number;
@@ -350,7 +376,9 @@ export const summarizeRateLimitTotals = (
 
 const persistRateLimitAggregateBatch = async (
 	records: readonly RateLimitAggregateRecord[]
-): Promise<void> => {
+): Promise<{ successfulWindows: Set<string>; failedWindows: Set<string> }> => {
+	const successfulWindows = new Set<string>();
+	const failedWindows = new Set<string>();
 	const byRedis = new Map<Redis, RateLimitAggregateRecord[]>();
 	for (const record of records) {
 		const group = byRedis.get(record.redis);
@@ -395,9 +423,11 @@ const persistRateLimitAggregateBatch = async (
 				const results = await pipeline.exec();
 				const failure = results?.find(([error]) => error);
 				if (failure?.[0]) throw failure[0];
+				for (const record of group) successfulWindows.add(telemetryWindowKey(record));
 			} catch (error) {
 				rememberTelemetryPersistenceFailure();
 				for (const record of group) {
+					failedWindows.add(telemetryWindowKey(record));
 					failedPolicies.add(record.policyVersion);
 					persistTelemetryPersistenceFailureMarker(record);
 				}
@@ -415,6 +445,7 @@ const persistRateLimitAggregateBatch = async (
 			}
 		})
 	);
+	return { successfulWindows, failedWindows };
 };
 
 const recordShape = ({
@@ -480,6 +511,10 @@ const overflowMarkerFlights = new Map<string, Promise<void>>();
 const persistedTelemetryPersistenceFailureMarkers = new Set<string>();
 const telemetryPersistenceFailureMarkerFlights = new Map<string, Promise<void>>();
 const markerSpoolWriteFlights = new Map<string, Promise<boolean>>();
+const dirtyWindowMarkerRecords = new Map<string, RateLimitAggregateRecord>();
+const ownedDirtyWindowMarkers = new Set<string>();
+const seenDirtyWindowMarkers = new Set<string>();
+const uncleanTelemetryWindows = new Set<string>();
 const persistenceFailureMarkerRetryRecords = new Map<string, RateLimitAggregateRecord>();
 const overflowMarkerRetryRecords = new Map<string, RateLimitAggregateRecord>();
 const markerRetryScanAt = new WeakMap<Redis, number>();
@@ -491,6 +526,65 @@ const rememberTelemetryPersistenceFailure = (): void => {
 	telemetryPersistenceFailure = true;
 };
 
+const ensureDirtyWindowMarker = (record: RateLimitAggregateRecord): void => {
+	const windowKey = telemetryWindowKey(record);
+	if (seenDirtyWindowMarkers.has(windowKey)) return;
+	seenDirtyWindowMarkers.add(windowKey);
+	dirtyWindowMarkerRecords.set(windowKey, record);
+	try {
+		mkdirSync(rateLimitTelemetrySpoolDirectory, { recursive: true });
+		const date = rateLimitAggregateDate(record.date);
+		writeFileSync(
+			markerFilePath("dirty-window", date, record.policyVersion),
+			`${rateLimitTelemetryDirtyWindowKey(date, record.policyVersion)}\n`,
+			{ encoding: "utf8", flag: "wx" }
+		);
+		ownedDirtyWindowMarkers.add(windowKey);
+	} catch (error: unknown) {
+		// EEXIST means a previous process left evidence of an unclean window. It
+		// must not become owned by the new process or be auto-cleared after the
+		// new process flushes its own records.
+		if (isNodeErrorWithCode(error, "EEXIST")) return;
+		rememberTelemetryPersistenceFailure();
+		metrics.rateLimitStorageFailures
+			.labels(telemetryMarkerMetricScope("dirty-window", record.policyVersion), "open")
+			.inc();
+		record.logger.warn(
+			{ err: error, policyVersion: record.policyVersion },
+			"Rate-limit telemetry dirty-window spool unavailable"
+		);
+	}
+};
+
+const removeOwnedDirtyWindowMarker = (windowKey: string): void => {
+	if (!ownedDirtyWindowMarkers.has(windowKey) || uncleanTelemetryWindows.has(windowKey)) return;
+	const record = dirtyWindowMarkerRecords.get(windowKey);
+	if (!record || pendingTelemetry.some((candidate) => telemetryWindowKey(candidate) === windowKey))
+		return;
+	try {
+		const date = rateLimitAggregateDate(record.date);
+		unlinkSync(markerFilePath("dirty-window", date, record.policyVersion));
+		ownedDirtyWindowMarkers.delete(windowKey);
+		seenDirtyWindowMarkers.delete(windowKey);
+		dirtyWindowMarkerRecords.delete(windowKey);
+	} catch (error: unknown) {
+		if (isNodeErrorWithCode(error, "ENOENT")) {
+			ownedDirtyWindowMarkers.delete(windowKey);
+			seenDirtyWindowMarkers.delete(windowKey);
+			dirtyWindowMarkerRecords.delete(windowKey);
+			return;
+		}
+		rememberTelemetryPersistenceFailure();
+		metrics.rateLimitStorageFailures
+			.labels(telemetryMarkerMetricScope("dirty-window", record.policyVersion), "open")
+			.inc();
+		record.logger.warn(
+			{ err: error, policyVersion: record.policyVersion },
+			"Rate-limit telemetry dirty-window cleanup unavailable"
+		);
+	}
+};
+
 const clearTelemetryFlushTimer = (): void => {
 	if (telemetryFlushTimer === null) return;
 	clearTimeout(telemetryFlushTimer);
@@ -498,9 +592,19 @@ const clearTelemetryFlushTimer = (): void => {
 };
 
 const flushTelemetryQueue = async (): Promise<void> => {
+	const successfulWindows = new Set<string>();
+	const failedWindows = new Set<string>();
 	while (pendingTelemetry.length > 0) {
 		const batch = pendingTelemetry.splice(0, RATE_LIMIT_TELEMETRY_BATCH_SIZE);
-		await persistRateLimitAggregateBatch(batch);
+		const result = await persistRateLimitAggregateBatch(batch);
+		for (const windowKey of result.successfulWindows) successfulWindows.add(windowKey);
+		for (const windowKey of result.failedWindows) {
+			failedWindows.add(windowKey);
+			uncleanTelemetryWindows.add(windowKey);
+		}
+	}
+	for (const windowKey of successfulWindows) {
+		if (!failedWindows.has(windowKey)) removeOwnedDirtyWindowMarker(windowKey);
 	}
 };
 
@@ -532,7 +636,9 @@ const telemetryMarkerKey = (
 	const date = rateLimitAggregateDate(record.date);
 	return kind === "overflow"
 		? rateLimitTelemetryOverflowKey(date, record.policyVersion)
-		: rateLimitTelemetryPersistenceFailureKey(date, record.policyVersion);
+		: kind === "dirty-window"
+			? rateLimitTelemetryDirtyWindowKey(date, record.policyVersion)
+			: rateLimitTelemetryPersistenceFailureKey(date, record.policyVersion);
 };
 
 const telemetryMarkerMetricScope = (
@@ -823,6 +929,7 @@ export const enqueueRateLimitAggregate = (input: {
 		void persistOverflowMarker(record);
 		return;
 	}
+	ensureDirtyWindowMarker(record);
 	pendingTelemetry.push(record);
 	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_BATCH_SIZE) {
 		void startTelemetryFlush();

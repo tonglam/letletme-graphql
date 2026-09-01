@@ -470,9 +470,6 @@ local function detail_candidate(pointer)
   if not manifest or string.len(manifest) > ${LIVE_MATCH_MAX_PUBLICATION_BYTES} or manifest ~= publication then
     return { publication = publication, manifest = manifest or null_value(), items = items }
   end
-  if mode == "HEAD" or mode == "DESK" then
-    return { publication = publication, manifest = manifest, items = items }
-  end
   local total_bytes = 0
   local seen = {}
   for _, item in ipairs(decoded.fixtures) do
@@ -501,12 +498,17 @@ local function detail_candidate(pointer)
     if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
       return { publication = publication, manifest = manifest, items = {} }
     end
-    table.insert(items, {
-      fixtureId = item.fixtureId,
-      key = item.key,
-      payload = read_string(item.key) or null_value(),
-      metadata = expected_metadata
-    })
+    -- HEAD/DESK validate every immutable descriptor and its sidecar metadata,
+    -- but do not return or deserialize the player payload. FULL is the only
+    -- mode that pays the item-body read cost.
+    if mode ~= "HEAD" and mode ~= "DESK" then
+      table.insert(items, {
+        fixtureId = item.fixtureId,
+        key = item.key,
+        payload = read_string(item.key) or null_value(),
+        metadata = expected_metadata
+      })
+    end
   end
   return { publication = publication, manifest = manifest or null_value(), items = items }
 end
@@ -1635,21 +1637,6 @@ const parsePostgresDetailMetadata = (
 	return { publication, rowCount, bytes, checksum };
 };
 
-const buildPostgresDetailMetadata = (
-	row: unknown,
-	season: string,
-	eventId: number
-): MatchDetailCandidate | null => {
-	const metadata = parsePostgresDetailMetadata(row, season, eventId);
-	if (!metadata) return null;
-	return {
-		publication: metadata.publication,
-		fixtures: [],
-		payloadLoaded: false,
-		servedFrom: "POSTGRES_CHECKPOINT",
-	};
-};
-
 const buildPostgresDetail = (
 	row: unknown,
 	season: string,
@@ -1750,10 +1737,7 @@ const readPostgresCheckpoint = async (
 			return {
 				eventId: selectedEventId,
 				desk,
-				detail:
-					mode === "FULL"
-						? buildPostgresDetail(row.detail, season, selectedEventId)
-						: buildPostgresDetailMetadata(row.detail, season, selectedEventId),
+				detail: mode === "FULL" ? buildPostgresDetail(row.detail, season, selectedEventId) : null,
 			};
 		})
 		.catch((error) => {

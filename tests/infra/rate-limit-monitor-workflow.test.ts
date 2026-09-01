@@ -10,6 +10,7 @@ describe("rate-limit monitor workflow", () => {
 		);
 		expect(workflow).toContain(".live.rateLimitTelemetryOverflows == 0");
 		expect(workflow).toContain(".live.rateLimitTelemetryPersistenceFailures == 0");
+		expect(workflow).toContain(".live.rateLimitTelemetryDirtyWindows == 0");
 		expect(workflow).toContain(".recent.summary.totalDecisions > 0");
 		expect(workflow).toContain(".live.rateLimitStorageFailures == 0");
 		expect(workflow).toContain('.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0');
