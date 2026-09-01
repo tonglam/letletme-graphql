@@ -1055,6 +1055,32 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(0);
 	});
 
+	it("retains a complete Redis desk from a DESK read for process LKG", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				throw new Error("DESK LKG recovery must not touch PostgreSQL");
+			},
+		});
+
+		const first = await readLiveMatchday(context, 1, "DESK");
+		expect(first.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(first.desk?.payloadLoaded).toBe(true);
+
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const recovered = await readLiveMatchday(context, 1, "DESK");
+
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.desk?.fixtures).toHaveLength(2);
+		expect(databaseReads).toBe(0);
+	});
+
 	it("serves the cached active-event LKG during a Redis outage", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
@@ -1204,6 +1230,37 @@ describe("Live Matches V3 read path", () => {
 		expect(first.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 		expect(second.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(second.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(1);
+	});
+
+	it("retains complete PostgreSQL detail when metadata prefers a Redis manifest", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.desk.active = emptyDesk;
+		bundle.desk.previous = emptyDesk;
+		bundle.detail.previous = emptyDetail;
+		attachBundle(redis, bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [buildCheckpointRow()] };
+			},
+		});
+
+		const first = await readLiveMatchday(context, 1, "HEAD");
+		expect(first.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(first.detail?.payloadLoaded).toBe(false);
+
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const recovered = await readLiveMatchday(context, 1, "HEAD");
+
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.payloadLoaded).not.toBe(false);
+		expect(recovered.detail?.fixtures).toHaveLength(2);
 		expect(databaseReads).toBe(1);
 	});
 
@@ -1425,6 +1482,35 @@ describe("Live Matches V3 read path", () => {
 		);
 
 		expect(databaseReads).toBe(LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET);
+	});
+
+	it("does not let explicit miss probes exhaust active-event recovery", async () => {
+		const redis = new TestRedis();
+		const activeBundle = structuredClone(buildBundle({ eventId: 1 }).bundle);
+		activeBundle.desk.active = emptyDesk;
+		activeBundle.desk.previous = emptyDesk;
+		activeBundle.detail.active = emptyDetail;
+		activeBundle.detail.previous = emptyDetail;
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async () =>
+			JSON.stringify(activeBundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return databaseReads > LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET
+					? { rows: [buildCheckpointRow()] }
+					: { rows: [] };
+			},
+		});
+
+		for (let eventId = 2; eventId <= LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET + 1; eventId += 1) {
+			await readLiveMatchday(context, eventId);
+		}
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseReads).toBe(LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET + 1);
 	});
 
 	it("serves an exact self-contained PostgreSQL checkpoint when Redis is unavailable", async () => {

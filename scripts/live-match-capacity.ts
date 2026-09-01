@@ -740,6 +740,22 @@ function metricValue(text: string, metric: string, requiredLabel: string): numbe
 	return null;
 }
 
+function metricSum(text: string, metric: string, requiredLabel: string): number | null {
+	let matched = false;
+	let total = 0;
+	for (const line of text.split("\n")) {
+		const match = line.match(/^([A-Za-z_:][A-Za-z0-9_:]*)(\{([^}]*)\})?\s+([-+0-9.eE]+)$/);
+		if (!match || match[1] !== metric) continue;
+		const labels = match[3] ?? "";
+		if (!labels.includes(requiredLabel)) continue;
+		const value = Number(match[4]);
+		if (!Number.isFinite(value)) continue;
+		matched = true;
+		total += value;
+	}
+	return matched ? total : null;
+}
+
 async function collectMetrics(): Promise<MetricObservation | null> {
 	const metricsUrl = process.env.LIVE_MATCH_LOAD_METRICS_URL?.trim();
 	if (!metricsUrl) return null;
@@ -757,7 +773,7 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 		observation = {
 			at: new Date().toISOString(),
 			poolWaiting: metricValue(text, "postgres_pool_clients", 'state="waiting"'),
-			globalDenied: metricValue(
+			globalDenied: metricSum(
 				text,
 				"graphql_rate_limit_v3_decisions_total",
 				'scope="global",outcome="denied"'

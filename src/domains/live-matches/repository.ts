@@ -1530,7 +1530,7 @@ const rememberScopedEventCheckpointCheck = (
 	processEventCheckedAt.set(key, { checkedAt, failed });
 };
 
-const reserveScopedEventCheckpointBudget = (season: string, now = Date.now()): boolean => {
+const reserveExplicitEventCheckpointBudget = (season: string, now = Date.now()): boolean => {
 	const budget = processEventCheckpointBudget.get(season);
 	if (!budget) {
 		processEventCheckpointBudget.set(season, { windowStartedAt: now, attempts: 1 });
@@ -1738,20 +1738,24 @@ export const readLiveMatchday = async (
 		scopedPostgresAttempted = true;
 		postgresReadFailed = recentScopedCheck.failed;
 	}
-	if (needsPostgres && !scopedPostgresAttempted && recentScopedCheck === null) {
-		if (reserveScopedEventCheckpointBudget(season)) {
-			postgres = await readPostgresCheckpoint(
-				context,
-				context.currentSeason.seasonId,
-				season,
-				selectedEventId
-			);
-			postgresReadFailed = postgres === null;
-			if (detailNeedsPostgres && effectiveDesk !== null && postgres?.detail === null) {
-				rememberMissingDetailCheckpoint(season, selectedEventId, effectiveDesk);
-			}
-			rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
+	const explicitEventMiss = requested !== undefined && effectiveDesk === null;
+	const shouldAttemptScopedPostgres =
+		needsPostgres &&
+		!scopedPostgresAttempted &&
+		recentScopedCheck === null &&
+		(!explicitEventMiss || reserveExplicitEventCheckpointBudget(season));
+	if (shouldAttemptScopedPostgres) {
+		postgres = await readPostgresCheckpoint(
+			context,
+			context.currentSeason.seasonId,
+			season,
+			selectedEventId
+		);
+		postgresReadFailed = postgres === null;
+		if (detailNeedsPostgres && effectiveDesk !== null && postgres?.detail === null) {
+			rememberMissingDetailCheckpoint(season, selectedEventId, effectiveDesk);
 		}
+		rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
 	}
 
 	if (effectiveDesk === null) effectiveDesk = postgres?.desk ?? null;
@@ -1807,12 +1811,15 @@ export const readLiveMatchday = async (
 	// metadata as the future player-detail LKG.
 	const completePostgresDesk =
 		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT" && effectiveDesk.payloadLoaded !== false;
+	const completeDeskForLkg = effectiveDesk.payloadLoaded === false ? null : effectiveDesk;
 	if (
-		(mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) ||
-		completePostgresDesk
+		completeDeskForLkg !== null &&
+		(mode === "DESK" ||
+			(mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) ||
+			completePostgresDesk)
 	) {
 		rememberLkg(season, selectedEventId, {
-			desk: effectiveDesk,
+			desk: completeDeskForLkg,
 			detail: completeDetailForLkg,
 		});
 	}
