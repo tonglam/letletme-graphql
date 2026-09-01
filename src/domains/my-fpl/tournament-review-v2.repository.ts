@@ -81,6 +81,7 @@ export type MyTournamentSeasonSection = {
 		sourceRows: unknown[];
 		canonicalRows: unknown[];
 		chunkHashes: string[];
+		chunkLengths: number[];
 	};
 };
 
@@ -378,6 +379,8 @@ type PublicationRow = {
 	published_at: Date | string;
 	correction_change_id?: string | null;
 	finalized_event_ids?: unknown;
+	/** Internal producer chunk rows retained only while building a cache witness. */
+	__chunkRows?: PublicationChunkRow[];
 };
 
 type PublicationChunkRow = {
@@ -1982,11 +1985,35 @@ function manifestSectionChunkHashes(value: unknown): ReviewSectionChunkHashMap |
 	return output;
 }
 
-function chunkHashesForRows(rows: readonly unknown[]): string[] {
-	if (rows.length === 0) return [postgresJsonbContentHash([])];
-	const hashes: string[] = [];
+function defaultChunkLengths(rows: readonly unknown[]): number[] {
+	if (rows.length === 0) return [0];
+	const lengths: number[] = [];
 	for (let offset = 0; offset < rows.length; offset += 100) {
-		hashes.push(postgresJsonbContentHash(rows.slice(offset, offset + 100)));
+		lengths.push(Math.min(100, rows.length - offset));
+	}
+	return lengths;
+}
+
+function chunkHashesForRows(
+	rows: readonly unknown[],
+	chunkLengths: readonly number[] = defaultChunkLengths(rows)
+): string[] {
+	if (
+		chunkLengths.length === 0 ||
+		chunkLengths.some((length) => !Number.isSafeInteger(length) || length < 0 || length > 100) ||
+		(chunkLengths.length !== 1 && chunkLengths.some((length) => length === 0)) ||
+		chunkLengths.reduce((total, length) => total + length, 0) !== rows.length
+	) {
+		throw integrityError("Review publication chunk lengths are invalid");
+	}
+	if (rows.length === 0 && chunkLengths.length !== 1) {
+		throw integrityError("Review empty section chunk lengths are invalid");
+	}
+	const hashes: string[] = [];
+	let offset = 0;
+	for (const length of chunkLengths) {
+		hashes.push(postgresJsonbContentHash(rows.slice(offset, offset + length)));
+		offset += length;
 	}
 	return hashes;
 }
@@ -2171,6 +2198,7 @@ async function materializePublicationRow(
 	);
 	return {
 		...row,
+		__chunkRows: chunkResult.rows,
 		payload: materializeReviewChunks(row.payload, chunkResult.rows),
 	};
 }
@@ -3215,6 +3243,31 @@ type SeasonSectionCacheExpectation = {
 	sectionChunkHashes: string[] | null;
 };
 
+/** Rebuild the public section rows from the authenticated producer rows. A
+ * cached value is untrusted JSON; retaining a second, attacker-controlled
+ * canonicalRows array as the only comparison target would let a corrupt cache
+ * validate itself. */
+function canonicalRowsFromSource(
+	section: MyTournamentReviewSeasonSection,
+	sourceRows: readonly unknown[]
+): unknown[] {
+	if (section === "POINTS_STANDINGS" || section === "POINTS_TRAJECTORIES") {
+		return mapPointsRows(sourceRows).map((item) => ({
+			...item,
+			grossPoints: item.seasonGrossPoints,
+			transferCost: seasonTransferCost(item),
+			netPoints: item.seasonNetPoints,
+		}));
+	}
+	if (section === "H2H_FIXTURES") {
+		return mapH2H({ matches: sourceRows, standings: [] }, true, false).matches;
+	}
+	if (section === "H2H_STANDINGS") {
+		return mapH2H({ matches: [], standings: sourceRows }, true, false).standings;
+	}
+	return mapKnockout({ matches: sourceRows });
+}
+
 function seasonSectionCache(
 	value: unknown,
 	expected: SeasonSectionCacheExpectation
@@ -3281,17 +3334,28 @@ function seasonSectionCache(
 		!isRecord(sectionWitness) ||
 		!Array.isArray(sectionWitness.sourceRows) ||
 		!Array.isArray(sectionWitness.canonicalRows) ||
-		!Array.isArray(sectionWitness.chunkHashes)
+		!Array.isArray(sectionWitness.chunkHashes) ||
+		!Array.isArray(sectionWitness.chunkLengths)
 	) {
 		return false;
 	}
 	const sourceRows = sectionWitness.sourceRows as unknown[];
 	const canonicalRows = sectionWitness.canonicalRows as unknown[];
 	const witnessChunkHashes = sectionWitness.chunkHashes as unknown[];
-	const computedChunkHashes = chunkHashesForRows(sourceRows);
+	const witnessChunkLengths = sectionWitness.chunkLengths as unknown[];
+	if (!witnessChunkLengths.every((length) => Number.isSafeInteger(length))) return false;
+	let computedChunkHashes: string[];
+	let sourceCanonicalRows: unknown[];
+	try {
+		computedChunkHashes = chunkHashesForRows(sourceRows, witnessChunkLengths as number[]);
+		sourceCanonicalRows = canonicalRowsFromSource(expected.section, sourceRows);
+	} catch {
+		return false;
+	}
 	const expectedChunkHashes = expected.sectionChunkHashes;
 	if (
 		!witnessChunkHashes.every((hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)) ||
+		witnessChunkLengths.length !== witnessChunkHashes.length ||
 		witnessChunkHashes.length !== computedChunkHashes.length ||
 		!witnessChunkHashes.every((hash, index) => hash === computedChunkHashes[index]) ||
 		(expectedChunkHashes !== null &&
@@ -3315,7 +3379,9 @@ function seasonSectionCache(
 	const expectedRowCount =
 		expected.section === "H2H_STANDINGS" ? expected.readySubjectCount : expected.rowCount;
 	if (
-		canonicalRows.length !== expectedRowCount ||
+		sourceCanonicalRows.length !== expectedRowCount ||
+		canonicalRows.length !== sourceCanonicalRows.length ||
+		postgresJsonbContentHash(canonicalRows) !== postgresJsonbContentHash(sourceCanonicalRows) ||
 		pageOffset < 0 ||
 		pageOffset + pageRows.length > canonicalRows.length ||
 		postgresJsonbContentHash(pageRows) !==
@@ -3782,7 +3848,8 @@ function mapH2HSide(value: unknown): MyTournamentReviewH2HSide | null {
 
 function mapH2H(
 	value: unknown,
-	allowRepeatedParticipants = false
+	allowRepeatedParticipants = false,
+	validateCoverage = true
 ): {
 	matches: MyTournamentReviewH2HMatch[];
 	standings: MyTournamentReviewH2HStanding[];
@@ -3904,9 +3971,13 @@ function mapH2H(
 				};
 			})
 		: [];
-	if (new Set(standings.map((standing) => standing.entryId)).size !== standings.length) {
+	if (
+		validateCoverage &&
+		new Set(standings.map((standing) => standing.entryId)).size !== standings.length
+	) {
 		throw integrityError("Review H2H standings contain duplicate entries");
 	}
+	if (!validateCoverage) return { matches, standings };
 	const standingIdentities = new Set(
 		standings.map((standing) => `${standing.groupId}:${standing.entryId}`)
 	);
@@ -4025,6 +4096,7 @@ type SeasonSectionWitness = {
 	sourceRows: unknown[];
 	canonicalRows: unknown[];
 	chunkHashes: string[];
+	chunkLengths: number[];
 };
 
 /** Build the private cache witness from the trusted, materialized publication.
@@ -4034,7 +4106,8 @@ type SeasonSectionWitness = {
  * producer chunk. */
 function seasonSectionWitness(
 	payload: unknown,
-	section: MyTournamentReviewSeasonSection
+	section: MyTournamentReviewSeasonSection,
+	persistedChunks: readonly PublicationChunkRow[] = []
 ): SeasonSectionWitness | null {
 	if (!isRecord(payload)) return null;
 	let sourceRows: unknown[];
@@ -4064,10 +4137,27 @@ function seasonSectionWitness(
 		sourceRows = knockout.matches;
 		canonicalRows = mapKnockout(payload.knockout);
 	}
+	const sectionChunks = persistedChunks
+		.filter((chunk) => chunk.section_key === section)
+		.sort((left, right) => Number(left.chunk_index) - Number(right.chunk_index));
+	const chunkLengths = sectionChunks.length
+		? sectionChunks.map((chunk) => Number(chunk.item_count))
+		: defaultChunkLengths(sourceRows);
+	const chunkHashes = sectionChunks.length
+		? sectionChunks.map((chunk) => String(chunk.chunk_sha256))
+		: chunkHashesForRows(sourceRows, chunkLengths);
+	const computedChunkHashes = chunkHashesForRows(sourceRows, chunkLengths);
+	if (
+		chunkHashes.length !== chunkLengths.length ||
+		chunkHashes.some((hash, index) => hash !== computedChunkHashes[index])
+	) {
+		throw integrityError("Review phase section chunk witness does not match its materialized rows");
+	}
 	return {
 		sourceRows,
 		canonicalRows,
-		chunkHashes: chunkHashesForRows(sourceRows),
+		chunkHashes,
+		chunkLengths,
 	};
 }
 
@@ -4269,17 +4359,33 @@ function h2hFromPayload(
 		nextCursor: string | null;
 		hasNextPage: boolean;
 	} = { items: [], nextCursor: null, hasNextPage: false };
-	// A section request has one pagination stream. Do not pass the shared
-	// continuation offset through the unrequested collection: its empty array
-	// would otherwise reject every H2H second page as out of range.
+	// A section request has one pagination stream. In the combined Gameweek
+	// shape both collections share the same cursor, so bind the offset to the
+	// longer collection; a shorter collection contributes an empty page instead
+	// of rejecting a valid continuation past its own length.
+	const sharedPageBound = Math.max(selectedMatches.length, selectedStandings.length);
 	const page =
 		section === "H2H_STANDINGS"
 			? emptyMatchPage
-			: pageSlice(selectedMatches, first, cursor, String(row.revision), cursorScope);
+			: pageSlice(
+					selectedMatches,
+					first,
+					cursor,
+					String(row.revision),
+					cursorScope,
+					section === undefined ? sharedPageBound : selectedMatches.length
+				);
 	const standingsPage =
 		section === "H2H_FIXTURES"
 			? emptyStandingPage
-			: pageSlice(selectedStandings, first, cursor, String(row.revision), cursorScope);
+			: pageSlice(
+					selectedStandings,
+					first,
+					cursor,
+					String(row.revision),
+					cursorScope,
+					section === undefined ? sharedPageBound : selectedStandings.length
+				);
 	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
 	const matchParticipantIdentities = new Set<string>();
 	for (const match of source.matches) {
@@ -4375,6 +4481,93 @@ function knockoutFromPayload(
 			pageOffset: cursor?.offset ?? 0,
 			pageMatchIdentities: page.items.map((match) => `${match.matchId}:${match.playAgainstId}`),
 		},
+	};
+}
+
+/** Slice a validated full section. The Redis entry is intentionally shared by
+ * all page sizes/cursors; only this returned object is page-specific. */
+function sliceSeasonSection(
+	full: MyTournamentSeasonSection,
+	section: MyTournamentReviewSeasonSection,
+	first: number,
+	cursor: ReviewCursor | null,
+	cursorScope: string
+): MyTournamentSeasonSection {
+	const pageOffset = cursor?.offset ?? 0;
+	let points = full.points;
+	let h2h = full.h2h;
+	let knockout = full.knockout;
+	let pageInfo: MyTournamentSeasonSection["pageInfo"];
+	if (section === "POINTS_STANDINGS" || section === "POINTS_TRAJECTORIES") {
+		if (!full.points) throw integrityError("Review full points section is missing");
+		const page = pageSlice(full.points.rows, first, cursor, full.revision, cursorScope);
+		points = {
+			...full.points,
+			rows: page.items,
+			nextCursor: page.nextCursor,
+			hasNextPage: page.hasNextPage,
+			aggregateWitness: {
+				...full.points.aggregateWitness,
+				pageOffset,
+				pageLength: page.items.length,
+			},
+		};
+		pageInfo = { hasNextPage: page.hasNextPage, endCursor: page.nextCursor };
+	} else if (section === "H2H_STANDINGS" || section === "H2H_FIXTURES") {
+		if (!full.h2h) throw integrityError("Review full H2H section is missing");
+		const matchPage =
+			section === "H2H_STANDINGS"
+				? { items: [], nextCursor: null, hasNextPage: false }
+				: pageSlice(full.h2h.matches, first, cursor, full.revision, cursorScope);
+		const standingPage =
+			section === "H2H_FIXTURES"
+				? { items: [], nextCursor: null, hasNextPage: false }
+				: pageSlice(full.h2h.standings, first, cursor, full.revision, cursorScope);
+		const pageHasNext = matchPage.hasNextPage || standingPage.hasNextPage;
+		const pageMatches = matchPage.items as MyTournamentReviewH2HMatch[];
+		const pageStandings = standingPage.items as MyTournamentReviewH2HStanding[];
+		h2h = {
+			...full.h2h,
+			matches: pageMatches,
+			standings: pageStandings,
+			nextCursor: matchPage.hasNextPage ? matchPage.nextCursor : standingPage.nextCursor,
+			hasNextPage: pageHasNext,
+			coverageWitness: {
+				...full.h2h.coverageWitness,
+				pageOffset,
+				pageMatchParticipantIdentities: pageMatches.flatMap((match) =>
+					[match.home, match.away]
+						.filter((side): side is MyTournamentReviewH2HSide => side !== null && !side.isAverage)
+						.map((side) => `${match.groupId}:${side.entryId}`)
+				),
+				pageStandingIdentities: pageStandings.map(
+					(standing) => `${standing.groupId}:${standing.entryId}`
+				),
+			},
+		};
+		pageInfo = { hasNextPage: pageHasNext, endCursor: h2h.nextCursor };
+	} else {
+		if (!full.knockout) throw integrityError("Review full knockout section is missing");
+		const page = pageSlice(full.knockout.matches, first, cursor, full.revision, cursorScope);
+		knockout = {
+			...full.knockout,
+			matches: page.items,
+			nextCursor: page.nextCursor,
+			hasNextPage: page.hasNextPage,
+			coverageWitness: {
+				...full.knockout.coverageWitness,
+				pageOffset,
+				pageMatchIdentities: page.items.map((match) => `${match.matchId}:${match.playAgainstId}`),
+			},
+		};
+		pageInfo = { hasNextPage: page.hasNextPage, endCursor: page.nextCursor };
+	}
+	return {
+		...full,
+		points,
+		h2h,
+		knockout,
+		pageInfo,
 	};
 }
 
@@ -5130,7 +5323,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		}
 		const key = gqlCacheKey(
 			context,
-			`my-tournament-review-v2.1:season-section:${args.tournamentId}:${args.throughEventId}:${phaseId}:${requestedSection}:${expectedCache.revision}:${expectedCache.semanticSha256}:${first}:${cursor?.canonical ?? ""}`,
+			`my-tournament-review-v2.1:season-section-full:${args.tournamentId}:${args.throughEventId}:${phaseId}:${requestedSection}:${expectedCache.revision}:${expectedCache.semanticSha256}`,
 			expectedCache.semanticSha256
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
@@ -5138,7 +5331,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				seasonSectionCache(candidate, expectedCache)
 			)
 		);
-		if (cached) return cached;
+		if (cached)
+			return sliceSeasonSection(cached, requestedSection, first, cursor, sectionCursorScope);
 		const headRow = await context.database.query<PublicationRow>(
 			MY_TOURNAMENT_REVIEW_PUBLICATION_SQL,
 			[
@@ -5162,8 +5356,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			expectedFormat === "POINTS"
 				? pointsFromPayload(
 						materializedRow,
-						first,
-						cursor,
+						Number.MAX_SAFE_INTEGER,
+						null,
 						"SEASON",
 						expectedFormat === "POINTS"
 							? (requestedSection as "POINTS_STANDINGS" | "POINTS_TRAJECTORIES")
@@ -5177,19 +5371,29 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				: undefined;
 		const h2h =
 			expectedFormat === "H2H"
-				? h2hFromPayload(materializedRow, first, cursor, h2hSection, sectionCursorScope, true)
+				? h2hFromPayload(
+						materializedRow,
+						Number.MAX_SAFE_INTEGER,
+						null,
+						h2hSection,
+						sectionCursorScope,
+						true
+					)
 				: null;
 		const knockout =
 			expectedFormat === "KNOCKOUT"
-				? knockoutFromPayload(materializedRow, first, cursor, sectionCursorScope)
+				? knockoutFromPayload(materializedRow, Number.MAX_SAFE_INTEGER, null, sectionCursorScope)
 				: null;
 		if (points === null && h2h === null && knockout === null) {
 			throw new GraphQLError("Review section is not available for this phase", {
 				extensions: { code: "BAD_USER_INPUT" },
 			});
 		}
-		const page = points ?? h2h ?? knockout;
-		const sectionWitness = seasonSectionWitness(materializedRow.payload, requestedSection);
+		const sectionWitness = seasonSectionWitness(
+			materializedRow.payload,
+			requestedSection,
+			materializedRow.__chunkRows
+		);
 		if (!sectionWitness) {
 			throw integrityError("Review phase section witness is missing");
 		}
@@ -5202,7 +5406,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		) {
 			throw integrityError("Review phase section chunk witness does not match its manifest");
 		}
-		const result: MyTournamentSeasonSection = {
+		const fullResult: MyTournamentSeasonSection = {
 			state: "READY",
 			tournamentId: args.tournamentId,
 			throughEventId: args.throughEventId,
@@ -5214,13 +5418,13 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			h2h,
 			knockout,
 			pageInfo: {
-				hasNextPage: Boolean(page?.hasNextPage),
-				endCursor: page?.nextCursor ?? null,
+				hasNextPage: false,
+				endCursor: null,
 			},
 			__sectionWitness: sectionWitness,
 		};
-		await writeJsonQueryCache(context, key, result, REVIEW_CACHE_TTL_SECONDS);
-		return result;
+		await writeJsonQueryCache(context, key, fullResult, REVIEW_CACHE_TTL_SECONDS);
+		return sliceSeasonSection(fullResult, requestedSection, first, cursor, sectionCursorScope);
 	},
 
 	async loadStatus(context, tournamentId) {
