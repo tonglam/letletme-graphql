@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import type Redis from "ioredis";
 import {
+	rateLimitAggregateDate,
 	rateLimitAggregateMinute,
 	rateLimitFingerprint,
 	rateLimitRecentAggregateKey,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
 	rateLimitTelemetryOverflowKey,
+	rateLimitTelemetryPersistenceFailureKey,
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
@@ -36,6 +38,9 @@ describe("rate-limit observability privacy", () => {
 		);
 		expect(rateLimitTelemetryOverflowKey("2026-08-20", "graphql-v4")).toBe(
 			"llm:gql:rate-limit:v4:overflow:2026-08-20"
+		);
+		expect(rateLimitTelemetryPersistenceFailureKey("2026-08-20", "graphql-v4")).toBe(
+			"llm:gql:rate-limit:v4:persistence-failure:2026-08-20"
 		);
 	});
 
@@ -241,6 +246,8 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 	});
 
 	it("fails shutdown when telemetry persistence rejects before the bound", async () => {
+		let markerArguments: unknown[] | null = null;
+		const date = new Date("2026-08-20T00:00:00.000Z");
 		const pipeline = {
 			hincrby: () => pipeline,
 			expire: () => pipeline,
@@ -250,17 +257,27 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 			},
 		};
 		enqueueRateLimitAggregate({
-			redis: { pipeline: () => pipeline } as unknown as Redis,
+			redis: {
+				pipeline: () => pipeline,
+				set: (...args: unknown[]) => {
+					markerArguments = args;
+					return Promise.resolve("OK");
+				},
+			} as unknown as Redis,
 			trafficClass: "web_rsc",
 			workload: "fixtures",
 			scope: "workload",
 			outcome: "allowed",
 			fingerprint: "abc123abc123",
+			date,
 			logger: { warn: () => undefined } as never,
 		});
 
 		await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
 			"rate-limit telemetry persistence failed"
+		);
+		expect(markerArguments?.[0] as string | undefined).toBe(
+			rateLimitTelemetryPersistenceFailureKey(rateLimitAggregateDate(date))
 		);
 	});
 

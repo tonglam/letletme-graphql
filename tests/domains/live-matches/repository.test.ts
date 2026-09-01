@@ -933,7 +933,7 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
-	it("seeds the active-event authority after an explicit current event read", async () => {
+	it("does not seed the active-event authority after an explicit event read", async () => {
 		const redis = new TestRedis();
 		const bundle = { ...buildBundle({ eventId: 2 }).bundle, eventId: 2 };
 		let available = true;
@@ -947,9 +947,9 @@ describe("Live Matches V3 read path", () => {
 		available = false;
 
 		const fallback = await readLiveMatchday(context);
-		expect(fallback.eventId).toBe(2);
-		expect(fallback.desk?.servedFrom).toBe("PROCESS_LKG");
-		expect(fallback.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(fallback.eventId).toBeNull();
+		expect(fallback.desk).toBeNull();
+		expect(fallback.detail).toBeNull();
 	});
 
 	it("requires detail coverage for every started fixture", async () => {

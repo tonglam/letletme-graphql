@@ -56,14 +56,6 @@ const positiveInteger = (name: string, fallback: number): number => {
 	return value;
 };
 
-const nonNegativeInteger = (name: string, fallback: number): number => {
-	const raw = process.env[name]?.trim();
-	if (!raw) return fallback;
-	const value = Number(raw);
-	if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be non-negative`);
-	return value;
-};
-
 const option = (name: string): string | undefined => {
 	const index = Bun.argv.indexOf(name);
 	return index >= 0 ? Bun.argv[index + 1]?.trim() : undefined;
@@ -132,7 +124,6 @@ if (stages.length === 0 || stages.some((value) => value > 300)) {
 	throw new Error("LIVE_MATCH_LOAD_STAGES must contain positive integers up to 300");
 }
 const stageSeconds = positiveInteger("LIVE_MATCH_LOAD_STAGE_SECONDS", 900);
-const thinkMs = nonNegativeInteger("LIVE_MATCH_LOAD_THINK_MS", 100);
 const timeoutMs = positiveInteger("LIVE_MATCH_LOAD_TIMEOUT_MS", 10_000);
 const metricsIntervalMs = positiveInteger("LIVE_MATCH_LOAD_METRICS_INTERVAL_MS", 5_000);
 const requestedRunId = process.env.LIVE_MATCH_LOAD_RUN_ID?.trim();
@@ -971,46 +962,54 @@ class ResponseAccumulator {
 const accumulatorsByStage = new Map(stages.map((stage) => [stage, new ResponseAccumulator()]));
 const overallAccumulator = new ResponseAccumulator();
 const metricObservations: MetricObservation[] = [];
+const inFlightByStage = new Map<number, number>();
+const maxInFlightByStage = new Map<number, number>();
 let requestCount = 0;
 
 async function runOne(stage: number): Promise<void> {
-	const response = await requestOnce();
-	let parsed: unknown = null;
-	let parseError: string | null = response.decodeError;
-	if (!parseError) {
-		try {
-			parsed = JSON.parse(response.decoded.toString("utf8")) as unknown;
-		} catch (error) {
-			parseError = error instanceof Error ? error.message : String(error);
-		}
-	}
-	const semanticValidationError = parseError === null ? semanticError(parsed) : null;
-	const sample: ResponseSample = {
-		stage,
-		status: response.status,
-		ttfbMs: response.ttfbMs,
-		bodyDownloadMs: response.bodyDownloadMs,
-		durationMs: response.durationMs,
-		encodedBytes: response.encoded.byteLength,
-		decodedBytes: response.decoded.byteLength,
-		semanticOk: parseError === null && semanticValidationError === null,
-		errorCode: parseError ?? semanticValidationError,
-		globalRateLimit: response.globalRateLimit,
-		rateLimitScope: response.rateLimitScope,
-	};
-	requestCount += 1;
 	const accumulator = accumulatorsByStage.get(stage);
 	if (!accumulator) throw new Error(`missing accumulator for stage ${stage}`);
-	accumulator.record(sample);
-	overallAccumulator.record(sample);
+	const inFlight = (inFlightByStage.get(stage) ?? 0) + 1;
+	inFlightByStage.set(stage, inFlight);
+	maxInFlightByStage.set(stage, Math.max(maxInFlightByStage.get(stage) ?? 0, inFlight));
+	try {
+		const response = await requestOnce();
+		let parsed: unknown = null;
+		let parseError: string | null = response.decodeError;
+		if (!parseError) {
+			try {
+				parsed = JSON.parse(response.decoded.toString("utf8")) as unknown;
+			} catch (error) {
+				parseError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const semanticValidationError = parseError === null ? semanticError(parsed) : null;
+		const sample: ResponseSample = {
+			stage,
+			status: response.status,
+			ttfbMs: response.ttfbMs,
+			bodyDownloadMs: response.bodyDownloadMs,
+			durationMs: response.durationMs,
+			encodedBytes: response.encoded.byteLength,
+			decodedBytes: response.decoded.byteLength,
+			semanticOk: parseError === null && semanticValidationError === null,
+			errorCode: parseError ?? semanticValidationError,
+			globalRateLimit: response.globalRateLimit,
+			rateLimitScope: response.rateLimitScope,
+		};
+		requestCount += 1;
+		accumulator.record(sample);
+		overallAccumulator.record(sample);
+	} finally {
+		const remaining = Math.max(0, (inFlightByStage.get(stage) ?? 1) - 1);
+		if (remaining === 0) inFlightByStage.delete(stage);
+		else inFlightByStage.set(stage, remaining);
+	}
 }
 
 async function runWorker(stage: number, deadline: number): Promise<void> {
 	while (Date.now() < deadline) {
 		await runOne(stage);
-		if (thinkMs > 0) {
-			await new Promise((resolve) => setTimeout(resolve, thinkMs));
-		}
 	}
 }
 
@@ -1188,6 +1187,7 @@ if (!stageExecutionAborted && deploymentIdentityFailure === null) {
 const stageReports = stages.map((stage) => ({
 	concurrency: stage,
 	durationSeconds: stageSeconds,
+	maxInFlight: maxInFlightByStage.get(stage) ?? 0,
 	...accumulatorsByStage.get(stage)!.report(),
 }));
 const overall = overallAccumulator.report();
@@ -1249,6 +1249,10 @@ if (poolWaitEventObservationsComplete) {
 }
 const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
+	requiredStagesSustainedConcurrency: requiredCapacityStages.every((concurrency) => {
+		const report = stageReports.find((item) => item.concurrency === concurrency);
+		return report !== undefined && report.maxInFlight >= concurrency;
+	}),
 	requiredStagesHaveNoErrors: requiredStageHealth.every((stage) => stage.healthy),
 	requiredStageHealth,
 	stage300DurationSeconds: capacityStage?.durationSeconds ?? 0,
@@ -1292,6 +1296,7 @@ const capacityGate = {
 
 const capacityGatePassed = [
 	capacityGate.allRequiredStagesPresent,
+	capacityGate.requiredStagesSustainedConcurrency,
 	capacityGate.requiredStagesHaveNoErrors,
 	capacityGate.stage300DurationRequirementMet,
 	capacityGate.stage300P95Under800Ms,
@@ -1344,6 +1349,7 @@ const report = {
 	notes: [
 		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
 		"Warm HTTP/2 evidence records each peer maxConcurrentStreams and the summed effective capacity; the run fails before load if it cannot cover the requested stage concurrency.",
+		"Each stage keeps its target number of request workers active and immediately replaces every completed request; there is no think-time gap that lowers the advertised concurrency.",
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",

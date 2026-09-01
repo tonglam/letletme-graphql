@@ -1256,9 +1256,8 @@ const lkgKey = (season: string, eventId: number): string => `${season}:${eventId
 
 const rememberActiveEvent = (season: string, eventId: number): void => {
 	const current = processActiveEvent.get(season);
-	// Explicit historical reads must not move the active pointer backwards,
-	// but a valid explicit read of the current/future event should seed the
-	// eventless Redis-outage fallback for this process.
+	// Callers must invoke this only for an eventless pointer/checkpoint read;
+	// explicit event reads are intentionally excluded from this authority.
 	if (current === undefined || eventId >= current) processActiveEvent.set(season, eventId);
 };
 
@@ -2125,7 +2124,10 @@ export const readLiveMatchday = async (
 		postgresReadFailed,
 		redisRoundtrips,
 	};
-	rememberActiveEvent(season, selectedEventId);
+	// An explicit event read is scoped to the caller's requested event. It may
+	// populate that event's LKG, but it must not redefine the process-global
+	// active-event authority used by later eventless outage fallbacks.
+	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
 	if (mode === "HEAD" && !processLkg.has(scopedEventKey)) {
 		rememberMetadataLkg(season, selectedEventId, { desk: effectiveDesk, detail });
 	}

@@ -70,6 +70,12 @@ export const rateLimitTelemetryOverflowKey = (
 	policyVersion: GraphQLRateLimitPolicyVersion = "graphql-v3"
 ): string => `llm:gql:rate-limit:${policyNamespace(policyVersion)}:overflow:${date}`;
 
+/** Durable marker for aggregate telemetry persistence failures. */
+export const rateLimitTelemetryPersistenceFailureKey = (
+	date: string,
+	policyVersion: GraphQLRateLimitPolicyVersion = "graphql-v3"
+): string => `llm:gql:rate-limit:${policyNamespace(policyVersion)}:persistence-failure:${date}`;
+
 export type RateLimitReportSummary = {
 	totalDecisions: number;
 	v3Decisions: number;
@@ -277,7 +283,10 @@ const persistRateLimitAggregateBatch = async (
 				if (failure?.[0]) throw failure[0];
 			} catch (error) {
 				rememberTelemetryPersistenceFailure();
-				for (const record of group) failedPolicies.add(record.policyVersion);
+				for (const record of group) {
+					failedPolicies.add(record.policyVersion);
+					persistTelemetryPersistenceFailureMarker(record);
+				}
 				for (const policyVersion of failedPolicies) {
 					metrics.rateLimitStorageFailures.labels(`${policyVersion}-aggregate`, "open").inc();
 				}
@@ -353,6 +362,8 @@ let telemetryFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let telemetryFlushPromise: Promise<void> | null = null;
 const persistedOverflowMarkers = new Set<string>();
 const overflowMarkerFlights = new Map<string, Promise<void>>();
+const persistedTelemetryPersistenceFailureMarkers = new Set<string>();
+const telemetryPersistenceFailureMarkerFlights = new Map<string, Promise<void>>();
 let telemetryPersistenceFailure = false;
 
 const rememberTelemetryPersistenceFailure = (): void => {
@@ -391,6 +402,51 @@ const scheduleTelemetryFlush = (): void => {
 		telemetryFlushTimer = null;
 		void startTelemetryFlush();
 	}, RATE_LIMIT_TELEMETRY_FLUSH_INTERVAL_MS);
+};
+
+const persistTelemetryPersistenceFailureMarker = (record: RateLimitAggregateRecord): void => {
+	const key = rateLimitTelemetryPersistenceFailureKey(
+		rateLimitAggregateDate(record.date),
+		record.policyVersion
+	);
+	if (
+		persistedTelemetryPersistenceFailureMarkers.has(key) ||
+		telemetryPersistenceFailureMarkerFlights.has(key)
+	)
+		return;
+	let markerWrite: Promise<unknown>;
+	try {
+		markerWrite = record.redis.set(key, "1", "EX", RATE_LIMIT_AGGREGATE_RETENTION_SECONDS, "NX");
+	} catch (error: unknown) {
+		rememberTelemetryPersistenceFailure();
+		metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-aggregate`, "open").inc();
+		record.logger.warn(
+			{ err: error, policyVersion: record.policyVersion },
+			"Rate-limit telemetry persistence-failure marker unavailable"
+		);
+		return;
+	}
+	const flight = markerWrite
+		.then(() => {
+			if (persistedTelemetryPersistenceFailureMarkers.size >= 32) {
+				const oldest = persistedTelemetryPersistenceFailureMarkers.values().next().value;
+				if (oldest !== undefined) persistedTelemetryPersistenceFailureMarkers.delete(oldest);
+			}
+			persistedTelemetryPersistenceFailureMarkers.add(key);
+		})
+		.catch((error: unknown) => {
+			rememberTelemetryPersistenceFailure();
+			metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-aggregate`, "open").inc();
+			record.logger.warn(
+				{ err: error, policyVersion: record.policyVersion },
+				"Rate-limit telemetry persistence-failure marker unavailable"
+			);
+		})
+		.finally(() => {
+			telemetryPersistenceFailureMarkerFlights.delete(key);
+		});
+	telemetryPersistenceFailureMarkerFlights.set(key, flight);
+	void flight;
 };
 
 const persistOverflowMarker = (record: RateLimitAggregateRecord): void => {
@@ -481,6 +537,9 @@ export const flushRateLimitAggregateTelemetry = async (
 		// draining is not silently lost.
 		while (overflowMarkerFlights.size > 0) {
 			await Promise.allSettled([...overflowMarkerFlights.values()]);
+		}
+		while (telemetryPersistenceFailureMarkerFlights.size > 0) {
+			await Promise.allSettled([...telemetryPersistenceFailureMarkerFlights.values()]);
 		}
 		if (telemetryPersistenceFailure) {
 			throw new Error("rate-limit telemetry persistence failed");

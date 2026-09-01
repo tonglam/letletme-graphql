@@ -5,6 +5,7 @@ import {
 	rateLimitDeniedRankingKey,
 	rateLimitRecentAggregateKey,
 	rateLimitTelemetryOverflowKey,
+	rateLimitTelemetryPersistenceFailureKey,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
 	summarizeRateLimitTotals,
@@ -94,6 +95,8 @@ const readLiveRateLimitMetrics = async (
 	rateLimitStorageFailures: number;
 	rateLimitTelemetryOverflows: number;
 	persistedTelemetryOverflowDates: readonly string[];
+	rateLimitTelemetryPersistenceFailures: number;
+	persistedTelemetryPersistenceFailureDates: readonly string[];
 }> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
@@ -104,13 +107,21 @@ const readLiveRateLimitMetrics = async (
 		throw new Error(`Live metrics request failed with HTTP ${response.status}`);
 	}
 	const metricsText = await response.text();
-	const persistedTelemetryOverflowDates = (
-		await Promise.all(
-			dates.map(async (date) =>
-				(await redis.exists(rateLimitTelemetryOverflowKey(date, policyVersion))) > 0 ? date : null
-			)
-		)
-	).filter((date): date is string => date !== null);
+	const persistedMarkers = await Promise.all(
+		dates.map(async (date) => {
+			const [overflow, persistenceFailure] = await Promise.all([
+				redis.exists(rateLimitTelemetryOverflowKey(date, policyVersion)),
+				redis.exists(rateLimitTelemetryPersistenceFailureKey(date, policyVersion)),
+			]);
+			return { date, overflow: overflow > 0, persistenceFailure: persistenceFailure > 0 };
+		})
+	);
+	const persistedTelemetryOverflowDates = persistedMarkers
+		.filter((marker) => marker.overflow)
+		.map((marker) => marker.date);
+	const persistedTelemetryPersistenceFailureDates = persistedMarkers
+		.filter((marker) => marker.persistenceFailure)
+		.map((marker) => marker.date);
 	const liveTelemetryOverflows = parseRateLimitTelemetryOverflowTotal(metricsText);
 	return {
 		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
@@ -119,6 +130,8 @@ const readLiveRateLimitMetrics = async (
 			persistedTelemetryOverflowDates.length
 		),
 		persistedTelemetryOverflowDates,
+		rateLimitTelemetryPersistenceFailures: persistedTelemetryPersistenceFailureDates.length,
+		persistedTelemetryPersistenceFailureDates,
 	};
 };
 
@@ -244,7 +257,9 @@ try {
 			Math.max(gateSummary.interactiveDeniedRate, gateSummary.shadowInteractiveDeniedRate) >
 				options.failInteractiveRate) ||
 		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0)) ||
-		(options.includeLiveStorageFailures && live !== null && live.rateLimitTelemetryOverflows > 0)
+		(options.includeLiveStorageFailures &&
+			live !== null &&
+			(live.rateLimitTelemetryOverflows > 0 || live.rateLimitTelemetryPersistenceFailures > 0))
 	) {
 		process.exitCode = 1;
 	}
