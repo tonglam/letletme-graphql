@@ -45,6 +45,13 @@ export const assertTournamentInsightsReady = async (
 };
 
 export const tournamentsService = {
+	getTournamentInfoUncached(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<TournamentInfo | null> {
+		return tournamentsRepository.getTournamentInfoUncached(context, tournamentId);
+	},
+
 	getTournamentForMember(
 		context: GraphQLContext,
 		tournamentId: number,

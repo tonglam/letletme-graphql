@@ -11,6 +11,8 @@ import {
 	writeQueryCache,
 } from "../../infra/query-cache";
 import { stableStringify } from "../../infra/stringify";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import { LeagueType } from "../leagues/repository";
 
 export enum TournamentMode {
@@ -534,11 +536,13 @@ type DbOfficialH2HHistoryRow = {
 	home_player_name: string | null;
 	home_is_average: boolean;
 	home_net_points: number | null;
+	home_event_points: number | null;
 	away_entry_id: number | null;
 	away_entry_name: string | null;
 	away_player_name: string | null;
 	away_is_average: boolean;
 	away_net_points: number | null;
+	away_event_points: number | null;
 };
 
 export type DbTournamentBattleGroupResultRow = {
@@ -914,6 +918,119 @@ const TOURNAMENT_INFO_COLUMNS =
 
 const TOURNAMENT_VIEW_COLUMNS =
 	"tournament_id, event_id, entry_id, group_id, event_group_rank, event_points, event_cost, event_net_points, event_rank, overall_points, overall_rank, event_chip, captain_id, captain_points, team_value, bank, entry_name, player_name, _tournament_id, _tournament_name, _tournament_creator, _tournament_admin_entry_id, _tournament_league_id, _tournament_league_type, _tournament_total_team_num, _tournament_tournament_mode, _tournament_group_mode, _tournament_group_team_num, _tournament_group_num, _tournament_group_started_event_id, _tournament_group_ended_event_id, _tournament_group_auto_averages, _tournament_group_rounds, _tournament_group_play_against_num, _tournament_group_qualify_num, _tournament_knockout_mode, _tournament_knockout_team_num, _tournament_knockout_rounds, _tournament_knockout_event_num, _tournament_knockout_started_event_id, _tournament_knockout_ended_event_id, _tournament_knockout_play_against_num, _tournament_state, _tournament_created_at, _tournament_updated_at";
+
+/**
+ * Runtime SQL for the on-demand official H2H history operation. Keep the
+ * contract probe attached to this exact statement so schema drift cannot be
+ * hidden by a second, hand-maintained query.
+ */
+export const TOURNAMENT_OFFICIAL_H2H_HISTORY_SQL = `
+	WITH official_matches AS (
+		SELECT
+			battle.season_id,
+			battle.official_match_id,
+			battle.event_id,
+			battle.group_id,
+			battle.source_order,
+			'REGULAR'::text AS phase,
+			NULL::text AS knockout_name,
+			NULL::text AS tiebreak,
+			battle.is_bye,
+			battle.home_entry_id,
+			battle.home_is_average,
+			battle.home_net_points,
+			battle.away_entry_id,
+			battle.away_is_average,
+			battle.away_net_points
+		FROM competition.tournament_battle_group_results AS battle
+		WHERE battle.season_id = $1
+			AND battle.tournament_id = $2
+			AND battle.event_id <= $3
+			AND battle.official_match_id IS NOT NULL
+			AND battle.source_order IS NOT NULL
+			AND (battle.home_entry_id = $4 OR battle.away_entry_id = $4)
+		UNION ALL
+		SELECT
+			knockout.season_id,
+			knockout.official_match_id,
+			knockout.event_id,
+			0 AS group_id,
+			knockout.source_order,
+			'KNOCKOUT'::text AS phase,
+			knockout.knockout_name,
+			knockout.tiebreak,
+			(knockout.home_entry_id IS NULL OR knockout.away_entry_id IS NULL) AS is_bye,
+			knockout.home_entry_id,
+			false AS home_is_average,
+			knockout.home_net_points,
+			knockout.away_entry_id,
+			false AS away_is_average,
+			knockout.away_net_points
+		FROM competition.tournament_knockout_results AS knockout
+		WHERE knockout.season_id = $1
+			AND knockout.tournament_id = $2
+			AND knockout.event_id <= $3
+			AND knockout.official_match_id IS NOT NULL
+			AND knockout.source_order IS NOT NULL
+			AND (knockout.home_entry_id = $4 OR knockout.away_entry_id = $4)
+	)
+	SELECT
+		matches.*,
+		home_entry.entry_name AS home_entry_name,
+		home_entry.player_name AS home_player_name,
+		home_result.event_points AS home_event_points,
+		away_entry.entry_name AS away_entry_name,
+		away_entry.player_name AS away_player_name,
+		away_result.event_points AS away_event_points
+	FROM official_matches AS matches
+	LEFT JOIN competition.entries AS home_entry
+		ON home_entry.season_id = matches.season_id
+		AND home_entry.entry_id = matches.home_entry_id
+	LEFT JOIN competition.entries AS away_entry
+		ON away_entry.season_id = matches.season_id
+		AND away_entry.entry_id = matches.away_entry_id
+	LEFT JOIN competition.entry_event_results AS home_result
+		ON home_result.season_id = matches.season_id
+		AND home_result.entry_id = matches.home_entry_id
+		AND home_result.event_id = matches.event_id
+	LEFT JOIN competition.entry_event_results AS away_result
+		ON away_result.season_id = matches.season_id
+		AND away_result.entry_id = matches.away_entry_id
+		AND away_result.event_id = matches.event_id
+	ORDER BY matches.event_id ASC, matches.source_order ASC, matches.official_match_id ASC
+	LIMIT $5`;
+
+export const TOURNAMENT_OFFICIAL_H2H_HISTORY_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "tournaments.official-h2h-history",
+		sql: TOURNAMENT_OFFICIAL_H2H_HISTORY_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1, 1, 100],
+		resultTypes: [
+			{
+				relation: "competition.tournament_battle_group_results",
+				column: "official_match_id",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.tournament_knockout_results",
+				column: "official_match_id",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.entry_event_results",
+				column: "event_points",
+				pgType: "integer",
+			},
+			{
+				relation: "competition.entry_event_results",
+				column: "event_id",
+				pgType: "integer",
+			},
+			{ relation: "competition.entries", column: "entry_name", pgType: "text" },
+			{ relation: "competition.entries", column: "player_name", pgType: "text" },
+		],
+	},
+];
 
 const mapLeagueType = (type: string): LeagueType => {
 	return type === LeagueType.H2H ? LeagueType.H2H : LeagueType.CLASSIC;
@@ -1449,20 +1566,28 @@ const mapOfficialH2HHistorySide = (
 	entryName: string | null,
 	playerName: string | null,
 	isAverage: boolean,
-	netPoints: number | null
-): TournamentOfficialH2HHistorySide => ({
-	availability: netPoints === null ? "PENDING" : "READY",
-	entryId,
-	entryName: isAverage
-		? "Average Team"
-		: entryId === null
-			? "Bye"
-			: (entryName ?? `Entry ${entryId}`),
-	playerName: isAverage ? null : playerName,
-	isAverage,
-	points: netPoints,
-	netPoints,
-});
+	netPoints: number | null,
+	eventPoints: number | null,
+	isBye: boolean
+): TournamentOfficialH2HHistorySide => {
+	const isByePlaceholder = isBye && entryId === null && !isAverage;
+	const ready =
+		isByePlaceholder ||
+		(isAverage ? netPoints !== null : eventPoints !== null && netPoints !== null);
+	return {
+		availability: ready ? "READY" : "PENDING",
+		entryId,
+		entryName: isAverage
+			? "Average Team"
+			: entryId === null
+				? "Bye"
+				: (entryName ?? `Entry ${entryId}`),
+		playerName: isAverage ? null : playerName,
+		isAverage,
+		points: isByePlaceholder ? null : isAverage ? netPoints : eventPoints,
+		netPoints: isByePlaceholder ? null : netPoints,
+	};
+};
 
 export const mapTournamentOfficialH2HHistoryMatch = (
 	row: DbOfficialH2HHistoryRow
@@ -1472,14 +1597,18 @@ export const mapTournamentOfficialH2HHistoryMatch = (
 		row.home_entry_name,
 		row.home_player_name,
 		row.home_is_average,
-		row.home_net_points
+		row.home_net_points,
+		row.home_event_points,
+		row.is_bye
 	);
 	const away = mapOfficialH2HHistorySide(
 		row.away_entry_id,
 		row.away_entry_name,
 		row.away_player_name,
 		row.away_is_average,
-		row.away_net_points
+		row.away_net_points,
+		row.away_event_points,
+		row.is_bye
 	);
 	return {
 		officialMatchId: row.official_match_id,
@@ -1491,9 +1620,7 @@ export const mapTournamentOfficialH2HHistoryMatch = (
 		tiebreak: row.tiebreak,
 		isBye: row.is_bye,
 		availability:
-			row.is_bye || (home.availability === "READY" && away.availability === "READY")
-				? "READY"
-				: "PENDING",
+			home.availability === "READY" && away.availability === "READY" ? "READY" : "PENDING",
 		home,
 		away,
 	};
@@ -2802,70 +2929,7 @@ export const tournamentsRepository: TournamentsRepository = {
 
 		try {
 			const result = await context.database.query<DbOfficialH2HHistoryRow>(
-				`WITH official_matches AS (
-					SELECT
-						battle.season_id,
-						battle.official_match_id,
-						battle.event_id,
-						battle.group_id,
-						battle.source_order,
-						'REGULAR'::text AS phase,
-						NULL::text AS knockout_name,
-						NULL::text AS tiebreak,
-						battle.is_bye,
-						battle.home_entry_id,
-						battle.home_is_average,
-						battle.home_net_points,
-						battle.away_entry_id,
-						battle.away_is_average,
-						battle.away_net_points
-					FROM competition.tournament_battle_group_results AS battle
-					WHERE battle.season_id = $1
-						AND battle.tournament_id = $2
-						AND battle.event_id <= $3
-						AND battle.official_match_id IS NOT NULL
-						AND battle.source_order IS NOT NULL
-						AND (battle.home_entry_id = $4 OR battle.away_entry_id = $4)
-					UNION ALL
-					SELECT
-						knockout.season_id,
-						knockout.official_match_id,
-						knockout.event_id,
-						0 AS group_id,
-						knockout.source_order,
-						'KNOCKOUT'::text AS phase,
-						knockout.knockout_name,
-						knockout.tiebreak,
-						(knockout.home_entry_id IS NULL OR knockout.away_entry_id IS NULL) AS is_bye,
-						knockout.home_entry_id,
-						false AS home_is_average,
-						knockout.home_net_points,
-						knockout.away_entry_id,
-						false AS away_is_average,
-						knockout.away_net_points
-					FROM competition.tournament_knockout_results AS knockout
-					WHERE knockout.season_id = $1
-						AND knockout.tournament_id = $2
-						AND knockout.event_id <= $3
-						AND knockout.official_match_id IS NOT NULL
-						AND knockout.source_order IS NOT NULL
-						AND (knockout.home_entry_id = $4 OR knockout.away_entry_id = $4)
-				)
-				SELECT
-					matches.*,
-					home_entry.entry_name AS home_entry_name,
-					home_entry.player_name AS home_player_name,
-					away_entry.entry_name AS away_entry_name,
-					away_entry.player_name AS away_player_name
-				FROM official_matches AS matches
-				LEFT JOIN competition.entries AS home_entry
-					ON home_entry.season_id = matches.season_id
-					AND home_entry.entry_id = matches.home_entry_id
-				LEFT JOIN competition.entries AS away_entry
-					ON away_entry.season_id = matches.season_id
-					AND away_entry.entry_id = matches.away_entry_id
-				ORDER BY matches.event_id ASC, matches.source_order ASC, matches.official_match_id ASC
-				LIMIT $5`,
+				TOURNAMENT_OFFICIAL_H2H_HISTORY_SQL,
 				[context.currentSeason.seasonId, tournamentId, eventId, entryId, requestedLimit]
 			);
 			return {

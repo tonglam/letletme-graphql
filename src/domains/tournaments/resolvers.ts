@@ -331,8 +331,8 @@ const projectH2HSide = async (
 			entryName: side.entryName,
 			playerName: side.playerName,
 			isAverage: false,
-			points: side.officialNetPoints ?? 0,
-			netPoints: side.officialNetPoints ?? 0,
+			points: null,
+			netPoints: null,
 		};
 	}
 	if (side.entryId === null || side.isAverage) {
@@ -463,11 +463,14 @@ const readTournamentOfficialH2HV2 = async (
 						throughEventId: (standingsRead.payload.standings as H2HStandingsPayloadV2)
 							.throughEventId,
 						state:
-							(standingsRead.payload.standings as H2HStandingsPayloadV2).state === "UPDATING"
+							standingsRead.servedFrom !== "REDIS_CURRENT"
 								? "UPDATING"
-								: (standingsRead.payload.standings as H2HStandingsPayloadV2).state === "UNAVAILABLE"
-									? "UNAVAILABLE"
-									: "READY",
+								: (standingsRead.payload.standings as H2HStandingsPayloadV2).state === "UPDATING"
+									? "UPDATING"
+									: (standingsRead.payload.standings as H2HStandingsPayloadV2).state ===
+										  "UNAVAILABLE"
+										? "UNAVAILABLE"
+										: "READY",
 						sourceCheckedAt: (standingsRead.payload.standings as H2HStandingsPayloadV2)
 							.sourceCheckedAt,
 						rows: (standingsRead.payload.standings as H2HStandingsPayloadV2).rows,
@@ -601,11 +604,13 @@ const readTournamentOfficialH2HV2 = async (
 			? "UPDATING"
 			: standingsPayload.state === "UNAVAILABLE"
 				? "UNAVAILABLE"
-				: global?.publication.state !== "FINALIZED"
+				: standingsRead?.servedFrom !== "REDIS_CURRENT"
 					? "UPDATING"
-					: delivery.state === "STALE" || delivery.state === "DEGRADED"
-						? "STALE"
-						: "READY"
+					: global?.publication.state !== "FINALIZED"
+						? "UPDATING"
+						: delivery.state === "STALE" || delivery.state === "DEGRADED"
+							? "STALE"
+							: "READY"
 		: "UNAVAILABLE";
 	return {
 		eventId,
@@ -750,7 +755,26 @@ export const tournamentsResolvers = {
 			const viewerEntryId = context.principal
 				? (viewerEntryIdForPrincipal(context.principal) ?? 0)
 				: 0;
-			await assertLiveTournamentAccessV2(context, args.tournamentId, viewerEntryId, null);
+			const membership =
+				context.authorizedTournamentMemberships?.has(args.tournamentId) === true ? true : null;
+			await assertLiveTournamentAccessV2(context, args.tournamentId, viewerEntryId, membership);
+			const tournament = await tournamentsService.getTournamentInfoUncached(
+				context,
+				args.tournamentId
+			);
+			if (
+				!tournament ||
+				tournament.leagueType !== LeagueType.H2H ||
+				tournament.rosterMode !== TournamentRosterMode.OFFICIAL_SYNC ||
+				tournament.groupMode !== GroupMode.BATTLE_RACES
+			) {
+				throw new GraphQLError(
+					"Official H2H history is only available for official H2H tournaments",
+					{
+						extensions: { code: "BAD_USER_INPUT" },
+					}
+				);
+			}
 			return tournamentsService.getTournamentOfficialH2HHistory(
 				context,
 				args.tournamentId,

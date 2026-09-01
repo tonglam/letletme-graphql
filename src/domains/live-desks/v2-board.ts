@@ -338,6 +338,12 @@ const deliverySeverity = (servedFrom: LiveCalcDataV2["delivery"]["servedFrom"]):
 	}
 };
 
+const worstServedFrom = (
+	left: LeagueLivePublicationReadV2["servedFrom"],
+	right: LivePublicationReadV2["servedFrom"]
+): LeagueLivePublicationReadV2["servedFrom"] =>
+	deliverySeverity(left) >= deliverySeverity(right) ? left : right;
+
 const withBoardDelivery = (
 	value: LiveCalcDataV2,
 	servedFrom: LeagueLivePublicationReadV2["servedFrom"]
@@ -663,6 +669,7 @@ const projectCompleteBoard = async (
 	read: LeagueLivePublicationReadV2,
 	global: LivePublicationReadV2
 ): Promise<EntryLiveCompetitionBoardV2> => {
+	const servedFrom = worstServedFrom(read.servedFrom, global.servedFrom);
 	if (
 		read.publication.globalRef.publicationId !== global.publication.publicationId ||
 		read.publication.globalRef.generation !== global.publication.generation ||
@@ -703,7 +710,7 @@ const projectCompleteBoard = async (
 				},
 				entryFromIndex(indexRow)
 			);
-			projected[index] = rowFor(withBoardDelivery(value, read.servedFrom), 0, indexRow.overallRank);
+			projected[index] = rowFor(withBoardDelivery(value, servedFrom), 0, indexRow.overallRank);
 		}
 	};
 	await Promise.all(
@@ -729,7 +736,7 @@ const projectCompleteBoard = async (
 	const readyScores = ready.map((row) => row.score.eventPoints);
 	return {
 		publication: read.publication,
-		servedFrom: read.servedFrom,
+		servedFrom,
 		boardRevision: read.publication.revisions.content,
 		scoreCoreRevision: read.publication.revisions.scoreCore,
 		rows: projected,
@@ -772,10 +779,13 @@ const projectBoardRead = async (
 	if (cached) {
 		projectionCache.delete(key);
 		projectionCache.set(key, cached);
-		return withBoardReadDelivery(cached.value, read.servedFrom);
+		return withBoardReadDelivery(cached.value, worstServedFrom(read.servedFrom, global.servedFrom));
 	}
 	const existing = projectionInFlight.get(key);
-	if (existing) return existing.then((value) => withBoardReadDelivery(value, read.servedFrom));
+	if (existing)
+		return existing.then((value) =>
+			withBoardReadDelivery(value, worstServedFrom(read.servedFrom, global.servedFrom))
+		);
 	const load = projectCompleteBoard(context, read, global)
 		.then((value) => {
 			rememberProjection(key, value);

@@ -92,6 +92,7 @@ const NON_PROPAGATING_LIMIT_ROOTS = new Set([
 	"playerStatsBootstrap",
 	"myTournamentGameweekReview",
 	"myTournamentSeasonReview",
+	"tournamentOfficialH2HHistory",
 ]);
 
 type GraphQLPayload = GraphQLRequestPayload;

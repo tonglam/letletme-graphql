@@ -184,6 +184,11 @@ const iso = (value: unknown): value is string =>
 const positiveInteger = (value: unknown): value is number =>
 	typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
+const validH2HGroupId = (value: unknown, phase: unknown): value is number =>
+	typeof value === "number" &&
+	Number.isSafeInteger(value) &&
+	(phase === "KNOCKOUT" ? value >= 0 : value > 0);
+
 const nullableInteger = (value: unknown, minimum?: number): boolean =>
 	value === null ||
 	(typeof value === "number" &&
@@ -403,7 +408,7 @@ const validMatch = (value: unknown, manifest: H2HManifestV2): value is H2HMatchP
 		value.eventId === manifest.eventId &&
 		value.tournamentId === manifest.tournamentId &&
 		positiveInteger(value.officialMatchId) &&
-		positiveInteger(value.groupId) &&
+		validH2HGroupId(value.groupId, value.phase) &&
 		typeof value.sourceOrder === "number" &&
 		Number.isSafeInteger(value.sourceOrder) &&
 		value.sourceOrder >= 0 &&
@@ -452,7 +457,7 @@ const validHeadPayload = (
 			!positiveInteger(row.matchId) ||
 			!positiveInteger(row.eventId) ||
 			row.eventId !== manifest.eventId ||
-			!positiveInteger(row.groupId) ||
+			!validH2HGroupId(row.groupId, row.phase) ||
 			typeof row.sourceOrder !== "number" ||
 			!Number.isSafeInteger(row.sourceOrder) ||
 			row.sourceOrder < 0 ||
