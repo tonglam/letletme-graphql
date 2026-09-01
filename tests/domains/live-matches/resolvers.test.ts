@@ -8,7 +8,10 @@ import {
 	type OperationDefinitionNode,
 } from "graphql";
 
-import { liveMatchReadModeFromInfo } from "../../../src/domains/live-matches/resolvers";
+import {
+	deskHasStartedActivity,
+	liveMatchReadModeFromInfo,
+} from "../../../src/domains/live-matches/resolvers";
 
 const resolveInfo = (
 	documentText: string,
@@ -115,5 +118,28 @@ describe("liveMatchReadModeFromInfo", () => {
 
 		expect(liveMatchReadModeFromInfo(literalExcluded)).toBe("HEAD");
 		expect(liveMatchReadModeFromInfo(variableExcluded)).toBe("DESK");
+	});
+});
+
+describe("deskHasStartedActivity", () => {
+	const metadataDesk = (state: "PRE_DEADLINE" | "LIVE_ACTIVE", startedFixtureIds: number[]) =>
+		({
+			payloadLoaded: false,
+			fixtureCoverage: { fixtureIds: [101, 102], startedFixtureIds },
+			publication: { state },
+		}) as never;
+
+	it("uses retained started fixture coverage for metadata-only reads", () => {
+		expect(deskHasStartedActivity(metadataDesk("PRE_DEADLINE", [101]))).toBe(true);
+		expect(deskHasStartedActivity(metadataDesk("LIVE_ACTIVE", []))).toBe(false);
+	});
+
+	it("fails closed when metadata-only coverage is absent", () => {
+		expect(
+			deskHasStartedActivity({
+				payloadLoaded: false,
+				publication: { state: "LIVE_ACTIVE" },
+			} as never)
+		).toBe(false);
 	});
 });

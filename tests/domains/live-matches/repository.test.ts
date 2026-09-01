@@ -88,7 +88,8 @@ const fixture = (fixtureId: number, awayTeamId: number, started = true, eventId 
 	finishedProvisional: false,
 });
 
-const deskLifecycleDigest = (state: "LIVE_ACTIVE" | "FINALIZED"): string => digest({ state });
+const deskLifecycleDigest = (state: "PRE_DEADLINE" | "LIVE_ACTIVE" | "FINALIZED"): string =>
+	digest({ state });
 
 const deskFixtureIdentityDigest = (fixtures: readonly ReturnType<typeof fixture>[]): string =>
 	digest(
@@ -134,7 +135,7 @@ const publicationId = (generation: number): string =>
 const buildBundle = (
 	options: {
 		deskGeneration?: number;
-		deskState?: "LIVE_ACTIVE" | "FINALIZED";
+		deskState?: "PRE_DEADLINE" | "LIVE_ACTIVE" | "FINALIZED";
 		detailDeskGeneration?: number;
 		detailGeneration?: number;
 		detailItemGeneration?: number;
@@ -546,6 +547,34 @@ describe("Live Matches V3 read path", () => {
 			snapshot: {
 				detailDelivery: { state: "DEGRADED", servedFrom: "REDIS_CURRENT" },
 			},
+		});
+	});
+
+	it("uses retained fixture coverage instead of lifecycle state for metadata activity", async () => {
+		const readState = async (deskState: "PRE_DEADLINE" | "LIVE_ACTIVE", started: boolean) => {
+			const redis = new TestRedis();
+			attachBundle(
+				redis,
+				buildBundle({
+					deskState,
+					deskStarted: started,
+					omitDetail: true,
+				}).bundle
+			);
+			const result = await graphql({
+				schema,
+				contextValue: buildSnapshotContext(redis),
+				source: `query { liveMatchday(eventId: 1) { snapshot { detailDelivery { state } } } }`,
+			});
+			if (result.errors) throw result.errors[0];
+			return result.data?.liveMatchday;
+		};
+
+		expect(await readState("PRE_DEADLINE", true)).toMatchObject({
+			snapshot: { detailDelivery: { state: "DEGRADED" } },
+		});
+		expect(await readState("LIVE_ACTIVE", false)).toMatchObject({
+			snapshot: { detailDelivery: { state: "PENDING" } },
 		});
 	});
 

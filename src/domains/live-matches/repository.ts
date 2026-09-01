@@ -1733,7 +1733,8 @@ const readPostgresCheckpoint = async (
 };
 
 const allFixturesStarted = (desk: MatchDeskCandidate): boolean => {
-	if (desk.payloadLoaded === false) return desk.publication.state !== "PRE_DEADLINE";
+	if (desk.payloadLoaded === false)
+		return (desk.fixtureCoverage?.startedFixtureIds.length ?? 0) > 0;
 	return desk.fixtures.some(
 		(fixture) =>
 			fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
