@@ -433,10 +433,10 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   )
   AND jsonb_typeof(${publicationAlias}.payload->'manifest') = 'object'
   AND jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
-  AND ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
-  AND ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
+  AND ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]{1,18}$'
+  AND ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]{1,18}$'
   AND (CASE
-         WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
+         WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]{1,18}$'
          THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::numeric
          ELSE -1
        END) = jsonb_array_length(CASE
@@ -447,18 +447,35 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND (CASE
          WHEN ${publicationAlias}.format IN ('POINTS', 'H2H') THEN
            CASE
-             WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
+             WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]{1,18}$'
              THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::numeric = 2
              ELSE false
            END
          WHEN ${publicationAlias}.format = 'KNOCKOUT' THEN
            CASE
-             WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
+             WHEN ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]{1,18}$'
              THEN (${publicationAlias}.payload->'manifest'->>'sectionCount')::numeric = 1
              ELSE false
            END
          ELSE false
        END)
+  AND (
+    (${publicationAlias}.format = 'POINTS' AND (
+      SELECT count(*)
+      FROM jsonb_array_elements(${publicationAlias}.payload->'manifest'->'sections') descriptor
+      WHERE descriptor->>'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')
+    ) = 2)
+    OR (${publicationAlias}.format = 'H2H' AND (
+      SELECT count(*)
+      FROM jsonb_array_elements(${publicationAlias}.payload->'manifest'->'sections') descriptor
+      WHERE descriptor->>'sectionKey' IN ('H2H_STANDINGS', 'H2H_FIXTURES')
+    ) = 2)
+    OR (${publicationAlias}.format = 'KNOCKOUT' AND (
+      SELECT count(*)
+      FROM jsonb_array_elements(${publicationAlias}.payload->'manifest'->'sections') descriptor
+      WHERE descriptor->>'sectionKey' = 'KNOCKOUT_BRACKET'
+    ) = 1)
+  )
   AND NOT EXISTS (
     SELECT 1
     FROM (
@@ -489,7 +506,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
     )
   )
   AND (CASE
-         WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
+         WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]{1,18}$'
          THEN (${publicationAlias}.payload->'manifest'->>'chunkCount')::numeric
          ELSE -1
        END) = (
@@ -503,7 +520,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND (
     SELECT COALESCE(
       sum(CASE
-        WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+        WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
         THEN (descriptor->>'chunkCount')::numeric
         ELSE 0
       END),
@@ -515,7 +532,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
       ELSE '[]'::jsonb
     END) descriptor
   ) = CASE
-        WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
+         WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]{1,18}$'
         THEN (${publicationAlias}.payload->'manifest'->>'chunkCount')::numeric
         ELSE -1
       END
@@ -527,15 +544,16 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
       ELSE '[]'::jsonb
     END) descriptor
     WHERE jsonb_typeof(descriptor) IS DISTINCT FROM 'object'
+       OR jsonb_typeof(descriptor->'sectionKey') IS DISTINCT FROM 'string'
        OR descriptor->>'sectionKey' IS NULL
        OR btrim(COALESCE(descriptor->>'sectionKey', '')) = ''
        OR descriptor->>'chunkCount' IS NULL
-       OR descriptor->>'chunkCount' !~ '^[0-9]+$'
+       OR descriptor->>'chunkCount' !~ '^[0-9]{1,18}$'
        OR descriptor->>'itemCount' IS NULL
-       OR descriptor->>'itemCount' !~ '^[0-9]+$'
+       OR descriptor->>'itemCount' !~ '^[0-9]{1,18}$'
        OR jsonb_typeof(descriptor->'chunkHashes') IS DISTINCT FROM 'array'
        OR (CASE
-             WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+             WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
              THEN (descriptor->>'chunkCount')::numeric
              ELSE -1
            END) <> jsonb_array_length(CASE
@@ -544,7 +562,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
              ELSE '[]'::jsonb
            END)
        OR (CASE
-             WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+             WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
              THEN (descriptor->>'chunkCount')::numeric
              ELSE -1
            END) <> (
@@ -557,7 +575,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.section_key = descriptor->>'sectionKey'
        )
        OR (CASE
-             WHEN descriptor->>'itemCount' ~ '^[0-9]+$'
+             WHEN descriptor->>'itemCount' ~ '^[0-9]{1,18}$'
              THEN (descriptor->>'itemCount')::numeric
              ELSE -1
            END) <> (
@@ -578,7 +596,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.revision = ${publicationAlias}.revision
            AND chunk.section_key = descriptor->>'sectionKey'
        ) <> CASE
-         WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+         WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
               AND (descriptor->>'chunkCount')::numeric > 0 THEN 0
          ELSE -1
        END
@@ -591,7 +609,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.revision = ${publicationAlias}.revision
            AND chunk.section_key = descriptor->>'sectionKey'
        ) <> (CASE
-         WHEN (descriptor->>'chunkCount') ~ '^[0-9]+$'
+         WHEN (descriptor->>'chunkCount') ~ '^[0-9]{1,18}$'
          THEN (descriptor->>'chunkCount')::numeric - 1
          ELSE -1
        END)
@@ -608,7 +626,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
          descriptor->>'itemCount' = '0'
          AND (
            (CASE
-             WHEN descriptor->>'chunkCount' ~ '^[0-9]+$'
+             WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
              THEN (descriptor->>'chunkCount')::numeric
              ELSE -1
            END) <> 1
@@ -3080,7 +3098,9 @@ function seasonCache(
 }
 
 type SeasonSectionCacheExpectation = {
+	seasonId: number;
 	tournamentId: number;
+	eventId: number;
 	throughEventId: number;
 	phaseId: string;
 	section: MyTournamentReviewSeasonSection;
@@ -3148,11 +3168,46 @@ function seasonSectionCache(
 	) {
 		return false;
 	}
-	const page = points ?? h2h ?? knockout;
+	const typedPoints = points as MyTournamentReviewPoints | null;
+	const typedH2H = h2h as MyTournamentReviewH2H | null;
+	const typedKnockout = knockout as MyTournamentReviewKnockout | null;
+	const page = typedPoints ?? typedH2H ?? typedKnockout;
 	if (!isRecord(page)) return false;
+	const pageOffset = typedPoints
+		? typedPoints.aggregateWitness.pageOffset
+		: typedH2H
+			? typedH2H.coverageWitness.pageOffset
+			: typedKnockout!.coverageWitness.pageOffset;
+	const pageLength = typedPoints
+		? typedPoints.rows.length
+		: typedH2H
+			? expected.section === "H2H_FIXTURES"
+				? typedH2H.matches.length
+				: typedH2H.standings.length
+			: typedKnockout!.matches.length;
+	const cursorScope = reviewSectionCursorScope(
+		{
+			season_id: expected.seasonId,
+			tournament_id: expected.tournamentId,
+			event_id: expected.eventId,
+			revision: expected.revision,
+			format: expected.section.startsWith("POINTS")
+				? "POINTS"
+				: expected.section.startsWith("H2H")
+					? "H2H"
+					: "KNOCKOUT",
+		},
+		expected.phaseId,
+		expected.section,
+		expected.semanticSha256
+	);
+	const expectedNextCursor = page.hasNextPage
+		? encodeCursor(pageOffset + pageLength, expected.revision, cursorScope)
+		: null;
 	return (
 		value.pageInfo.hasNextPage === Boolean(page.hasNextPage) &&
-		value.pageInfo.endCursor === (page.nextCursor ?? null)
+		value.pageInfo.endCursor === (page.nextCursor ?? null) &&
+		page.nextCursor === expectedNextCursor
 	);
 }
 
@@ -3198,6 +3253,14 @@ function catalogState(value: string | null): MyTournamentReviewState {
 	return value === null ? "UNAVAILABLE" : reviewState(value);
 }
 
+function requiredCatalogCounter(value: unknown, label: string): number {
+	const normalized = value === null || value === undefined ? null : Number(value);
+	if (normalized === null || !safeInteger(normalized) || normalized < 0) {
+		throw integrityError(`Review catalog ${label} is invalid`);
+	}
+	return normalized;
+}
+
 function mapCatalogRow(row: CatalogRow): MyTournamentReviewCatalogItem {
 	const tournamentId = positiveInt(row.tournament_id);
 	const leagueId = positiveInt(row.league_id);
@@ -3215,6 +3278,14 @@ function mapCatalogRow(row: CatalogRow): MyTournamentReviewCatalogItem {
 	const finalizedRevision =
 		row.finalized_revision === null ? null : positiveInt(row.finalized_revision);
 	const finalizedPublishedAt = iso(row.finalized_published_at);
+	const finalizedExecutionAttempts =
+		finalizedFormat === null
+			? 0
+			: requiredCatalogCounter(row.finalized_execution_attempts, "execution attempts");
+	const finalizedSourceRechecks =
+		finalizedFormat === null
+			? 0
+			: requiredCatalogCounter(row.finalized_source_rechecks, "source rechecks");
 	const latestFinalizedScope =
 		latestFinalizedEventId !== null && finalizedFormat !== null
 			? {
@@ -3222,8 +3293,8 @@ function mapCatalogRow(row: CatalogRow): MyTournamentReviewCatalogItem {
 					format: finalizedFormat,
 					state: finalizedState,
 					nextAttemptAt: iso(row.finalized_next_attempt_at),
-					executionAttempts: Number(row.finalized_execution_attempts ?? 0),
-					sourceRechecks: Number(row.finalized_source_rechecks ?? 0),
+					executionAttempts: finalizedExecutionAttempts,
+					sourceRechecks: finalizedSourceRechecks,
 					degradedAt: iso(row.finalized_degraded_at),
 					revision: finalizedRevision === null ? null : String(finalizedRevision),
 					publishedAt: finalizedPublishedAt,
@@ -4852,7 +4923,9 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		);
 		const cursor = decodeCursor(args.after, String(phase.revision), sectionCursorScope);
 		const expectedCache: SeasonSectionCacheExpectation = {
+			seasonId: context.currentSeason.seasonId,
 			tournamentId: args.tournamentId,
+			eventId: phase.endEventId,
 			throughEventId: args.throughEventId,
 			phaseId,
 			section: requestedSection,

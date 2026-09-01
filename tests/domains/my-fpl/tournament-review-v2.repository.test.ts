@@ -227,6 +227,16 @@ describe("My Tournament Review V2 repository", () => {
 		);
 	});
 
+	it("bounds manifest count casts and requires the exact format section set", () => {
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain("^[0-9]{1,18}$");
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain(
+			"descriptor->>'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')"
+		);
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain(
+			"jsonb_typeof(descriptor->'sectionKey') IS DISTINCT FROM 'string'"
+		);
+	});
+
 	it("keeps the catalog on the current event checkpoint and bounds ALL reads", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"date_trunc('milliseconds', publication.event_data_checked_at) ="
