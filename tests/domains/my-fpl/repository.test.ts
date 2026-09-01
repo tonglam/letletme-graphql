@@ -2786,7 +2786,7 @@ describe("My FPL review repository", () => {
 			fixture.context
 		);
 		expect(season.phases).toHaveLength(1);
-		expect(fallbackSeason.phases[0]?.format).toBe("POINTS");
+		expect((fallbackSeason.phases as Array<{ format?: string }>)[0]?.format).toBe("POINTS");
 		const section = await resolvers.Query.myTournamentSeasonReviewSection(
 			null,
 			{
