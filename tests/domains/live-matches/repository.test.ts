@@ -1150,6 +1150,41 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
+	it("does not cache an invalid PostgreSQL active-event checkpoint as authority", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		const invalid = buildCheckpointRow({ eventId: 2 });
+		(invalid.desk as { publication_id: string }).publication_id = "invalid";
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [invalid] };
+			},
+		});
+
+		const warm = await readLiveMatchday(context);
+		expect(warm.eventId).toBe(1);
+		const missingPointer = structuredClone(buildBundle({ eventId: 1 }).bundle);
+		missingPointer.eventId = null;
+		missingPointer.desk.active = emptyDesk;
+		missingPointer.desk.previous = emptyDesk;
+		missingPointer.detail.active = emptyDetail;
+		missingPointer.detail.previous = emptyDetail;
+		control.set(missingPointer);
+
+		const recovered = await readLiveMatchday(context);
+		const retained = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.postgresReadFailed).toBe(true);
+		expect(retained.eventId).toBe(1);
+		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.postgresReadFailed).toBe(true);
+		expect(databaseReads).toBe(1);
+	});
+
 	it("retains a complete PostgreSQL candidate in process LKG for HEAD reads", async () => {
 		const redis = new TestRedis();
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {

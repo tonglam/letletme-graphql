@@ -68,6 +68,7 @@ jobs:
             .days == 2 and
             .recent.minutes == 10 and
             .live.rateLimitStorageFailures == 0 and
+            .live.rateLimitTelemetryOverflows == 0 and
             .recent.summary.totalDecisions > 0 and
             (
               (.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0) or

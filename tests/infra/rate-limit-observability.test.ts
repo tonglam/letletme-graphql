@@ -5,6 +5,7 @@ import {
 	rateLimitFingerprint,
 	rateLimitRecentAggregateKey,
 	parseRateLimitStorageFailureTotal,
+	parseRateLimitTelemetryOverflowTotal,
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
@@ -48,6 +49,22 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 				'rate_limit_storage_failures_total{scope="global-request",mode="open"} invalid'
 			)
 		).toThrow("Invalid rate-limit storage failure metric value");
+	});
+
+	it("sums live rate-limit telemetry overflow series", () => {
+		expect(
+			parseRateLimitTelemetryOverflowTotal(`
+# HELP rate_limit_telemetry_overflows_total Dropped aggregate telemetry
+# TYPE rate_limit_telemetry_overflows_total counter
+rate_limit_telemetry_overflows_total{policy="graphql-v3"} 2
+rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
+`)
+		).toBe(5);
+		expect(() =>
+			parseRateLimitTelemetryOverflowTotal(
+				'rate_limit_telemetry_overflows_total{policy="graphql-v3"} invalid'
+			)
+		).toThrow("Invalid rate-limit telemetry overflow metric value");
 	});
 
 	it("stores only controlled dimensions and denied fingerprints", async () => {

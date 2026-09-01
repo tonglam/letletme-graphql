@@ -292,9 +292,14 @@ function requestOnceHttp1(): Promise<RawResponse> {
 		const startedAt = performance.now();
 		let headersAt: number | null = null;
 		let settled = false;
+		let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 		const finish = (value: RawResponse) => {
 			if (settled) return;
 			settled = true;
+			if (deadlineTimer !== null) {
+				clearTimeout(deadlineTimer);
+				deadlineTimer = null;
+			}
 			resolve(value);
 		};
 		const requester = endpoint.protocol === "https:" ? httpsRequest : httpRequest;
@@ -382,6 +387,9 @@ function requestOnceHttp1(): Promise<RawResponse> {
 				rateLimitScope: null,
 			});
 		});
+		deadlineTimer = setTimeout(() => {
+			request.destroy(new Error("request timeout"));
+		}, timeoutMs);
 		request.end(requestBody);
 	});
 }
@@ -593,6 +601,7 @@ async function runOne(stage: number): Promise<void> {
 			parseError = error instanceof Error ? error.message : String(error);
 		}
 	}
+	const semanticValidationError = parseError === null ? semanticError(parsed) : null;
 	const sample: ResponseSample = {
 		stage,
 		status: response.status,
@@ -601,8 +610,8 @@ async function runOne(stage: number): Promise<void> {
 		durationMs: response.durationMs,
 		encodedBytes: response.encoded.byteLength,
 		decodedBytes: response.decoded.byteLength,
-		semanticOk: parseError === null && semanticError(parsed) === null,
-		errorCode: parseError ?? semanticError(parsed),
+		semanticOk: parseError === null && semanticValidationError === null,
+		errorCode: parseError ?? semanticValidationError,
 		globalRateLimit: response.globalRateLimit,
 		rateLimitScope: response.rateLimitScope,
 	};

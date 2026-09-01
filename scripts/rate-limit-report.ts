@@ -5,6 +5,7 @@ import {
 	rateLimitDeniedRankingKey,
 	rateLimitRecentAggregateKey,
 	parseRateLimitStorageFailureTotal,
+	parseRateLimitTelemetryOverflowTotal,
 	summarizeRateLimitTotals,
 	type GraphQLRateLimitPolicyVersion,
 } from "../src/infra/rate-limit-observability";
@@ -83,7 +84,10 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 	};
 };
 
-const readLiveRateLimitStorageFailures = async (): Promise<number> => {
+const readLiveRateLimitMetrics = async (): Promise<{
+	rateLimitStorageFailures: number;
+	rateLimitTelemetryOverflows: number;
+}> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
 		headers: { "X-Metrics-Token": env.METRICS_TOKEN },
@@ -92,7 +96,11 @@ const readLiveRateLimitStorageFailures = async (): Promise<number> => {
 	if (!response.ok) {
 		throw new Error(`Live metrics request failed with HTTP ${response.status}`);
 	}
-	return parseRateLimitStorageFailureTotal(await response.text());
+	const metricsText = await response.text();
+	return {
+		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
+		rateLimitTelemetryOverflows: parseRateLimitTelemetryOverflowTotal(metricsText),
+	};
 };
 
 const reportDates = (days: number, now = new Date()): string[] =>
@@ -190,9 +198,7 @@ try {
 					),
 					buckets: recentBuckets,
 				};
-	const live = options.includeLiveStorageFailures
-		? { rateLimitStorageFailures: await readLiveRateLimitStorageFailures() }
-		: null;
+	const live = options.includeLiveStorageFailures ? await readLiveRateLimitMetrics() : null;
 	const report = {
 		policy: policyVersion,
 		mode: env.GRAPHQL_RATE_LIMIT_MODE,
@@ -216,7 +222,8 @@ try {
 		(options.failInteractiveRate !== null &&
 			Math.max(gateSummary.interactiveDeniedRate, gateSummary.shadowInteractiveDeniedRate) >
 				options.failInteractiveRate) ||
-		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0))
+		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0)) ||
+		(options.includeLiveStorageFailures && live !== null && live.rateLimitTelemetryOverflows > 0)
 	) {
 		process.exitCode = 1;
 	}

@@ -102,6 +102,23 @@ export const parseRateLimitStorageFailureTotal = (metricsText: string): number =
 	return total;
 };
 
+export const parseRateLimitTelemetryOverflowTotal = (metricsText: string): number => {
+	let total = 0;
+	for (const line of metricsText.split("\n")) {
+		if (!/^rate_limit_telemetry_overflows_total(?:\{|\s)/.test(line)) continue;
+		const match = line.match(
+			/^rate_limit_telemetry_overflows_total(?:\{[^}]*\})?\s+([^\s]+)(?:\s+\d+)?$/
+		);
+		if (!match) throw new Error("Malformed rate-limit telemetry overflow metric");
+		const value = Number(match[1]);
+		if (!Number.isFinite(value) || value < 0) {
+			throw new Error("Invalid rate-limit telemetry overflow metric value");
+		}
+		total += value;
+	}
+	return total;
+};
+
 export const summarizeRateLimitTotals = (
 	totals: ReadonlyMap<string, number>
 ): RateLimitReportSummary => {

@@ -1436,13 +1436,22 @@ const readPostgresCheckpoint = async (
 			const row = result.rows[0];
 			resetPostgresCircuit();
 			const selectedEventId = row ? safeInteger(row.event_id) : null;
-			return row && selectedEventId !== null && selectedEventId > 0
-				? {
-						eventId: selectedEventId,
-						desk: buildPostgresDesk(row.desk, season, selectedEventId),
-						detail: buildPostgresDetail(row.detail, season, selectedEventId),
-					}
-				: { eventId: null, desk: null, detail: null };
+			if (!row || selectedEventId === null || selectedEventId <= 0) {
+				return { eventId: null, desk: null, detail: null };
+			}
+			const desk = buildPostgresDesk(row.desk, season, selectedEventId);
+			if (!desk) {
+				context.logger.warn(
+					{ eventId: selectedEventId },
+					"Live Match PostgreSQL checkpoint invalid"
+				);
+				return null;
+			}
+			return {
+				eventId: selectedEventId,
+				desk,
+				detail: buildPostgresDetail(row.detail, season, selectedEventId),
+			};
 		})
 		.catch((error) => {
 			openPostgresCircuit();
