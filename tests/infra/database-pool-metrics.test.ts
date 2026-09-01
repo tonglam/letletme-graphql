@@ -23,4 +23,14 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("dbPoolWaitEventsZero");
 		expect(capacitySource).toContain('session.on("goaway"');
 	});
+
+	it("keeps zero-valued fallback series available for the Ops required rules", async () => {
+		const rendered = await metrics.registry.metrics();
+		expect(rendered).toContain(
+			'live_match_redis_roundtrips_total{view="HEAD",outcome="fallback"} 0'
+		);
+		expect(rendered).toContain(
+			'live_match_fallback_total{component="desk",source="REDIS_PREVIOUS"} 0'
+		);
+	});
 });

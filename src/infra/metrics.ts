@@ -171,6 +171,25 @@ const liveMatchDeliveryTotal = new Counter({
 	labelNames: ["view", "state", "served_from"] as const,
 });
 
+// Keep zero-valued fallback/roundtrip series visible before the first
+// request. Ops treats these metric families as required, and an absent
+// series must mean an instrumentation failure rather than a healthy zero.
+const liveMatchViews = ["HEAD", "DESK", "FULL"] as const;
+const liveMatchRedisOutcomes = ["none", "single", "fallback"] as const;
+for (const view of liveMatchViews) {
+	for (const outcome of liveMatchRedisOutcomes) {
+		liveMatchRedisRoundtripsTotal.labels(view, outcome).inc(0);
+	}
+}
+
+const liveMatchFallbackComponents = ["desk", "detail"] as const;
+const liveMatchFallbackSources = ["REDIS_PREVIOUS", "PROCESS_LKG", "POSTGRES_CHECKPOINT"] as const;
+for (const component of liveMatchFallbackComponents) {
+	for (const source of liveMatchFallbackSources) {
+		liveMatchFallbackTotal.labels(component, source).inc(0);
+	}
+}
+
 const rateLimitTelemetryOverflows = new Counter({
 	name: "rate_limit_telemetry_overflows_total",
 	help: "Rate-limit aggregate telemetry records dropped because the bounded queue was full",
