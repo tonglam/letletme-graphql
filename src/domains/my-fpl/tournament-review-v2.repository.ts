@@ -415,6 +415,42 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
          ELSE '[]'::jsonb
        END)
   AND (CASE
+         WHEN ${publicationAlias}.format IN ('POINTS', 'H2H') THEN
+           (${publicationAlias}.payload->'manifest'->>'sectionCount')::integer = 2
+         WHEN ${publicationAlias}.format = 'KNOCKOUT' THEN
+           (${publicationAlias}.payload->'manifest'->>'sectionCount')::integer = 1
+         ELSE false
+       END)
+  AND NOT EXISTS (
+    SELECT 1
+    FROM (
+      SELECT descriptor->>'sectionKey' AS section_key, count(*) AS descriptor_count
+      FROM jsonb_array_elements(CASE
+        WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
+        THEN ${publicationAlias}.payload->'manifest'->'sections'
+        ELSE '[]'::jsonb
+      END) descriptor
+      GROUP BY descriptor->>'sectionKey'
+      HAVING count(*) > 1
+    ) duplicate_sections
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements(CASE
+      WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
+      THEN ${publicationAlias}.payload->'manifest'->'sections'
+      ELSE '[]'::jsonb
+    END) descriptor
+    WHERE NOT (
+      (${publicationAlias}.format = 'POINTS'
+        AND descriptor->>'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES'))
+      OR (${publicationAlias}.format = 'H2H'
+        AND descriptor->>'sectionKey' IN ('H2H_STANDINGS', 'H2H_FIXTURES'))
+      OR (${publicationAlias}.format = 'KNOCKOUT'
+        AND descriptor->>'sectionKey' = 'KNOCKOUT_BRACKET')
+    )
+  )
+  AND (CASE
          WHEN ${publicationAlias}.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
          THEN (${publicationAlias}.payload->'manifest'->>'chunkCount')::integer
          ELSE -1
@@ -631,7 +667,9 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 	       CASE
 	         WHEN finalized.latest_finalized_event_id IS NULL THEN 'NOT_STARTED'
 	         WHEN finalized_obligation.state = 'READY'
-	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id THEN 'READY'
+	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id
+	          AND head.latest_revision = finalized_obligation.ready_revision
+	          AND head.latest_format = finalized_obligation.format THEN 'READY'
 	         WHEN finalized_obligation.state = 'READY' THEN 'DEGRADED'
 	         ELSE COALESCE(finalized_obligation.state, 'UNAVAILABLE')
 	       END AS finalized_state,
@@ -642,12 +680,16 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 	       CASE
 	         WHEN finalized_obligation.state = 'READY'
 	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id
+	          AND head.latest_revision = finalized_obligation.ready_revision
+	          AND head.latest_format = finalized_obligation.format
 	         THEN finalized_obligation.ready_revision
 	         ELSE NULL
 	       END AS finalized_revision,
 	       CASE
 	         WHEN finalized_obligation.state = 'READY'
 	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id
+	          AND head.latest_revision = finalized_obligation.ready_revision
+	          AND head.latest_format = finalized_obligation.format
 	         THEN finalized_obligation.published_at
 	         ELSE NULL
 	       END AS finalized_published_at
@@ -1845,6 +1887,16 @@ function materializeReviewChunks(
 	}
 	if (expectedSections.size !== Number(manifest.sectionCount)) {
 		throw integrityError("Review publication section count is invalid");
+	}
+	const declaredChunkCount = [...expectedSections.values()].reduce(
+		(total, descriptor) => total + descriptor.chunkHashes.length,
+		0
+	);
+	if (declaredChunkCount !== expectedChunkCount) {
+		throw integrityError("Review publication chunk manifest total is invalid");
+	}
+	if (rows.some((row) => !expectedSections.has(row.section_key))) {
+		throw integrityError("Review publication contains an undeclared section chunk");
 	}
 	const materialized = { ...payload };
 	for (const [sectionKey, descriptor] of expectedSections) {
