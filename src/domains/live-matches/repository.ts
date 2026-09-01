@@ -1785,17 +1785,36 @@ export const readLiveMatchday = async (
 		redisRoundtrips,
 	};
 	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
+	const completeDetailForLkg =
+		detail?.payloadLoaded === false
+			? chooseDetail(
+					effectiveDesk,
+					[
+						active.detail,
+						previous.detail,
+						processLkgValue?.detail ?? null,
+						postgres?.detail ?? null,
+					].filter(
+						(candidate): candidate is MatchDetailCandidate =>
+							candidate !== null && candidate.payloadLoaded !== false
+					)
+				)
+			: detail;
 	// A metadata-only observation must never replace a complete process LKG
-	// with an object whose detail payload was deliberately not read. A complete
-	// PostgreSQL checkpoint is the one exception for HEAD/DESK: it is already a
-	// full candidate and can seed the process fallback after Redis recovers.
+	// with an object whose detail payload was deliberately not read. When a
+	// complete PostgreSQL desk is the selected fallback, retain only a complete
+	// detail sibling (if one is available) rather than caching its manifest-only
+	// metadata as the future player-detail LKG.
 	const completePostgresDesk =
 		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT" && effectiveDesk.payloadLoaded !== false;
 	if (
 		(mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) ||
 		completePostgresDesk
 	) {
-		rememberLkg(season, selectedEventId, { desk: effectiveDesk, detail });
+		rememberLkg(season, selectedEventId, {
+			desk: effectiveDesk,
+			detail: completeDetailForLkg,
+		});
 	}
 	return result;
 };

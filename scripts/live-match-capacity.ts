@@ -181,17 +181,37 @@ const percentile = (values: readonly number[], rank: number): number | null => {
 	return sorted[Math.max(0, index)] ?? null;
 };
 
-const summarize = (values: readonly number[]): MetricSummary => {
-	let max: number | null = null;
-	for (const value of values) max = max === null ? value : Math.max(max, value);
-	return {
-		count: values.length,
-		p50: percentile(values, 0.5),
-		p95: percentile(values, 0.95),
-		p99: percentile(values, 0.99),
-		max,
-	};
-};
+// A capacity run can produce millions of responses. Keep a bounded uniform
+// reservoir for quantiles while retaining exact counters and maxima. The
+// report therefore remains useful without retaining every request object.
+const MAX_QUANTILE_SAMPLES = 8192;
+
+class BoundedQuantile {
+	private readonly samples: number[] = [];
+	private count = 0;
+	private maximum: number | null = null;
+
+	add(value: number): void {
+		this.count += 1;
+		this.maximum = this.maximum === null ? value : Math.max(this.maximum, value);
+		if (this.samples.length < MAX_QUANTILE_SAMPLES) {
+			this.samples.push(value);
+			return;
+		}
+		const slot = Math.floor(Math.random() * this.count);
+		if (slot < MAX_QUANTILE_SAMPLES) this.samples[slot] = value;
+	}
+
+	summary(): MetricSummary {
+		return {
+			count: this.count,
+			p50: percentile(this.samples, 0.5),
+			p95: percentile(this.samples, 0.95),
+			p99: percentile(this.samples, 0.99),
+			max: this.maximum,
+		};
+	}
+}
 
 type HeaderValue = string | string[] | number | number[] | undefined;
 
@@ -509,6 +529,16 @@ function semanticError(body: unknown): string | null {
 	const root = data && isRecord(data.liveMatchday) ? data.liveMatchday : null;
 	if (!root) return "missing_live_matchday";
 	if (root.availability !== "READY") return requireReady ? "availability_not_ready" : null;
+	const delivery = isRecord(root.delivery) ? root.delivery : null;
+	if (delivery?.servedFrom !== "REDIS_CURRENT") return "fallback_delivery";
+	if (mode === "FULL") {
+		const detailDelivery = isRecord(root.snapshot)
+			? isRecord(root.snapshot.detailDelivery)
+				? root.snapshot.detailDelivery
+				: null
+			: null;
+		if (detailDelivery?.servedFrom !== "REDIS_CURRENT") return "fallback_detail_delivery";
+	}
 	const snapshot = isRecord(root.snapshot) ? root.snapshot : null;
 	if (!snapshot) return "ready_without_snapshot";
 	if (eventId !== undefined && snapshot.eventId !== eventId) return "event_mismatch";
@@ -586,7 +616,74 @@ function semanticError(body: unknown): string | null {
 	return null;
 }
 
-const valuesByStage = new Map<number, ResponseSample[]>();
+class ResponseAccumulator {
+	private requests = 0;
+	private semanticFailures = 0;
+	private non429Errors = 0;
+	private rateLimited429 = 0;
+	private unknown429 = 0;
+	private global429 = 0;
+	private readonly statusCounts = new Map<number, number>();
+	private readonly errorCodes = new Map<string, number>();
+	private readonly rateLimitScopeCounts = new Map<string, number>();
+	private readonly durations = new BoundedQuantile();
+	private readonly ttfb = new BoundedQuantile();
+	private readonly bodyDownload = new BoundedQuantile();
+	private readonly encodedBytes = new BoundedQuantile();
+	private readonly decodedBytes = new BoundedQuantile();
+
+	record(sample: ResponseSample): void {
+		this.requests += 1;
+		this.statusCounts.set(sample.status, (this.statusCounts.get(sample.status) ?? 0) + 1);
+		this.durations.add(sample.durationMs);
+		this.ttfb.add(sample.ttfbMs);
+		this.bodyDownload.add(sample.bodyDownloadMs);
+		this.encodedBytes.add(sample.encodedBytes);
+		this.decodedBytes.add(sample.decodedBytes);
+		if (!sample.semanticOk) this.semanticFailures += 1;
+		if (sample.errorCode) {
+			this.errorCodes.set(sample.errorCode, (this.errorCodes.get(sample.errorCode) ?? 0) + 1);
+		}
+		if (
+			sample.status <= 0 ||
+			(sample.status >= 400 && sample.status !== 429) ||
+			(sample.status < 400 && !sample.semanticOk)
+		) {
+			this.non429Errors += 1;
+		}
+		if (sample.status === 429) {
+			this.rateLimited429 += 1;
+			const scope = sample.rateLimitScope ?? "unknown";
+			this.rateLimitScopeCounts.set(scope, (this.rateLimitScopeCounts.get(scope) ?? 0) + 1);
+			if (sample.rateLimitScope === null) this.unknown429 += 1;
+			if (sample.globalRateLimit) this.global429 += 1;
+		}
+	}
+
+	report() {
+		return {
+			requests: this.requests,
+			statusCounts: Object.fromEntries(
+				[...this.statusCounts.entries()].map(([status, count]) => [String(status), count])
+			),
+			semanticFailures: this.semanticFailures,
+			errorCodes: Object.fromEntries(this.errorCodes),
+			rateLimitScopeCounts: Object.fromEntries(this.rateLimitScopeCounts),
+			rateLimited429: this.rateLimited429,
+			unknown429: this.unknown429,
+			global429: this.global429,
+			non429ErrorRate: this.requests === 0 ? 1 : this.non429Errors / this.requests,
+			e2eMs: this.durations.summary(),
+			ttfbMs: this.ttfb.summary(),
+			bodyDownloadMs: this.bodyDownload.summary(),
+			encodedBytes: this.encodedBytes.summary(),
+			decodedBytes: this.decodedBytes.summary(),
+		};
+	}
+}
+
+const accumulatorsByStage = new Map(stages.map((stage) => [stage, new ResponseAccumulator()]));
+const overallAccumulator = new ResponseAccumulator();
 const metricObservations: MetricObservation[] = [];
 let requestCount = 0;
 
@@ -616,9 +713,10 @@ async function runOne(stage: number): Promise<void> {
 		rateLimitScope: response.rateLimitScope,
 	};
 	requestCount += 1;
-	const samples = valuesByStage.get(stage) ?? [];
-	samples.push(sample);
-	valuesByStage.set(stage, samples);
+	const accumulator = accumulatorsByStage.get(stage);
+	if (!accumulator) throw new Error(`missing accumulator for stage ${stage}`);
+	accumulator.record(sample);
+	overallAccumulator.record(sample);
 }
 
 async function runWorker(stage: number, deadline: number): Promise<void> {
@@ -642,9 +740,10 @@ function metricValue(text: string, metric: string, requiredLabel: string): numbe
 	return null;
 }
 
-async function collectMetrics(): Promise<void> {
+async function collectMetrics(): Promise<MetricObservation | null> {
 	const metricsUrl = process.env.LIVE_MATCH_LOAD_METRICS_URL?.trim();
-	if (!metricsUrl) return;
+	if (!metricsUrl) return null;
+	let observation: MetricObservation;
 	try {
 		const response = await fetch(metricsUrl, {
 			headers: {
@@ -655,7 +754,7 @@ async function collectMetrics(): Promise<void> {
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 		const text = await response.text();
-		metricObservations.push({
+		observation = {
 			at: new Date().toISOString(),
 			poolWaiting: metricValue(text, "postgres_pool_clients", 'state="waiting"'),
 			globalDenied: metricValue(
@@ -663,16 +762,20 @@ async function collectMetrics(): Promise<void> {
 				"graphql_rate_limit_v3_decisions_total",
 				'scope="global",outcome="denied"'
 			),
-		});
+		};
 	} catch {
-		metricObservations.push({
+		observation = {
 			at: new Date().toISOString(),
 			poolWaiting: null,
 			globalDenied: null,
-		});
+		};
 	}
+	metricObservations.push(observation);
+	return observation;
 }
 
+const initialMetrics = await collectMetrics();
+const globalDeniedBaseline = initialMetrics?.globalDenied ?? null;
 let monitoring = true;
 const monitor = (async () => {
 	while (monitoring) {
@@ -691,68 +794,30 @@ monitoring = false;
 await monitor;
 closeHttp2Session();
 
-const allSamples = [...valuesByStage.values()].flat();
-const summarizeSamples = (samples: readonly ResponseSample[]) => {
-	const durations = samples.map((sample) => sample.durationMs);
-	const ttfb = samples.map((sample) => sample.ttfbMs);
-	const bodyDownload = samples.map((sample) => sample.bodyDownloadMs);
-	const encodedBytes = samples.map((sample) => sample.encodedBytes);
-	const decodedBytes = samples.map((sample) => sample.decodedBytes);
-	const non429Errors = samples.filter(
-		(sample) =>
-			sample.status <= 0 ||
-			(sample.status >= 400 && sample.status !== 429) ||
-			(sample.status < 400 && !sample.semanticOk)
-	).length;
-	const errorCodes: Record<string, number> = {};
-	for (const sample of samples) {
-		if (sample.errorCode) errorCodes[sample.errorCode] = (errorCodes[sample.errorCode] ?? 0) + 1;
-	}
-	return {
-		requests: samples.length,
-		statusCounts: Object.fromEntries(
-			[...new Set(samples.map((sample) => sample.status))].map((status) => [
-				String(status),
-				samples.filter((sample) => sample.status === status).length,
-			])
-		),
-		semanticFailures: samples.filter((sample) => !sample.semanticOk).length,
-		errorCodes,
-		rateLimitScopeCounts: Object.fromEntries(
-			[
-				...new Set(
-					samples
-						.filter((sample) => sample.status === 429)
-						.map((sample) => sample.rateLimitScope ?? "unknown")
-				),
-			].map((scope) => [
-				scope,
-				samples.filter(
-					(sample) => sample.status === 429 && (sample.rateLimitScope ?? "unknown") === scope
-				).length,
-			])
-		),
-		rateLimited429: samples.filter((sample) => sample.status === 429).length,
-		unknown429: samples.filter((sample) => sample.status === 429 && sample.rateLimitScope === null)
-			.length,
-		global429: samples.filter((sample) => sample.globalRateLimit).length,
-		non429ErrorRate: samples.length === 0 ? 1 : non429Errors / samples.length,
-		e2eMs: summarize(durations),
-		ttfbMs: summarize(ttfb),
-		bodyDownloadMs: summarize(bodyDownload),
-		encodedBytes: summarize(encodedBytes),
-		decodedBytes: summarize(decodedBytes),
-	};
-};
-
 const stageReports = stages.map((stage) => ({
 	concurrency: stage,
 	durationSeconds: stageSeconds,
-	...summarizeSamples(valuesByStage.get(stage) ?? []),
+	...accumulatorsByStage.get(stage)!.report(),
 }));
-const overall = summarizeSamples(allSamples);
+const overall = overallAccumulator.report();
 const capacityStage = stageReports.find((report) => report.concurrency === 300);
 const firstReadyStage = stageReports.find((report) => report.requests > 0);
+let globalDeniedMaximum: number | null = null;
+for (const observation of metricObservations) {
+	if (observation.globalDenied === null) continue;
+	globalDeniedMaximum =
+		globalDeniedMaximum === null
+			? observation.globalDenied
+			: Math.max(globalDeniedMaximum, observation.globalDenied);
+}
+const globalDeniedObservationsComplete =
+	globalDeniedBaseline !== null &&
+	metricObservations.length > 0 &&
+	metricObservations.every((observation) => observation.globalDenied !== null);
+const globalDeniedDelta =
+	globalDeniedObservationsComplete && globalDeniedMaximum !== null
+		? globalDeniedMaximum - globalDeniedBaseline!
+		: null;
 const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
 	stage300DurationSeconds: capacityStage?.durationSeconds ?? 0,
@@ -763,6 +828,10 @@ const capacityGate = {
 	rateLimited429IsZero: (capacityStage?.rateLimited429 ?? 1) === 0,
 	global429IsZero: (capacityStage?.global429 ?? 1) === 0 && (capacityStage?.unknown429 ?? 1) === 0,
 	unknown429IsZero: (capacityStage?.unknown429 ?? 1) === 0,
+	globalDeniedBaseline,
+	globalDeniedDelta,
+	globalDeniedObservationsComplete,
+	globalDeniedDeltaIsZero: globalDeniedObservationsComplete && globalDeniedDelta === 0,
 	readyValidationRequired: requireReady,
 	dbPoolWaitingIsZero:
 		metricObservations.length > 0 && metricObservations.every((sample) => sample.poolWaiting === 0),
@@ -780,6 +849,7 @@ const capacityGatePassed = [
 	capacityGate.rateLimited429IsZero,
 	capacityGate.global429IsZero,
 	capacityGate.unknown429IsZero,
+	capacityGate.globalDeniedDeltaIsZero,
 	capacityGate.readyValidationRequired,
 	capacityGate.dbPoolWaitingIsZero,
 	capacityGate.metricsObserved,
@@ -811,6 +881,7 @@ const report = {
 		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses one HTTPS HTTP/2 session with multiplexed keep-alive streams.",
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
+		"Quantiles use a bounded uniform reservoir; request counters, status counts, semantic failures, and maxima remain exact.",
 	],
 };
 
