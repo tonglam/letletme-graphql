@@ -969,9 +969,9 @@ export const MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL = `
 `;
 
 /**
- * Season cache-miss payload read by the exact immutable head identity selected
- * by MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL. The finalized event window and
- * missing-head reconciliation remain in that single metadata statement.
+ * Contract-probe query retained for the publication identity fixture. The
+ * Season summary runtime intentionally does not execute this full-payload
+ * query; immutable payloads are read only by the explicit section root.
  */
 export const MY_TOURNAMENT_REVIEW_SEASON_SQL = `
 	SELECT publication.season_id,
@@ -3020,11 +3020,7 @@ function phaseDescriptorsCache(
 
 function seasonCache(
 	value: unknown,
-	expectedPhases: NonNullable<MyTournamentSeasonReview["phases"]>,
-	expectedScope?: Pick<
-		MyTournamentReviewScopeMeta,
-		"rowCount" | "expectedSubjectCount" | "readySubjectCount" | "notApplicableSubjectCount"
-	>
+	expectedPhases: NonNullable<MyTournamentSeasonReview["phases"]>
 ): value is MyTournamentSeasonReview {
 	if (!isRecord(value) || !isKnownReviewState(value.state)) return false;
 	if (!phaseDescriptorsCache(value.phases, expectedPhases)) return false;
@@ -3055,30 +3051,18 @@ function seasonCache(
 		positiveInt(value.latestEventId) === null ||
 		value.latestRevision === null ||
 		value.format === null ||
-		!freshnessCache(value.freshness) ||
+		value.freshness !== null ||
+		typeof value.semanticSha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(value.semanticSha256) ||
 		eventIds.length === 0 ||
 		Number(value.latestEventId) !== Number(eventIds.at(-1))
 	) {
 		return false;
 	}
-	if (value.format === "POINTS") {
-		return (
-			expectedScope !== undefined &&
-			pointsCache(value.points, "SEASON", expectedScope) &&
-			value.h2h === null &&
-			value.knockout === null
-		);
-	}
-	if (value.format === "H2H") {
-		return (
-			h2hCache(value.h2h, undefined, expectedScope, true) &&
-			value.points === null &&
-			value.knockout === null
-		);
-	}
-	return (
-		knockoutCache(value.knockout, expectedScope) && value.points === null && value.h2h === null
-	);
+	// Season is a metadata-only phase index.  Section roots are the sole path
+	// that materializes immutable chunks, so a cached summary must never carry
+	// a full Points/H2H/Knockout payload (or its freshness clock).
+	return value.points === null && value.h2h === null && value.knockout === null;
 }
 
 type SeasonSectionCacheExpectation = {
@@ -4499,7 +4483,6 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 
 	async loadSeasonReview(context, args) {
 		validateReviewEventId(args.throughEventId, "throughEventId");
-		const first = boundedFirst(args.first, 100);
 		const metadataResult = await context.database.query<SeasonMetadataRow>(
 			MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
 			[context.currentSeason.seasonId, args.tournamentId, args.throughEventId]
@@ -4715,32 +4698,13 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			[]
 		);
 		phaseDescriptors?.sort((left, right) => left.startEventId - right.startEventId);
-		const cursor = latestHead
-			? decodePublicationCursor(
-					{
-						season_id: context.currentSeason.seasonId,
-						tournament_id: args.tournamentId,
-						event_id: latestHead.event_id,
-						revision: latestHead.revision,
-						format: latestHead.format,
-					},
-					args.after,
-					"SEASON"
-				)
-			: null;
 		const latestHeadMetadata = latestHead ? rowsByEvent.get(latestHead.event_id) : undefined;
-		const expectedScope =
-			latestHead && latestHeadMetadata
-				? {
-						rowCount: Number(latestHeadMetadata.row_count),
-						expectedSubjectCount: Number(latestHeadMetadata.expected_subject_count),
-						readySubjectCount: Number(latestHeadMetadata.ready_subject_count),
-						notApplicableSubjectCount: Number(latestHeadMetadata.not_applicable_subject_count),
-					}
-				: undefined;
+		if (latestHead && !latestHeadMetadata) {
+			throw integrityError("Review season latest head metadata disappeared during read");
+		}
 		const key = gqlCacheKey(
 			context,
-			`my-tournament-review-v2.1:season:${args.tournamentId}:${args.throughEventId}:${first}:${cursor?.canonical ?? ""}:${unavailableState}:${finalizedEventIds.join(",")}:${metadataRows
+			`my-tournament-review-v2.1:season:${args.tournamentId}:${args.throughEventId}:${unavailableState}:${finalizedEventIds.join(",")}:${metadataRows
 				.map((row) =>
 					[
 						row.event_id ?? "null",
@@ -4758,7 +4722,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
 			cacheDecoder<MyTournamentSeasonReview>(value, (candidate) =>
-				seasonCache(candidate, phaseDescriptors ?? [], expectedScope)
+				seasonCache(candidate, phaseDescriptors ?? [])
 			)
 		);
 		if (cached) return refreshSeasonAge(cached);
@@ -4782,58 +4746,27 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		}
 		if (!latestHead)
 			throw integrityError("Review season latest finalized event has no publication head");
-		const result = await context.database.query<PublicationRow>(MY_TOURNAMENT_REVIEW_SEASON_SQL, [
-			context.currentSeason.seasonId,
-			args.tournamentId,
-			args.throughEventId,
-			latestFinalizedEventId,
-			String(latestHead.revision),
-			latestHead.content_sha256,
-		]);
-		const rows = parsePublicationRows(result.rows);
-		if (rows.length === 0) {
-			throw integrityError("Review season head publication disappeared during read");
+		const latestMeta = latestHeadMetadata!;
+		const latestFormat = reviewFormat(latestMeta.format);
+		if (!latestFormat || latestMeta.content_sha256 !== latestHead.content_sha256) {
+			throw integrityError("Latest review head metadata is invalid");
 		}
-		const materializedRows = await Promise.all(
-			rows.map((row) => materializePublicationRow(context.database, row))
-		);
-		for (const row of materializedRows) mapScopeMeta(row);
-		const latest = materializedRows[0] ?? null;
-		if (
-			latest &&
-			(Number(latest.event_id) !== latestFinalizedEventId ||
-				String(latest.revision) !== String(latestHead.revision) ||
-				latest.content_sha256 !== latestHead.content_sha256)
-		) {
-			throw integrityError("Review season payload does not match the observed publication head");
-		}
-		const payloadFinalizedEventIds = parseFinalizedEventIds(latest?.finalized_event_ids);
-		if (
-			payloadFinalizedEventIds !== null &&
-			JSON.stringify(payloadFinalizedEventIds) !== JSON.stringify(finalizedEventIds)
-		) {
-			throw integrityError("Review season payload event window does not match finalized events");
-		}
-		if (!latest) throw integrityError("Review season publication row is missing");
-		const latestMeta = mapScopeMeta(latest);
-		const latestFormat = latestMeta.format;
-		if (!latestFormat) throw integrityError("Latest review format is invalid");
 		const season: MyTournamentSeasonReview = {
 			state: "READY",
 			tournamentId: args.tournamentId,
 			throughEventId: args.throughEventId,
-			latestEventId: Number(latest.event_id),
-			latestRevision: String(latest.revision),
+			latestEventId: latestHead.event_id,
+			latestRevision: String(latestHead.revision),
 			format: latestFormat,
-			freshness: latestMeta.freshness,
+			// The Season root is a metadata-only phase index.  Settled/published
+			// timestamps remain on the phase descriptors; payload reads belong to
+			// the explicit section root.
+			freshness: null,
 			finalizedEventIds,
-			points: latestFormat === "POINTS" ? pointsFromPayload(latest, first, cursor, "SEASON") : null,
-			h2h:
-				latestFormat === "H2H"
-					? h2hFromPayload(latest, first, cursor, undefined, undefined, true)
-					: null,
-			knockout: latestFormat === "KNOCKOUT" ? knockoutFromPayload(latest, first, cursor) : null,
-			semanticSha256: latestMeta.contentSha256,
+			points: null,
+			h2h: null,
+			knockout: null,
+			semanticSha256: latestHead.content_sha256,
 			phases: phaseDescriptors ?? [],
 		};
 		await writeJsonQueryCache(context, key, season, REVIEW_CACHE_TTL_SECONDS);
