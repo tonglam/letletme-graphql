@@ -29,6 +29,9 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain("sleep 20");
 		expect(workflow).toContain("\\${first%|*}");
 		expect(workflow).toContain("\\${second%|*}");
+		expect(workflow).toContain("inactive_owner");
+		expect(workflow).toContain("after_inactive_proof");
+		expect(workflow).toContain("\\${after_inactive_proof%|*}");
 		expect(workflow).not.toContain("GRAPHQL_ENV");
 	});
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
-	poolWaitWasEnqueued,
+	poolHasPendingCheckout,
 	runDatabaseHealthCheck,
 	type DatabaseHealthClient,
 } from "../../src/infra/database";
@@ -21,12 +21,11 @@ const makeClient = (failOn?: string) => {
 };
 
 describe("PostgreSQL health probe", () => {
-	it("records a checkout only when pg-pool actually grows its waiting queue", () => {
-		expect(poolWaitWasEnqueued(0, 0)).toBe(false);
-		expect(poolWaitWasEnqueued(1, 1)).toBe(false);
-		expect(poolWaitWasEnqueued(0, 1)).toBe(true);
-		expect(poolWaitWasEnqueued(1, 2)).toBe(true);
-		expect(poolWaitWasEnqueued(2, 1)).toBe(false);
+	it("recognizes only a checkout that remains queued after the idle handoff", () => {
+		expect(poolHasPendingCheckout(0)).toBe(false);
+		expect(poolHasPendingCheckout(1)).toBe(true);
+		expect(poolHasPendingCheckout(2)).toBe(true);
+		expect(poolHasPendingCheckout(-1)).toBe(false);
 	});
 
 	it("scopes a two-second statement timeout to a checked-out transaction", async () => {

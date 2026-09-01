@@ -19,15 +19,19 @@ type PoolQueueState = Readonly<{
 }>;
 
 /**
- * pg-pool enqueues a checkout synchronously before returning the query/connect
- * promise. Compare the queue before and after the operation so an idle client
- * that is already promised to another checkout cannot hide real contention.
+ * A checkout with an idle client is briefly represented in pg-pool's pending
+ * queue until its next-tick pulse hands that client over. Observe the queue in
+ * the following check phase; only a request still queued after that handoff is
+ * a real pool wait.
  */
-export const poolWaitWasEnqueued = (before: number, after: number): boolean =>
-	Number.isSafeInteger(before) && Number.isSafeInteger(after) && after > before;
+export const poolHasPendingCheckout = (waitingCount: number): boolean =>
+	Number.isSafeInteger(waitingCount) && waitingCount > 0;
 
-const recordPoolWaitIfEnqueued = (pool: PoolQueueState, before: number): void => {
-	if (poolWaitWasEnqueued(before, pool.waitingCount)) postgresPoolWaitEvents.inc();
+const recordPoolWaitAfterPulse = (pool: PoolQueueState): void => {
+	if (!poolHasPendingCheckout(pool.waitingCount)) return;
+	setImmediate(() => {
+		if (poolHasPendingCheckout(pool.waitingCount)) postgresPoolWaitEvents.inc();
+	});
 };
 
 /**
@@ -39,9 +43,8 @@ export const database: QueryExecutor = {
 		text: string,
 		values: readonly unknown[] = []
 	): Promise<QueryResult<Row>> => {
-		const waitingBefore = dbPool.waitingCount;
 		const result = dbPool.query<Row>(text, [...values]);
-		recordPoolWaitIfEnqueued(dbPool, waitingBefore);
+		recordPoolWaitAfterPulse(dbPool);
 		return result;
 	},
 };
@@ -76,8 +79,7 @@ export const runDatabaseHealthCheck = async (
 
 export const databaseHealthCheck = async (): Promise<void> =>
 	runDatabaseHealthCheck(() => {
-		const waitingBefore = dbPool.waitingCount;
 		const client = dbPool.connect() as unknown as Promise<DatabaseHealthClient>;
-		recordPoolWaitIfEnqueued(dbPool, waitingBefore);
+		recordPoolWaitAfterPulse(dbPool);
 		return client;
 	}, 2_000);
