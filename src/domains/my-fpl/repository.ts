@@ -1765,7 +1765,10 @@ const snapshotFreshness = (
 
 const SNAPSHOT_PUBLICATION_UUID_RE =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SNAPSHOT_ALGORITHM_VERSION = "fpl-projected-autosubs-v1";
+// My FPL daily snapshots are produced by the Live Points V2 projection. This
+// is a hard contract: accepting the legacy projection marker would allow a
+// publication from a different producer algorithm onto the review surface.
+const SNAPSHOT_ALGORITHM_VERSION = "live-points-v2-algorithm-1";
 
 const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean => {
 	const sourceCheckedAt = isoString(row.source_checked_at);
