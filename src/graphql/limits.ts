@@ -80,7 +80,14 @@ const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
 // These roots contain a bounded list alongside fixed-size sibling projections.
 // Charge the requested list once, but do not multiply unrelated siblings by it.
-const NON_PROPAGATING_LIMIT_ROOTS = new Set(["playerStatsBootstrap"]);
+// Tournament review branches are mutually exclusive by the published format,
+// so charging the same page size through points, H2H, and knockout would
+// overstate the work of a single snapshot read.
+const NON_PROPAGATING_LIMIT_ROOTS = new Set([
+	"playerStatsBootstrap",
+	"myTournamentGameweekReview",
+	"myTournamentSeasonReview",
+]);
 
 type GraphQLPayload = GraphQLRequestPayload;
 

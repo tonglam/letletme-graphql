@@ -839,6 +839,16 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges a tournament review page once across mutually exclusive format branches", () => {
+		const fields = Array.from({ length: 100 }, () => "state").join(" ");
+		for (const query of [
+			`query { myTournamentGameweekReview(tournamentId: 1, eventId: 1, first: 100) { ${fields} } }`,
+			`query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1, first: 100) { ${fields} } }`,
+		]) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({ ok: true });
+		}
+	});
+
 	it("allows one bounded competitions desk projection above the generic AST ceiling", () => {
 		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
 		expect(
