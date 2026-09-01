@@ -504,6 +504,33 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects retired fields in a desk fixture before accepting HEAD metadata", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.desk.active;
+		if (!active.publication || !active.payload || !active.metadata)
+			throw new Error("missing active desk publication");
+		const fixtures = JSON.parse(active.payload) as Array<Record<string, unknown>>;
+		const firstFixture = fixtures[0];
+		if (!firstFixture) throw new Error("missing desk fixture");
+		firstFixture.retiredField = true;
+		const corruptedPayload = encode(fixtures);
+		const publication = JSON.parse(active.publication) as {
+			desk: { bytes: number; sha256: string };
+		};
+		publication.desk.bytes = Buffer.byteLength(corruptedPayload, "utf8");
+		publication.desk.sha256 = digest(fixtures);
+		active.payload = corruptedPayload;
+		active.metadata = itemMeta(fixtures);
+		active.publication = JSON.stringify(publication);
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("rejects same-length detail corruption before accepting HEAD metadata", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);

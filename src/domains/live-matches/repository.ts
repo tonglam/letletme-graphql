@@ -252,6 +252,23 @@ const statIdentifierKey = (value: unknown): string | null =>
 	typeof value === "string" && value.trim().length > 0 ? value.trim().toLowerCase() : null;
 
 const LIVE_MATCH_DETAIL_STAT_KEYS = ["identifier", "value", "awardedPoints"] as const;
+const LIVE_MATCH_DESK_FIXTURE_KEYS = [
+	"fixtureId",
+	"eventId",
+	"homeTeamId",
+	"homeTeamName",
+	"homeTeamShortName",
+	"awayTeamId",
+	"awayTeamName",
+	"awayTeamShortName",
+	"homeScore",
+	"awayScore",
+	"kickoffTime",
+	"minutes",
+	"started",
+	"finished",
+	"finishedProvisional",
+] as const;
 const LIVE_MATCH_DETAIL_PLAYER_KEYS = [
 	"id",
 	"webName",
@@ -945,7 +962,7 @@ const validDetailMetadataPayload = (
 };
 
 const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFixture => {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DESK_FIXTURE_KEYS)) return false;
 	const fixtureId = safeInteger(value.fixtureId);
 	const event = safeInteger(value.eventId);
 	const homeTeamId = safeInteger(value.homeTeamId);

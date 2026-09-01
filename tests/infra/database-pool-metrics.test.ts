@@ -24,6 +24,9 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain('session.on("goaway"');
 		expect(capacitySource).toContain("settings.maxConcurrentStreams");
 		expect(capacitySource).toContain("settingsReceived");
+		expect(capacitySource).toContain("advertisedMaxConcurrentStreams = 0");
+		expect(capacitySource).toContain("maxConcurrentStreams: 0");
+		expect(capacitySource).toContain("http2 peer reduced maxConcurrentStreams to zero");
 		expect(capacitySource).toContain("http2CapacityTarget");
 		expect(capacitySource).toContain("ensureHttp2Capacity");
 		expect(capacitySource).toContain("remoteMaxConcurrentStreams");

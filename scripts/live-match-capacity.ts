@@ -430,6 +430,18 @@ const createHttp2Session = (): Promise<ClientHttp2Session> =>
 				if (!settingsReceived) {
 					finishReject(new Error("http2 peer did not advertise a usable maxConcurrentStreams"));
 					if (!currentSession.closed && !currentSession.destroyed) currentSession.destroy();
+					return;
+				}
+				advertisedMaxConcurrentStreams = 0;
+				const index = http2Sessions.findIndex((slot) => slot.session === currentSession);
+				if (index >= 0) {
+					const slot = http2Sessions[index]!;
+					http2Sessions[index] = { ...slot, maxConcurrentStreams: 0 };
+					wakeHttp2CapacityWaiters();
+					if (http2CapacityTarget !== null) scheduleHttp2CapacityReplenish();
+				} else {
+					finishReject(new Error("http2 peer reduced maxConcurrentStreams to zero"));
+					if (!currentSession.closed && !currentSession.destroyed) currentSession.destroy();
 				}
 				return;
 			}
