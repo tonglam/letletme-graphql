@@ -1615,11 +1615,6 @@ export const readLiveMatchday = async (
 	};
 	let activeBundle = await readRedis(requested, "active");
 	let redisReadFailed = activeBundle === null;
-	if (activeBundle === null && requested === undefined && cachedActiveEvent !== undefined) {
-		const cachedBundle = await readRedis(cachedActiveEvent, "active");
-		if (cachedBundle !== null) activeBundle = cachedBundle;
-		else redisReadFailed = true;
-	}
 
 	let postgresReadFailed = false;
 	let unscopedPostgres: PostgresCheckpointRead | null | undefined;

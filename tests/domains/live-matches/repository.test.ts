@@ -1079,8 +1079,10 @@ describe("Live Matches V3 read path", () => {
 		expect(recovered.eventId).toBe(1);
 		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.redisRoundtrips).toBe(1);
 		expect(retained.eventId).toBe(1);
 		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.redisRoundtrips).toBe(1);
 		expect(databaseReads).toBe(0);
 		expect(LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS).toBeGreaterThan(0);
 	});
@@ -1586,7 +1588,7 @@ describe("Live Matches V3 read path", () => {
 		const result = await graphql({
 			schema,
 			contextValue: buildSnapshotContext(redis),
-			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state } } } }`,
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state } matches { fixtureId players { id } } } } }`,
 		});
 
 		expect(result.errors).toBeUndefined();
@@ -1594,6 +1596,38 @@ describe("Live Matches V3 read path", () => {
 			availability: "READY",
 			delivery: { state: "FINAL" },
 			snapshot: { detailDelivery: { state: "FINAL" } },
+		});
+	});
+
+	it("does not report FINAL from a manifest-only HEAD", async () => {
+		const redis = new TestRedis();
+		attachBundle(
+			redis,
+			buildBundle({
+				deskState: "FINALIZED",
+				detailFinalized: true,
+				checkpointed: true,
+			}).bundle
+		);
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state reasonCodes } snapshot { detailDelivery { state reasonCodes } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			availability: "READY",
+			delivery: {
+				state: "DEGRADED",
+				reasonCodes: ["REDIS_CURRENT", "DETAIL_OR_DESK_DEGRADED", "FINAL_CHECKPOINT_PENDING"],
+			},
+			snapshot: {
+				detailDelivery: {
+					state: "DEGRADED",
+					reasonCodes: ["FINAL_CHECKPOINT_PENDING"],
+				},
+			},
 		});
 	});
 

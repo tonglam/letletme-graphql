@@ -124,6 +124,7 @@ const finalPublication = (read: LiveMatchdayRead): boolean =>
 	read.desk?.publication.state === "FINALIZED" &&
 	read.desk.publication.checkpointedAt !== null &&
 	read.detail?.publication.finalized === true &&
+	read.detail.payloadLoaded !== false &&
 	read.detail.publication.checkpointedAt !== null &&
 	read.detail.publication.observedDeskGeneration === read.desk.publication.generation &&
 	read.detail.publication.fixtureIdentityRevision ===
@@ -326,10 +327,15 @@ const observeLiveMatchRead = (
 	if (read.detail && read.detail.servedFrom !== "REDIS_CURRENT") {
 		metrics.liveMatchFallbackTotal.labels("detail", read.detail.servedFrom).inc();
 	}
-	const encodedResponse = JSON.stringify(response);
-	metrics.liveMatchPayloadBytes
-		.labels(mode, "resolver")
-		.observe(Buffer.byteLength(encodedResponse, "utf8"));
+	// GraphQL serializes the response after the resolver returns. Avoid a second
+	// full allocation on the hot FULL path; small metadata reads are measured
+	// exactly, while full payloads are sampled for an operational estimate.
+	if (mode !== "FULL" || Math.random() < 0.01) {
+		const encodedResponse = JSON.stringify(response);
+		metrics.liveMatchPayloadBytes
+			.labels(mode, "resolver")
+			.observe(Buffer.byteLength(encodedResponse, "utf8"));
+	}
 };
 
 const toResult = (read: LiveMatchdayRead) => {

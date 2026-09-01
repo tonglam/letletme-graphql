@@ -230,24 +230,40 @@ function getHttp2Session(): Promise<ClientHttp2Session> {
 	if (http2SessionPromise) return http2SessionPromise;
 
 	http2SessionPromise = new Promise((resolve, reject) => {
-		const session = http2Connect(endpoint.origin, { rejectUnauthorized: true });
+		let session: ClientHttp2Session;
 		let settled = false;
-		const onError = (error: Error) => {
-			if (!settled) {
-				settled = true;
-				reject(error);
-			}
+		let timer: ReturnType<typeof setTimeout> | null = null;
+		const finishReject = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			if (timer !== null) clearTimeout(timer);
+			reject(error);
 		};
+		const onError = (error: Error) => {
+			finishReject(error);
+		};
+		try {
+			session = http2Connect(endpoint.origin, { rejectUnauthorized: true });
+		} catch (error) {
+			finishReject(error instanceof Error ? error : new Error(String(error)));
+			return;
+		}
 		session.on("error", onError);
 		session.once("connect", () => {
 			if (settled) return;
 			settled = true;
+			if (timer !== null) clearTimeout(timer);
 			http2Session = session;
 			resolve(session);
 		});
 		session.once("close", () => {
 			if (http2Session === session) http2Session = null;
 		});
+		timer = setTimeout(() => {
+			const error = new Error("http2 session timeout");
+			finishReject(error);
+			if (!session.closed && !session.destroyed) session.destroy();
+		}, timeoutMs);
 	});
 	const pending = http2SessionPromise;
 	void pending.then(
