@@ -2895,6 +2895,62 @@ describe("My Tournament Review V2 repository", () => {
 		expect(publicationReads).toBe(2);
 	});
 
+	it("accepts Season H2H metadata with more standings than matches", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		matches[0] = {
+			...matches[0],
+			isBye: false,
+			home: { ...(matches[0]!.home as Record<string, unknown>), matchPoints: 3 },
+			away: {
+				entryId: 6954,
+				entryName: "Second XI",
+				isAverage: false,
+				netPoints: 38,
+				matchPoints: 0,
+				rank: 2,
+			},
+		};
+		const standings = h2h.standings as Array<Record<string, unknown>>;
+		standings.push({
+			...standings[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			rank: 2,
+			won: 0,
+			lost: 1,
+			matchPoints: 0,
+			pointsFor: 38,
+			pointsAgainst: 42,
+		});
+		const latest = h2hPublicationRow({
+			payload,
+			expected_subject_count: standings.length,
+			ready_subject_count: standings.length,
+			not_applicable_subject_count: 0,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return { rows: [seasonMetadataRow(latest, [4])] };
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		const result = await createMyTournamentReviewRepository().loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+		});
+		expect(result.state).toBe("READY");
+		expect(result.h2h?.matches).toHaveLength(1);
+		expect(result.h2h?.standings).toHaveLength(2);
+	});
+
 	it("uses format-specific cursors for Season knockout pages", async () => {
 		const base = knockoutPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
