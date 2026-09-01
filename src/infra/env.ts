@@ -20,7 +20,8 @@ type EnvKey =
 	| "GRAPHQL_SERVICE_TOKEN"
 	| "METRICS_TOKEN"
 	| "CORS_ORIGIN"
-	| "GRAPHQL_RATE_LIMIT_MODE";
+	| "GRAPHQL_RATE_LIMIT_MODE"
+	| "RATE_LIMIT_TELEMETRY_SPOOL_DIR";
 
 const readEnv = (key: EnvKey): string | undefined => readRuntimeEnv(key);
 
@@ -217,4 +218,9 @@ export const env = {
 	// Admission uses only the reviewed versioned profile. Retired overrides are
 	// rejected by the hard-cut configuration gate above.
 	GRAPHQL_RATE_LIMIT_MODE: parseGraphQLRateLimitMode(readEnv("GRAPHQL_RATE_LIMIT_MODE")),
+
+	// Durable marker spool used by rate-limit telemetry recovery. The container
+	// supplies the production path; development and tests use the adapter's
+	// process-scoped default when this is empty.
+	RATE_LIMIT_TELEMETRY_SPOOL_DIR: readEnv("RATE_LIMIT_TELEMETRY_SPOOL_DIR")?.trim() ?? "",
 } as const;

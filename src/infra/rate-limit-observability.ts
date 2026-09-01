@@ -85,7 +85,7 @@ export const rateLimitTelemetryPersistenceFailureKey = (
 // so a Redis outage cannot be forgotten when the GraphQL process is restarted.
 // Non-production test processes use a PID-scoped temporary directory.
 const rateLimitTelemetrySpoolDirectory =
-	process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR?.trim() ||
+	env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ||
 	(env.isProduction
 		? "/var/lib/letletme-graphql/rate-limit-telemetry"
 		: join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`));
