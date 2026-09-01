@@ -90,6 +90,7 @@ const MAX_LIST_ARGUMENT_WEIGHT = 200;
 // overstate the work of a single snapshot read.
 const NON_PROPAGATING_LIMIT_ROOTS = new Set([
 	"playerStatsBootstrap",
+	"myTournamentReviewCatalog",
 	"myTournamentGameweekReview",
 	"myTournamentSeasonReview",
 	"tournamentOfficialH2HHistory",

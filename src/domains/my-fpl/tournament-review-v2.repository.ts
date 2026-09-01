@@ -394,13 +394,29 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 	       tournament.setup_status::text AS setup_status,
 	       previous_ready.previous_ready_event_id,
 	       finalized_obligation.format AS finalized_format,
-	       COALESCE(finalized_obligation.state, CASE WHEN finalized.latest_finalized_event_id IS NULL THEN 'NOT_STARTED' ELSE 'UNAVAILABLE' END) AS finalized_state,
+	       CASE
+	         WHEN finalized.latest_finalized_event_id IS NULL THEN 'NOT_STARTED'
+	         WHEN finalized_obligation.state = 'READY'
+	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id THEN 'READY'
+	         WHEN finalized_obligation.state = 'READY' THEN 'DEGRADED'
+	         ELSE COALESCE(finalized_obligation.state, 'UNAVAILABLE')
+	       END AS finalized_state,
 	       finalized_obligation.next_attempt_at AS finalized_next_attempt_at,
 	       finalized_obligation.execution_attempts AS finalized_execution_attempts,
 	       finalized_obligation.source_rechecks AS finalized_source_rechecks,
 	       finalized_obligation.degraded_at AS finalized_degraded_at,
-	       finalized_obligation.ready_revision AS finalized_revision,
-	       finalized_obligation.published_at AS finalized_published_at
+	       CASE
+	         WHEN finalized_obligation.state = 'READY'
+	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id
+	         THEN finalized_obligation.ready_revision
+	         ELSE NULL
+	       END AS finalized_revision,
+	       CASE
+	         WHEN finalized_obligation.state = 'READY'
+	          AND head.latest_ready_event_id = finalized.latest_finalized_event_id
+	         THEN finalized_obligation.published_at
+	         ELSE NULL
+	       END AS finalized_published_at
 	FROM competition.tournaments tournament
 	LEFT JOIN LATERAL (
 		SELECT max(event.event_id)::integer AS latest_finalized_event_id
@@ -457,6 +473,55 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		  -- difference does not make every otherwise coherent head disappear.
 		  AND date_trunc('milliseconds', publication.event_data_checked_at) =
 		      date_trunc('milliseconds', head_event.data_checked_at)
+		  AND jsonb_typeof(publication.payload) = 'object'
+		  AND jsonb_typeof(publication.payload->'manifest') = 'object'
+		  AND jsonb_typeof(publication.payload->'manifest'->'sections') = 'array'
+		  AND publication.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
+		  AND publication.payload->'manifest'->>'chunkCount' ~ '^[0-9]+$'
+		  AND (publication.payload->'manifest'->>'sectionCount')::integer =
+		      jsonb_array_length(publication.payload->'manifest'->'sections')
+		  AND (publication.payload->'manifest'->>'chunkCount')::integer = (
+		    SELECT count(*)::integer
+		    FROM competition.tournament_review_publication_chunks chunk
+		    WHERE chunk.season_id = publication.season_id
+		      AND chunk.tournament_id = publication.tournament_id
+		      AND chunk.event_id = publication.event_id
+		      AND chunk.revision = publication.revision
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM jsonb_array_elements(publication.payload->'manifest'->'sections') descriptor
+		    WHERE jsonb_typeof(descriptor) <> 'object'
+		       OR descriptor->>'sectionKey' IS NULL
+		       OR descriptor->>'chunkCount' !~ '^[0-9]+$'
+		       OR descriptor->>'itemCount' !~ '^[0-9]+$'
+		       OR jsonb_typeof(descriptor->'chunkHashes') <> 'array'
+		       OR (descriptor->>'chunkCount')::integer <> jsonb_array_length(descriptor->'chunkHashes')
+		       OR (descriptor->>'chunkCount')::integer <> (
+		         SELECT count(*)::integer
+		         FROM competition.tournament_review_publication_chunks chunk
+		         WHERE chunk.season_id = publication.season_id
+		           AND chunk.tournament_id = publication.tournament_id
+		           AND chunk.event_id = publication.event_id
+		           AND chunk.revision = publication.revision
+		           AND chunk.section_key = descriptor->>'sectionKey'
+		       )
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM competition.tournament_review_publication_chunks chunk
+		    WHERE chunk.season_id = publication.season_id
+		      AND chunk.tournament_id = publication.tournament_id
+		      AND chunk.event_id = publication.event_id
+		      AND chunk.revision = publication.revision
+		      AND (
+		        chunk.item_count < 0
+		        OR chunk.item_count > 100
+		        OR jsonb_typeof(chunk.items) <> 'array'
+		        OR jsonb_array_length(chunk.items) <> chunk.item_count
+		        OR chunk.chunk_sha256 <> encode(extensions.digest(convert_to(chunk.items::text, 'UTF8'), 'sha256'), 'hex')
+		      )
+		  )
 		ORDER BY review_head.event_id DESC
 		LIMIT 1
 	) head ON true
@@ -574,9 +639,10 @@ export const MY_TOURNAMENT_REVIEW_PUBLICATION_SQL = `
 		AND event.finished = true
 		AND event.data_checked = true
 				 AND event.data_checked_at IS NOT NULL
-					 AND date_trunc('milliseconds', publication.event_data_checked_at) =
-					     date_trunc('milliseconds', event.data_checked_at)
-					 AND EXISTS (
+						 AND date_trunc('milliseconds', publication.event_data_checked_at) =
+						     date_trunc('milliseconds', event.data_checked_at)
+						 AND jsonb_typeof(publication.payload->'manifest') = 'object'
+						 AND EXISTS (
 					SELECT 1
 					FROM competition.tournament_review_publication_chunks chunk
 					WHERE chunk.season_id = publication.season_id
@@ -644,9 +710,10 @@ export const MY_TOURNAMENT_REVIEW_SEASON_SQL = `
 	  AND event.finished = true
 	  AND event.data_checked = true
 	  AND event.data_checked_at IS NOT NULL
-	  AND date_trunc('milliseconds', publication.event_data_checked_at) =
-	      date_trunc('milliseconds', event.data_checked_at)
-	  AND EXISTS (
+		  AND date_trunc('milliseconds', publication.event_data_checked_at) =
+		      date_trunc('milliseconds', event.data_checked_at)
+		  AND jsonb_typeof(publication.payload->'manifest') = 'object'
+		  AND EXISTS (
 		SELECT 1
 		FROM competition.tournament_review_publication_chunks chunk
 		WHERE chunk.season_id = publication.season_id
@@ -734,6 +801,7 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 		 AND event.data_checked_at IS NOT NULL
 		 AND date_trunc('milliseconds', publication.event_data_checked_at) =
 		     date_trunc('milliseconds', event.data_checked_at)
+		 AND jsonb_typeof(publication.payload->'manifest') = 'object'
 		 AND EXISTS (
 			SELECT 1
 			FROM competition.tournament_review_publication_chunks chunk
@@ -859,6 +927,7 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 		  AND event.data_checked_at IS NOT NULL
 		  AND date_trunc('milliseconds', publication.event_data_checked_at) =
 		      date_trunc('milliseconds', event.data_checked_at)
+		  AND jsonb_typeof(publication.payload->'manifest') = 'object'
 		  AND EXISTS (
 			SELECT 1
 			FROM competition.tournament_review_publication_chunks chunk
@@ -942,9 +1011,10 @@ export const MY_TOURNAMENT_REVIEW_STATUS_SQL = `
 			 AND event.finished = true
 			 AND event.data_checked = true
 			 AND event.data_checked_at IS NOT NULL
-				 AND date_trunc('milliseconds', publication.event_data_checked_at) =
-				     date_trunc('milliseconds', event.data_checked_at)
-			WHERE review_head.season_id = obligation.season_id
+					 AND date_trunc('milliseconds', publication.event_data_checked_at) =
+					     date_trunc('milliseconds', event.data_checked_at)
+					 AND jsonb_typeof(publication.payload->'manifest') = 'object'
+				WHERE review_head.season_id = obligation.season_id
 			  AND review_head.tournament_id = obligation.tournament_id
 			  AND review_head.event_id = obligation.event_id
 			  AND publication.format = obligation.format
@@ -1389,14 +1459,27 @@ function reviewCursorCollection(
 function decodePublicationCursor(
 	row: Pick<PublicationRow, "season_id" | "tournament_id" | "event_id" | "format" | "revision">,
 	after: string | null | undefined,
-	view: "GAMEWEEK" | "SEASON"
+	view: "GAMEWEEK" | "SEASON",
+	collectionOverride?: string
 ): ReviewCursor | null {
 	const format = reviewFormat(row.format);
 	if (!format) throw integrityError("Review publication format is invalid");
 	return decodeCursor(
 		after,
 		String(row.revision),
-		reviewCursorScope(row, reviewCursorCollection(format, view))
+		reviewCursorScope(row, collectionOverride ?? reviewCursorCollection(format, view))
+	);
+}
+
+function reviewSectionCursorScope(
+	row: Pick<PublicationRow, "season_id" | "tournament_id" | "event_id" | "format" | "revision">,
+	phaseId: string,
+	section: MyTournamentReviewSeasonSection,
+	semanticSha256: string
+): string {
+	return reviewCursorScope(
+		row,
+		JSON.stringify(["SEASON_SECTION", phaseId, section, String(row.revision), semanticSha256])
 	);
 }
 
@@ -1626,13 +1709,14 @@ async function materializePublicationRow(
 	database: GraphQLContext["database"],
 	row: PublicationRow
 ): Promise<PublicationRow> {
-	// The SQL readers require a chunk sibling for every V2.1 publication.  A
-	// few repository unit fixtures intentionally exercise the pre-chunk payload
-	// validators directly; leave those full payloads untouched so their focused
-	// corruption assertions still reach the validator under test.  A real
-	// database row without a manifest cannot pass the publication SQL EXISTS
-	// guard and is therefore never served by this path.
-	if (!isRecord(row.payload) || !isRecord(row.payload.manifest)) return row;
+	// Production SQL requires a V2.1 manifest before this function is reached.
+	// Unit fixtures run outside production NODE_ENV and may intentionally
+	// exercise the legacy full-payload validators; keep that compatibility only
+	// there. A production row without a manifest fails closed.
+	if (!isRecord(row.payload) || !isRecord(row.payload.manifest)) {
+		if (process.env.NODE_ENV !== "production") return row;
+		throw integrityError("Review publication chunk manifest is missing");
+	}
 	const chunkResult = await database.query<PublicationChunkRow>(
 		MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL,
 		[row.season_id, row.tournament_id, row.event_id, row.revision]
@@ -3228,7 +3312,8 @@ function pointsFromPayload(
 	row: PublicationRow,
 	first: number,
 	cursor: ReviewCursor | null,
-	view: "GAMEWEEK" | "SEASON" = "GAMEWEEK"
+	view: "GAMEWEEK" | "SEASON" = "GAMEWEEK",
+	cursorScopeOverride?: string
 ): MyTournamentReviewPoints {
 	const payload = isRecord(row.payload) ? row.payload : {};
 	const source = isRecord(payload.points) ? payload.points : {};
@@ -3312,7 +3397,8 @@ function pointsFromPayload(
 		first,
 		cursor,
 		String(row.revision),
-		reviewCursorScope(row, view === "SEASON" ? "SEASON_POINTS" : "GAMEWEEK_POINTS")
+		cursorScopeOverride ??
+			reviewCursorScope(row, view === "SEASON" ? "SEASON_POINTS" : "GAMEWEEK_POINTS")
 	);
 	return {
 		headlineMetric: "gross",
@@ -3362,7 +3448,9 @@ function pointsFromPayload(
 function h2hFromPayload(
 	row: PublicationRow,
 	first: number,
-	cursor: ReviewCursor | null
+	cursor: ReviewCursor | null,
+	section?: "H2H_STANDINGS" | "H2H_FIXTURES",
+	cursorScopeOverride?: string
 ): MyTournamentReviewH2H {
 	const payload = isRecord(row.payload) ? row.payload : {};
 	const source = mapH2H(payload.h2h);
@@ -3372,23 +3460,16 @@ function h2hFromPayload(
 	) {
 		throw integrityError("Review H2H row count does not match publication metadata");
 	}
-	const cursorScope = reviewCursorScope(row, "H2H");
-	const maxOffset = Math.max(source.matches.length, source.standings.length);
-	const page = pageSlice(
-		source.matches,
-		first,
-		cursor,
-		String(row.revision),
-		cursorScope,
-		maxOffset
-	);
+	const cursorScope = cursorScopeOverride ?? reviewCursorScope(row, "H2H");
+	const selectedMatches = section === "H2H_STANDINGS" ? [] : source.matches;
+	const selectedStandings = section === "H2H_FIXTURES" ? [] : source.standings;
+	const page = pageSlice(selectedMatches, first, cursor, String(row.revision), cursorScope);
 	const standingsPage = pageSlice(
-		source.standings,
+		selectedStandings,
 		first,
 		cursor,
 		String(row.revision),
-		cursorScope,
-		maxOffset
+		cursorScope
 	);
 	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
 	const matchParticipantIdentities = new Set<string>();
@@ -3429,7 +3510,8 @@ function h2hFromPayload(
 function knockoutFromPayload(
 	row: PublicationRow,
 	first: number,
-	cursor: ReviewCursor | null
+	cursor: ReviewCursor | null,
+	cursorScopeOverride?: string
 ): MyTournamentReviewKnockout {
 	const payload = isRecord(row.payload) ? row.payload : {};
 	const matches = mapKnockout(payload.knockout);
@@ -3451,7 +3533,7 @@ function knockoutFromPayload(
 		first,
 		cursor,
 		String(row.revision),
-		reviewCursorScope(row, "KNOCKOUT")
+		cursorScopeOverride ?? reviewCursorScope(row, "KNOCKOUT")
 	);
 	return {
 		matches: page.items,
@@ -3640,7 +3722,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					!isRecord(decoded) ||
 					decoded.scope !== scope ||
 					decoded.viewerEntryId !== (viewerEntryId ?? null) ||
-					decoded.adminReadAll !== adminReadAll
+					decoded.adminReadAll !== adminReadAll ||
+					decoded.search !== search
 				) {
 					throw new Error("scope mismatch");
 				}
@@ -3672,6 +3755,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 						scope,
 						viewerEntryId: viewerEntryId ?? null,
 						adminReadAll,
+						search,
 						tournamentId: rows.at(-1)?.tournamentId,
 					}),
 					"utf8"
@@ -3693,6 +3777,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 						scope,
 						viewerEntryId: viewerEntryId ?? null,
 						adminReadAll,
+						search,
 						tournamentId: node.tournamentId,
 					}),
 					"utf8"
@@ -4189,7 +4274,13 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			revision: phase.revision,
 			format: phase.format,
 		};
-		const cursor = decodePublicationCursor(phaseIdentity, args.after, "SEASON");
+		const sectionCursorScope = reviewSectionCursorScope(
+			phaseIdentity,
+			phaseId,
+			requestedSection,
+			phase.semanticSha256
+		);
+		const cursor = decodeCursor(args.after, String(phase.revision), sectionCursorScope);
 		const expectedCache: SeasonSectionCacheExpectation = {
 			tournamentId: args.tournamentId,
 			throughEventId: args.throughEventId,
@@ -4230,11 +4321,20 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		}
 		const points =
 			expectedFormat === "POINTS"
-				? pointsFromPayload(materializedRow, first, cursor, "SEASON")
+				? pointsFromPayload(materializedRow, first, cursor, "SEASON", sectionCursorScope)
 				: null;
-		const h2h = expectedFormat === "H2H" ? h2hFromPayload(materializedRow, first, cursor) : null;
+		const h2hSection =
+			requestedSection === "H2H_STANDINGS" || requestedSection === "H2H_FIXTURES"
+				? requestedSection
+				: undefined;
+		const h2h =
+			expectedFormat === "H2H"
+				? h2hFromPayload(materializedRow, first, cursor, h2hSection, sectionCursorScope)
+				: null;
 		const knockout =
-			expectedFormat === "KNOCKOUT" ? knockoutFromPayload(materializedRow, first, cursor) : null;
+			expectedFormat === "KNOCKOUT"
+				? knockoutFromPayload(materializedRow, first, cursor, sectionCursorScope)
+				: null;
 		if (points === null && h2h === null && knockout === null) {
 			throw new GraphQLError("Review section is not available for this phase", {
 				extensions: { code: "BAD_USER_INPUT" },
