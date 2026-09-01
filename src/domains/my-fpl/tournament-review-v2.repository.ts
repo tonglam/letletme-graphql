@@ -401,6 +401,36 @@ type ObligationRow = {
 function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: string): string {
 	return `
   AND jsonb_typeof(${publicationAlias}.payload) = 'object'
+  AND ${publicationAlias}.schema_version = 'my-tournament-review-v2.1'
+  AND ${publicationAlias}.metric_version = 'settled-review-v2'
+  AND ${publicationAlias}.payload->>'schemaVersion' = ${publicationAlias}.schema_version
+  AND ${publicationAlias}.payload->>'metricVersion' = ${publicationAlias}.metric_version
+  AND ${publicationAlias}.payload->>'format' = ${publicationAlias}.format
+  AND ${publicationAlias}.content_sha256 ~ '^[0-9a-f]{64}$'
+  AND ${publicationAlias}.content_sha256 = encode(
+    extensions.digest(
+      convert_to(
+        (
+          (${publicationAlias}.payload - 'freshness' - 'observation' - 'observedAt' - 'lastObservedAt' - 'publishedAt' - 'updatedAt' - 'createdAt')::text
+          || E'\\n' ||
+          COALESCE(
+            (
+              SELECT string_agg(chunk.chunk_sha256, E'\\n' ORDER BY chunk.section_key, chunk.chunk_index)
+              FROM competition.tournament_review_publication_chunks chunk
+              WHERE chunk.season_id = ${publicationAlias}.season_id
+                AND chunk.tournament_id = ${publicationAlias}.tournament_id
+                AND chunk.event_id = ${publicationAlias}.event_id
+                AND chunk.revision = ${publicationAlias}.revision
+            ),
+            ''
+          )
+        ),
+        'UTF8'
+      ),
+      'sha256'
+    ),
+    'hex'
+  )
   AND jsonb_typeof(${publicationAlias}.payload->'manifest') = 'object'
   AND jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
   AND ${publicationAlias}.payload->'manifest'->>'sectionCount' ~ '^[0-9]+$'
@@ -462,6 +492,19 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
       AND chunk.event_id = ${publicationAlias}.event_id
       AND chunk.revision = ${publicationAlias}.revision
   )
+  AND (
+    SELECT COALESCE(
+      sum((descriptor->>'chunkCount')::integer) FILTER (
+        WHERE descriptor->>'chunkCount' ~ '^[0-9]+$'
+      ),
+      0
+    )::integer
+    FROM jsonb_array_elements(CASE
+      WHEN jsonb_typeof(${publicationAlias}.payload->'manifest'->'sections') = 'array'
+      THEN ${publicationAlias}.payload->'manifest'->'sections'
+      ELSE '[]'::jsonb
+    END) descriptor
+  ) = (${publicationAlias}.payload->'manifest'->>'chunkCount')::integer
   AND NOT EXISTS (
     SELECT 1
     FROM jsonb_array_elements(CASE
@@ -1797,6 +1840,30 @@ export function tournamentReviewSemanticSha256(
 		.digest("hex");
 }
 
+function manifestChunkHashes(value: unknown): string[] | null {
+	if (!isRecord(value) || !isRecord(value.manifest) || !Array.isArray(value.manifest.sections)) {
+		return null;
+	}
+	const sections = value.manifest.sections as unknown[];
+	const descriptors: Array<{ sectionKey: string; chunkHashes: string[] }> = [];
+	for (const section of sections) {
+		if (
+			!isRecord(section) ||
+			typeof section.sectionKey !== "string" ||
+			!Array.isArray(section.chunkHashes)
+		) {
+			return null;
+		}
+		const chunkHashes = section.chunkHashes as unknown[];
+		if (!chunkHashes.every((hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash))) {
+			return null;
+		}
+		descriptors.push({ sectionKey: section.sectionKey, chunkHashes: chunkHashes as string[] });
+	}
+	descriptors.sort((left, right) => left.sectionKey.localeCompare(right.sectionKey));
+	return descriptors.flatMap((descriptor) => descriptor.chunkHashes);
+}
+
 export function tournamentReviewChunkHashes(value: unknown): string[] {
 	if (!isRecord(value)) return [];
 	const sections: Array<[string, unknown]> = [];
@@ -1832,7 +1899,11 @@ export function tournamentReviewChunkHashes(value: unknown): string[] {
 }
 
 function publicationSemanticSha256(value: unknown): string {
-	const hashes = tournamentReviewChunkHashes(value);
+	// Prefer the producer's persisted manifest order. Re-slicing a materialized
+	// section at fixed 100-item boundaries would change the semantic identity if
+	// a valid repair ever emits smaller chunks, even though all chunk hashes are
+	// individually coherent.
+	const hashes = manifestChunkHashes(value) ?? tournamentReviewChunkHashes(value);
 	return tournamentReviewSemanticSha256(value, hashes);
 }
 
@@ -2425,11 +2496,14 @@ function h2hCache(
 		witnessMatchIdentities.size === 0 ||
 		coverageWitness.matchParticipantIdentitiesByMatch.length !==
 			coverageWitness.matchIdentities.length ||
-		coverageWitness.pageOffset > coverageWitness.matchIdentities.length ||
-		coverageWitness.pageOffset > coverageWitness.standingIdentities.length ||
-		coverageWitness.pageOffset + value.matches.length > coverageWitness.matchIdentities.length ||
-		coverageWitness.pageOffset + value.standings.length >
-			coverageWitness.standingIdentities.length ||
+		(expectedSection !== "H2H_STANDINGS" &&
+			(coverageWitness.pageOffset > coverageWitness.matchIdentities.length ||
+				coverageWitness.pageOffset + value.matches.length >
+					coverageWitness.matchIdentities.length)) ||
+		(expectedSection !== "H2H_FIXTURES" &&
+			(coverageWitness.pageOffset > coverageWitness.standingIdentities.length ||
+				coverageWitness.pageOffset + value.standings.length >
+					coverageWitness.standingIdentities.length)) ||
 		(expectedSection === "H2H_FIXTURES" && value.standings.length !== 0) ||
 		(expectedSection === "H2H_STANDINGS" && value.matches.length !== 0) ||
 		(expectedScope !== undefined &&
@@ -3905,14 +3979,27 @@ function h2hFromPayload(
 	const cursorScope = cursorScopeOverride ?? reviewCursorScope(row, "H2H");
 	const selectedMatches = section === "H2H_STANDINGS" ? [] : source.matches;
 	const selectedStandings = section === "H2H_FIXTURES" ? [] : source.standings;
-	const page = pageSlice(selectedMatches, first, cursor, String(row.revision), cursorScope);
-	const standingsPage = pageSlice(
-		selectedStandings,
-		first,
-		cursor,
-		String(row.revision),
-		cursorScope
-	);
+	const emptyMatchPage: {
+		items: MyTournamentReviewH2HMatch[];
+		nextCursor: string | null;
+		hasNextPage: boolean;
+	} = { items: [], nextCursor: null, hasNextPage: false };
+	const emptyStandingPage: {
+		items: MyTournamentReviewH2HStanding[];
+		nextCursor: string | null;
+		hasNextPage: boolean;
+	} = { items: [], nextCursor: null, hasNextPage: false };
+	// A section request has one pagination stream. Do not pass the shared
+	// continuation offset through the unrequested collection: its empty array
+	// would otherwise reject every H2H second page as out of range.
+	const page =
+		section === "H2H_STANDINGS"
+			? emptyMatchPage
+			: pageSlice(selectedMatches, first, cursor, String(row.revision), cursorScope);
+	const standingsPage =
+		section === "H2H_FIXTURES"
+			? emptyStandingPage
+			: pageSlice(selectedStandings, first, cursor, String(row.revision), cursorScope);
 	const hasNextPage = page.hasNextPage || standingsPage.hasNextPage;
 	const matchParticipantIdentities = new Set<string>();
 	for (const match of source.matches) {
@@ -4774,19 +4861,13 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			});
 		}
 		if (phase.state !== "READY" || phase.revision === null || phase.semanticSha256 === null) {
-			return {
-				state: phase.state,
-				tournamentId: args.tournamentId,
-				throughEventId: args.throughEventId,
-				phaseId,
-				section: args.section,
-				revision: args.revision,
-				semanticSha256: args.semanticSha256,
-				points: null,
-				h2h: null,
-				knockout: null,
-				pageInfo: { hasNextPage: false, endCursor: null },
-			};
+			// The section contract exposes revision and semanticSha256 as non-null
+			// pins. Never echo caller-supplied identities for a phase that has no
+			// active publication; the phase state is already available from the
+			// Season index and the client can retry once it becomes READY.
+			throw new GraphQLError("Review section is not ready", {
+				extensions: { code: "REVIEW_NOT_READY", state: phase.state },
+			});
 		}
 		if (String(phase.revision) !== args.revision || phase.semanticSha256 !== args.semanticSha256) {
 			throw new GraphQLError("Review section revision does not match the active publication", {
