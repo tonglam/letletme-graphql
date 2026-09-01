@@ -265,7 +265,11 @@ const count = (values: readonly number[]): Array<[number, number]> => {
 	return [...result.entries()].sort((left, right) => left[0] - right[0]);
 };
 
-const rowFor = (value: LiveCalcDataV2, liveRank: number): IndexedRow => {
+const rowFor = (
+	value: LiveCalcDataV2,
+	liveRank: number,
+	overallRank: number | null = null
+): IndexedRow => {
 	const ownerAny = value.pickList.map((pick) => pick.element);
 	const ownerStarter = value.pickList
 		.filter((pick) => pick.position <= 11)
@@ -289,7 +293,7 @@ const rowFor = (value: LiveCalcDataV2, liveRank: number): IndexedRow => {
 		entryName: value.entryName,
 		playerName: value.playerName,
 		liveRank,
-		overallRank: value.rank?.overallRank ?? null,
+		overallRank,
 		teamValue: value.teamValue,
 		chip: value.chip,
 		transferCost: value.score.transferCost,
@@ -603,7 +607,7 @@ const projectCompleteBoard = async (
 				},
 				entryFromIndex(indexRow)
 			);
-			return rowFor(value, 0);
+			return rowFor(value, 0, indexRow.overallRank);
 		})
 	);
 	const ready = projected.filter(
