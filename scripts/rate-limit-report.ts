@@ -6,6 +6,7 @@ import {
 	rateLimitRecentAggregateKey,
 	rateLimitTelemetryOverflowKey,
 	rateLimitTelemetryPersistenceFailureKey,
+	retryRateLimitTelemetryOverflowMarkers,
 	retryRateLimitTelemetryPersistenceFailureMarkers,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
@@ -103,11 +104,19 @@ const readLiveRateLimitMetrics = async (
 	// A previous process may have persisted a marker obligation locally after
 	// Redis was unavailable. The report process is also a safe recovery worker:
 	// retry those obligations before deciding whether the window is healthy.
-	const localSpoolRemainingDates = await retryRateLimitTelemetryPersistenceFailureMarkers({
-		redis,
-		policyVersion,
-		dates,
-	});
+	const [localOverflowSpoolRemainingDates, localPersistenceFailureSpoolRemainingDates] =
+		await Promise.all([
+			retryRateLimitTelemetryOverflowMarkers({
+				redis,
+				policyVersion,
+				dates,
+			}),
+			retryRateLimitTelemetryPersistenceFailureMarkers({
+				redis,
+				policyVersion,
+				dates,
+			}),
+		]);
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
 		headers: { "X-Metrics-Token": env.METRICS_TOKEN },
 		signal: AbortSignal.timeout(5_000),
@@ -131,17 +140,20 @@ const readLiveRateLimitMetrics = async (
 	const persistedTelemetryPersistenceFailureDates = persistedMarkers
 		.filter((marker) => marker.persistenceFailure)
 		.map((marker) => marker.date);
+	const allTelemetryOverflowDates = [
+		...new Set([...persistedTelemetryOverflowDates, ...localOverflowSpoolRemainingDates]),
+	].sort();
 	const allTelemetryPersistenceFailureDates = [
-		...new Set([...persistedTelemetryPersistenceFailureDates, ...localSpoolRemainingDates]),
+		...new Set([
+			...persistedTelemetryPersistenceFailureDates,
+			...localPersistenceFailureSpoolRemainingDates,
+		]),
 	].sort();
 	const liveTelemetryOverflows = parseRateLimitTelemetryOverflowTotal(metricsText);
 	return {
 		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
-		rateLimitTelemetryOverflows: Math.max(
-			liveTelemetryOverflows,
-			persistedTelemetryOverflowDates.length
-		),
-		persistedTelemetryOverflowDates,
+		rateLimitTelemetryOverflows: Math.max(liveTelemetryOverflows, allTelemetryOverflowDates.length),
+		persistedTelemetryOverflowDates: allTelemetryOverflowDates,
 		rateLimitTelemetryPersistenceFailures: allTelemetryPersistenceFailureDates.length,
 		persistedTelemetryPersistenceFailureDates: allTelemetryPersistenceFailureDates,
 	};

@@ -90,32 +90,49 @@ const rateLimitTelemetrySpoolDirectory =
 		? "/var/lib/letletme-graphql/rate-limit-telemetry"
 		: join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`));
 
-type PersistenceFailureMarkerEntry = Readonly<{
+type TelemetryMarkerKind = "overflow" | "persistence-failure";
+
+type TelemetryMarkerEntry = Readonly<{
+	kind: TelemetryMarkerKind;
 	date: string;
 	policyVersion: GraphQLRateLimitPolicyVersion;
 	key: string;
 }>;
 
-const markerFileName = (date: string, policyVersion: GraphQLRateLimitPolicyVersion): string =>
-	`${policyNamespace(policyVersion)}.${date}`;
+const markerFileName = (
+	kind: TelemetryMarkerKind,
+	date: string,
+	policyVersion: GraphQLRateLimitPolicyVersion
+): string =>
+	kind === "overflow"
+		? `overflow.${policyNamespace(policyVersion)}.${date}`
+		: `${policyNamespace(policyVersion)}.${date}`;
 
-const markerFilePath = (date: string, policyVersion: GraphQLRateLimitPolicyVersion): string =>
-	join(rateLimitTelemetrySpoolDirectory, markerFileName(date, policyVersion));
+const markerFilePath = (
+	kind: TelemetryMarkerKind,
+	date: string,
+	policyVersion: GraphQLRateLimitPolicyVersion
+): string => join(rateLimitTelemetrySpoolDirectory, markerFileName(kind, date, policyVersion));
 
-const markerEntryFromFileName = (name: string): PersistenceFailureMarkerEntry | null => {
-	const match = name.match(/^(v3|v4)\.(\d{4}-\d{2}-\d{2})$/);
+const markerEntryFromFileName = (name: string): TelemetryMarkerEntry | null => {
+	const match = name.match(/^(?:(overflow)\.)?(v3|v4)\.(\d{4}-\d{2}-\d{2})$/);
 	if (!match) return null;
-	const namespace = match[1];
-	const date = match[2];
+	const kind: TelemetryMarkerKind = match[1] === "overflow" ? "overflow" : "persistence-failure";
+	const namespace = match[2];
+	const date = match[3];
 	if (!namespace || !date) return null;
 	const parsed = new Date(`${date}T00:00:00.000Z`);
 	if (rateLimitAggregateDate(parsed) !== date) return null;
 	const policyVersion: GraphQLRateLimitPolicyVersion =
 		namespace === "v4" ? "graphql-v4" : "graphql-v3";
 	return {
+		kind,
 		date,
 		policyVersion,
-		key: rateLimitTelemetryPersistenceFailureKey(date, policyVersion),
+		key:
+			kind === "overflow"
+				? rateLimitTelemetryOverflowKey(date, policyVersion)
+				: rateLimitTelemetryPersistenceFailureKey(date, policyVersion),
 	};
 };
 
@@ -125,9 +142,7 @@ const isNodeErrorWithCode = (error: unknown, code: string): boolean =>
 	"code" in error &&
 	(error as { code?: unknown }).code === code;
 
-const readPersistenceFailureMarkerEntries = async (): Promise<
-	readonly PersistenceFailureMarkerEntry[]
-> => {
+const readTelemetryMarkerEntries = async (): Promise<readonly TelemetryMarkerEntry[]> => {
 	let names: string[];
 	try {
 		names = await readdir(rateLimitTelemetrySpoolDirectory);
@@ -137,21 +152,22 @@ const readPersistenceFailureMarkerEntries = async (): Promise<
 	}
 	return names
 		.map(markerEntryFromFileName)
-		.filter((entry): entry is PersistenceFailureMarkerEntry => entry !== null);
+		.filter((entry): entry is TelemetryMarkerEntry => entry !== null);
 };
 
-/** Read durable marker obligations without exposing their filesystem path. */
-export const readRateLimitTelemetryPersistenceFailureSpool = async (
+const readRateLimitTelemetryMarkerSpool = async (
+	kind: TelemetryMarkerKind,
 	policyVersion: GraphQLRateLimitPolicyVersion,
 	dates?: readonly string[]
 ): Promise<readonly string[]> => {
 	const allowedDates = dates === undefined ? null : new Set(dates);
-	const entries = await readPersistenceFailureMarkerEntries();
+	const entries = await readTelemetryMarkerEntries();
 	return [
 		...new Set(
 			entries
 				.filter(
 					(entry) =>
+						entry.kind === kind &&
 						entry.policyVersion === policyVersion &&
 						(allowedDates === null || allowedDates.has(entry.date))
 				)
@@ -159,6 +175,20 @@ export const readRateLimitTelemetryPersistenceFailureSpool = async (
 		),
 	].sort();
 };
+
+/** Read durable persistence-failure marker obligations. */
+export const readRateLimitTelemetryPersistenceFailureSpool = async (
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	dates?: readonly string[]
+): Promise<readonly string[]> =>
+	readRateLimitTelemetryMarkerSpool("persistence-failure", policyVersion, dates);
+
+/** Read durable queue-overflow marker obligations. */
+export const readRateLimitTelemetryOverflowSpool = async (
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	dates?: readonly string[]
+): Promise<readonly string[]> =>
+	readRateLimitTelemetryMarkerSpool("overflow", policyVersion, dates);
 
 export type RateLimitReportSummary = {
 	totalDecisions: number;
@@ -449,8 +479,9 @@ const persistedOverflowMarkers = new Set<string>();
 const overflowMarkerFlights = new Map<string, Promise<void>>();
 const persistedTelemetryPersistenceFailureMarkers = new Set<string>();
 const telemetryPersistenceFailureMarkerFlights = new Map<string, Promise<void>>();
-const markerSpoolWriteFlights = new Map<string, Promise<void>>();
+const markerSpoolWriteFlights = new Map<string, Promise<boolean>>();
 const persistenceFailureMarkerRetryRecords = new Map<string, RateLimitAggregateRecord>();
+const overflowMarkerRetryRecords = new Map<string, RateLimitAggregateRecord>();
 const markerRetryScanAt = new WeakMap<Redis, number>();
 const markerRetryScanFlights = new WeakMap<Redis, Promise<void>>();
 let markerRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -494,62 +525,91 @@ const scheduleTelemetryFlush = (): void => {
 	}, RATE_LIMIT_TELEMETRY_FLUSH_INTERVAL_MS);
 };
 
-const retainPersistenceFailureMarker = (record: RateLimitAggregateRecord): Promise<void> => {
-	const key = rateLimitTelemetryPersistenceFailureKey(
-		rateLimitAggregateDate(record.date),
-		record.policyVersion
-	);
-	const existing = markerSpoolWriteFlights.get(key);
+const telemetryMarkerKey = (
+	kind: TelemetryMarkerKind,
+	record: RateLimitAggregateRecord
+): string => {
+	const date = rateLimitAggregateDate(record.date);
+	return kind === "overflow"
+		? rateLimitTelemetryOverflowKey(date, record.policyVersion)
+		: rateLimitTelemetryPersistenceFailureKey(date, record.policyVersion);
+};
+
+const telemetryMarkerMetricScope = (
+	kind: TelemetryMarkerKind,
+	policyVersion: GraphQLRateLimitPolicyVersion
+): string => `${policyVersion}-${kind}`;
+
+const retainTelemetryMarker = (
+	record: RateLimitAggregateRecord,
+	kind: TelemetryMarkerKind
+): Promise<boolean> => {
+	const date = rateLimitAggregateDate(record.date);
+	const key = telemetryMarkerKey(kind, record);
+	const spoolKey = `${kind}:${key}`;
+	const existing = markerSpoolWriteFlights.get(spoolKey);
 	if (existing) return existing;
 	const flight = mkdir(rateLimitTelemetrySpoolDirectory, { recursive: true })
 		.then(() =>
-			writeFile(
-				markerFilePath(rateLimitAggregateDate(record.date), record.policyVersion),
-				`${key}\n`,
-				{
-					encoding: "utf8",
-					flag: "wx",
-				}
-			)
+			writeFile(markerFilePath(kind, date, record.policyVersion), `${key}\n`, {
+				encoding: "utf8",
+				flag: "wx",
+			})
 		)
+		.then(() => true)
 		.catch((error: unknown) => {
-			if (isNodeErrorWithCode(error, "EEXIST")) return;
+			if (isNodeErrorWithCode(error, "EEXIST")) return true;
 			rememberTelemetryPersistenceFailure();
-			metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-aggregate`, "open").inc();
+			metrics.rateLimitStorageFailures
+				.labels(telemetryMarkerMetricScope(kind, record.policyVersion), "open")
+				.inc();
 			record.logger.warn(
 				{ err: error, policyVersion: record.policyVersion },
-				"Rate-limit telemetry persistence-failure spool unavailable"
+				`Rate-limit telemetry ${kind} spool unavailable`
 			);
+			return false;
 		})
 		.finally(() => {
-			markerSpoolWriteFlights.delete(key);
+			markerSpoolWriteFlights.delete(spoolKey);
 		});
-	markerSpoolWriteFlights.set(key, flight);
+	markerSpoolWriteFlights.set(spoolKey, flight);
 	return flight;
 };
 
-const removePersistenceFailureMarker = async (record: RateLimitAggregateRecord): Promise<void> => {
+const removeTelemetryMarker = async (
+	record: RateLimitAggregateRecord,
+	kind: TelemetryMarkerKind
+): Promise<void> => {
 	try {
-		await unlink(markerFilePath(rateLimitAggregateDate(record.date), record.policyVersion));
+		await unlink(markerFilePath(kind, rateLimitAggregateDate(record.date), record.policyVersion));
 	} catch (error: unknown) {
 		if (isNodeErrorWithCode(error, "ENOENT")) return;
 		rememberTelemetryPersistenceFailure();
-		metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-aggregate`, "open").inc();
+		metrics.rateLimitStorageFailures
+			.labels(telemetryMarkerMetricScope(kind, record.policyVersion), "open")
+			.inc();
 		record.logger.warn(
 			{ err: error, policyVersion: record.policyVersion },
-			"Rate-limit telemetry persistence-failure spool cleanup unavailable"
+			`Rate-limit telemetry ${kind} spool cleanup unavailable`
 		);
 	}
 };
 
 const scheduleMarkerRetry = (): void => {
-	if (markerRetryTimer !== null || persistenceFailureMarkerRetryRecords.size === 0) return;
+	if (
+		markerRetryTimer !== null ||
+		(persistenceFailureMarkerRetryRecords.size === 0 && overflowMarkerRetryRecords.size === 0)
+	)
+		return;
 	markerRetryTimer = setTimeout(() => {
 		markerRetryTimer = null;
-		const records = [...persistenceFailureMarkerRetryRecords.values()];
-		void Promise.allSettled(
-			records.map((record) => persistTelemetryPersistenceFailureMarker(record))
+		const persistenceJobs = [...persistenceFailureMarkerRetryRecords.values()].map((record) =>
+			persistTelemetryPersistenceFailureMarker(record)
 		);
+		const overflowJobs = [...overflowMarkerRetryRecords.values()].map((record) =>
+			persistOverflowMarker(record)
+		);
+		void Promise.allSettled([...persistenceJobs, ...overflowJobs]);
 	}, RATE_LIMIT_TELEMETRY_MARKER_RETRY_INTERVAL_MS);
 	markerRetryTimer.unref?.();
 };
@@ -566,12 +626,17 @@ const persistTelemetryPersistenceFailureMarker = (
 	if (existing) return existing;
 	persistenceFailureMarkerRetryRecords.set(key, record);
 	const flight = (async (): Promise<void> => {
-		await retainPersistenceFailureMarker(record);
+		if (!(await retainTelemetryMarker(record, "persistence-failure"))) {
+			scheduleMarkerRetry();
+			return;
+		}
 		try {
 			await record.redis.set(key, "1", "EX", RATE_LIMIT_AGGREGATE_RETENTION_SECONDS, "NX");
 		} catch (error: unknown) {
 			rememberTelemetryPersistenceFailure();
-			metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-aggregate`, "open").inc();
+			metrics.rateLimitStorageFailures
+				.labels(telemetryMarkerMetricScope("persistence-failure", record.policyVersion), "open")
+				.inc();
 			record.logger.warn(
 				{ err: error, policyVersion: record.policyVersion },
 				"Rate-limit telemetry persistence-failure marker unavailable"
@@ -585,7 +650,7 @@ const persistTelemetryPersistenceFailureMarker = (
 		}
 		persistedTelemetryPersistenceFailureMarkers.add(key);
 		persistenceFailureMarkerRetryRecords.delete(key);
-		await removePersistenceFailureMarker(record);
+		await removeTelemetryMarker(record, "persistence-failure");
 	})().finally(() => {
 		telemetryPersistenceFailureMarkerFlights.delete(key);
 	});
@@ -618,8 +683,9 @@ export const retryRateLimitTelemetryPersistenceFailureMarkers = async (input: {
 	dates?: readonly string[];
 	logger?: Logger;
 }): Promise<readonly string[]> => {
-	const entries = (await readPersistenceFailureMarkerEntries()).filter(
+	const entries = (await readTelemetryMarkerEntries()).filter(
 		(entry) =>
+			entry.kind === "persistence-failure" &&
 			entry.policyVersion === input.policyVersion &&
 			(input.dates === undefined || input.dates.includes(entry.date))
 	);
@@ -634,16 +700,45 @@ export const retryRateLimitTelemetryPersistenceFailureMarkers = async (input: {
 	return readRateLimitTelemetryPersistenceFailureSpool(input.policyVersion, input.dates);
 };
 
+/** Retry durable queue-overflow marker obligations after Redis recovers. */
+export const retryRateLimitTelemetryOverflowMarkers = async (input: {
+	redis: Redis;
+	policyVersion: GraphQLRateLimitPolicyVersion;
+	dates?: readonly string[];
+	logger?: Logger;
+}): Promise<readonly string[]> => {
+	const entries = (await readTelemetryMarkerEntries()).filter(
+		(entry) =>
+			entry.kind === "overflow" &&
+			entry.policyVersion === input.policyVersion &&
+			(input.dates === undefined || input.dates.includes(entry.date))
+	);
+	const logger = input.logger ?? ({ warn: () => undefined } as unknown as Logger);
+	await Promise.allSettled(
+		entries.map((entry) =>
+			persistOverflowMarker(markerRetryRecord(input.redis, entry.date, entry.policyVersion, logger))
+		)
+	);
+	return readRateLimitTelemetryOverflowSpool(input.policyVersion, input.dates);
+};
+
 const schedulePersistedMarkerRetry = (record: RateLimitAggregateRecord): void => {
 	const now = Date.now();
 	const retryAt = markerRetryScanAt.get(record.redis) ?? 0;
 	if (now < retryAt || markerRetryScanFlights.has(record.redis)) return;
 	markerRetryScanAt.set(record.redis, now + RATE_LIMIT_TELEMETRY_MARKER_RETRY_INTERVAL_MS);
-	const flight = retryRateLimitTelemetryPersistenceFailureMarkers({
-		redis: record.redis,
-		policyVersion: record.policyVersion,
-		logger: record.logger,
-	})
+	const flight = Promise.all([
+		retryRateLimitTelemetryPersistenceFailureMarkers({
+			redis: record.redis,
+			policyVersion: record.policyVersion,
+			logger: record.logger,
+		}),
+		retryRateLimitTelemetryOverflowMarkers({
+			redis: record.redis,
+			policyVersion: record.policyVersion,
+			logger: record.logger,
+		}),
+	])
 		.then(() => undefined)
 		.catch((error: unknown) => {
 			rememberTelemetryPersistenceFailure();
@@ -658,45 +753,47 @@ const schedulePersistedMarkerRetry = (record: RateLimitAggregateRecord): void =>
 	void flight;
 };
 
-const persistOverflowMarker = (record: RateLimitAggregateRecord): void => {
+const persistOverflowMarker = (record: RateLimitAggregateRecord): Promise<void> => {
 	const key = rateLimitTelemetryOverflowKey(
 		rateLimitAggregateDate(record.date),
 		record.policyVersion
 	);
-	if (persistedOverflowMarkers.has(key) || overflowMarkerFlights.has(key)) return;
-	let markerWrite: Promise<unknown>;
-	try {
-		markerWrite = record.redis.set(key, "1", "EX", RATE_LIMIT_AGGREGATE_RETENTION_SECONDS, "NX");
-	} catch (error: unknown) {
-		rememberTelemetryPersistenceFailure();
-		metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-overflow`, "open").inc();
-		record.logger.warn(
-			{ err: error, policyVersion: record.policyVersion },
-			"Rate-limit telemetry overflow marker unavailable"
-		);
-		return;
-	}
-	const flight = markerWrite
-		.then(() => {
-			if (persistedOverflowMarkers.size >= 32) {
-				const oldest = persistedOverflowMarkers.values().next().value;
-				if (oldest !== undefined) persistedOverflowMarkers.delete(oldest);
-			}
-			persistedOverflowMarkers.add(key);
-		})
-		.catch((error: unknown) => {
+	if (persistedOverflowMarkers.has(key)) return Promise.resolve();
+	const existing = overflowMarkerFlights.get(key);
+	if (existing) return existing;
+	overflowMarkerRetryRecords.set(key, record);
+	const flight = (async (): Promise<void> => {
+		if (!(await retainTelemetryMarker(record, "overflow"))) {
+			scheduleMarkerRetry();
+			return;
+		}
+		try {
+			await record.redis.set(key, "1", "EX", RATE_LIMIT_AGGREGATE_RETENTION_SECONDS, "NX");
+		} catch (error: unknown) {
 			rememberTelemetryPersistenceFailure();
-			metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-overflow`, "open").inc();
+			metrics.rateLimitStorageFailures
+				.labels(telemetryMarkerMetricScope("overflow", record.policyVersion), "open")
+				.inc();
 			record.logger.warn(
 				{ err: error, policyVersion: record.policyVersion },
 				"Rate-limit telemetry overflow marker unavailable"
 			);
-		})
-		.finally(() => {
-			overflowMarkerFlights.delete(key);
-		});
+			scheduleMarkerRetry();
+			return;
+		}
+		if (persistedOverflowMarkers.size >= 32) {
+			const oldest = persistedOverflowMarkers.values().next().value;
+			if (oldest !== undefined) persistedOverflowMarkers.delete(oldest);
+		}
+		persistedOverflowMarkers.add(key);
+		overflowMarkerRetryRecords.delete(key);
+		await removeTelemetryMarker(record, "overflow");
+	})().finally(() => {
+		overflowMarkerFlights.delete(key);
+	});
 	overflowMarkerFlights.set(key, flight);
 	void flight;
+	return flight;
 };
 
 /**
@@ -723,7 +820,7 @@ export const enqueueRateLimitAggregate = (input: {
 		.inc();
 	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE) {
 		metrics.rateLimitTelemetryOverflows.labels(record.policyVersion).inc();
-		persistOverflowMarker(record);
+		void persistOverflowMarker(record);
 		return;
 	}
 	pendingTelemetry.push(record);

@@ -13,6 +13,27 @@ import { writeFile } from "node:fs/promises";
 type ReadMode = "HEAD" | "DESK" | "FULL";
 type Transport = "cold" | "warm";
 
+// A peak is not sustained evidence: the stage must keep the requested number
+// of actual network bodies/streams active for almost all of the observed
+// stage. Parsing and decompression are intentionally outside this counter.
+const NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT = 0.95;
+
+type NetworkConcurrencyWindow = {
+	target: number;
+	startedAt: number;
+	lastAt: number;
+	active: number;
+	targetSatisfiedMs: number;
+};
+
+type NetworkConcurrencyEvidence = {
+	target: number;
+	stageDurationMs: number;
+	targetSatisfiedMs: number;
+	targetCoverageRatio: number;
+	maxInFlight: number;
+};
+
 type ResponseSample = {
 	stage: number;
 	status: number;
@@ -1008,11 +1029,38 @@ const inFlightByStage = new Map<number, number>();
 const maxInFlightByStage = new Map<number, number>();
 const networkInFlightByStage = new Map<number, number>();
 const maxNetworkInFlightByStage = new Map<number, number>();
+const networkConcurrencyWindows = new Map<number, NetworkConcurrencyWindow>();
+const networkConcurrencyEvidence = new Map<number, NetworkConcurrencyEvidence>();
 let requestCount = 0;
 
+function beginNetworkConcurrencyStage(stage: number): void {
+	const now = performance.now();
+	networkConcurrencyWindows.set(stage, {
+		target: stage,
+		startedAt: now,
+		lastAt: now,
+		active: 0,
+		targetSatisfiedMs: 0,
+	});
+	networkInFlightByStage.set(stage, 0);
+	maxNetworkInFlightByStage.set(stage, 0);
+}
+
+function advanceNetworkConcurrency(stage: number, now = performance.now()): void {
+	const window = networkConcurrencyWindows.get(stage);
+	if (!window) return;
+	const elapsedMs = Math.max(0, now - window.lastAt);
+	if (window.active >= window.target) window.targetSatisfiedMs += elapsedMs;
+	window.lastAt = now;
+}
+
 function beginNetworkRequest(stage: number): void {
+	if (!networkConcurrencyWindows.has(stage)) beginNetworkConcurrencyStage(stage);
+	advanceNetworkConcurrency(stage);
 	const inFlight = (networkInFlightByStage.get(stage) ?? 0) + 1;
 	networkInFlightByStage.set(stage, inFlight);
+	const window = networkConcurrencyWindows.get(stage);
+	if (window) window.active = inFlight;
 	maxNetworkInFlightByStage.set(
 		stage,
 		Math.max(maxNetworkInFlightByStage.get(stage) ?? 0, inFlight)
@@ -1020,9 +1068,40 @@ function beginNetworkRequest(stage: number): void {
 }
 
 function endNetworkRequest(stage: number): void {
+	advanceNetworkConcurrency(stage);
 	const remaining = Math.max(0, (networkInFlightByStage.get(stage) ?? 1) - 1);
 	if (remaining === 0) networkInFlightByStage.delete(stage);
 	else networkInFlightByStage.set(stage, remaining);
+	const window = networkConcurrencyWindows.get(stage);
+	if (window) window.active = remaining;
+}
+
+function finishNetworkConcurrencyStage(stage: number): NetworkConcurrencyEvidence {
+	const window = networkConcurrencyWindows.get(stage);
+	if (!window) {
+		const evidence: NetworkConcurrencyEvidence = {
+			target: stage,
+			stageDurationMs: 0,
+			targetSatisfiedMs: 0,
+			targetCoverageRatio: 0,
+			maxInFlight: 0,
+		};
+		networkConcurrencyEvidence.set(stage, evidence);
+		return evidence;
+	}
+	const now = performance.now();
+	advanceNetworkConcurrency(stage, now);
+	const stageDurationMs = Math.max(0, window.lastAt - window.startedAt);
+	const evidence: NetworkConcurrencyEvidence = {
+		target: window.target,
+		stageDurationMs,
+		targetSatisfiedMs: window.targetSatisfiedMs,
+		targetCoverageRatio: stageDurationMs === 0 ? 0 : window.targetSatisfiedMs / stageDurationMs,
+		maxInFlight: maxNetworkInFlightByStage.get(stage) ?? 0,
+	};
+	networkConcurrencyEvidence.set(stage, evidence);
+	networkConcurrencyWindows.delete(stage);
+	return evidence;
 }
 
 async function runOne(stage: number): Promise<void> {
@@ -1229,7 +1308,12 @@ for (const stage of stages) {
 		break;
 	}
 	const deadline = Date.now() + stageSeconds * 1000;
-	await Promise.all(Array.from({ length: stage }, () => runWorker(stage, deadline)));
+	beginNetworkConcurrencyStage(stage);
+	try {
+		await Promise.all(Array.from({ length: stage }, () => runWorker(stage, deadline)));
+	} finally {
+		finishNetworkConcurrencyStage(stage);
+	}
 	if (!(await verifyAllDeploymentIdentities(`after-stage-${stage}`))) {
 		stageExecutionAborted = true;
 		break;
@@ -1248,6 +1332,14 @@ const stageReports = stages.map((stage) => ({
 	durationSeconds: stageSeconds,
 	maxProcessingInFlight: maxInFlightByStage.get(stage) ?? 0,
 	maxNetworkInFlight: maxNetworkInFlightByStage.get(stage) ?? 0,
+	observedDurationSeconds: (networkConcurrencyEvidence.get(stage)?.stageDurationMs ?? 0) / 1_000,
+	networkConcurrency: networkConcurrencyEvidence.get(stage) ?? {
+		target: stage,
+		stageDurationMs: 0,
+		targetSatisfiedMs: 0,
+		targetCoverageRatio: 0,
+		maxInFlight: 0,
+	},
 	...accumulatorsByStage.get(stage)!.report(),
 }));
 const overall = overallAccumulator.report();
@@ -1311,12 +1403,18 @@ const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
 	requiredStagesSustainedConcurrency: requiredCapacityStages.every((concurrency) => {
 		const report = stageReports.find((item) => item.concurrency === concurrency);
-		return report !== undefined && report.maxNetworkInFlight >= concurrency;
+		return (
+			report !== undefined &&
+			report.maxNetworkInFlight >= concurrency &&
+			report.networkConcurrency.targetCoverageRatio >= NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT
+		);
 	}),
+	networkConcurrencyCoverageRequirement: NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT,
 	requiredStagesHaveNoErrors: requiredStageHealth.every((stage) => stage.healthy),
 	requiredStageHealth,
 	stage300DurationSeconds: capacityStage?.durationSeconds ?? 0,
-	stage300DurationRequirementMet: (capacityStage?.durationSeconds ?? 0) >= 900,
+	stage300ObservedDurationSeconds: capacityStage?.observedDurationSeconds ?? 0,
+	stage300DurationRequirementMet: (capacityStage?.observedDurationSeconds ?? 0) >= 900,
 	stage300P95Under800Ms: (capacityStage?.e2eMs.p95 ?? Number.POSITIVE_INFINITY) < 800,
 	stage300P99Under2s: (capacityStage?.e2eMs.p99 ?? Number.POSITIVE_INFINITY) < 2_000,
 	non429ErrorRateUnderPoint1Percent: (capacityStage?.non429ErrorRate ?? 1) < 0.001,
@@ -1410,7 +1508,7 @@ const report = {
 		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
 		"Warm HTTP/2 evidence records each peer maxConcurrentStreams and the summed effective capacity; the run fails before load if it cannot cover the requested stage concurrency.",
 		"Each stage keeps its target number of request workers active and immediately replaces every completed request; there is no think-time gap that lowers the offered concurrency.",
-		"Sustained-concurrency evidence is the maximum number of active HTTP/1 bodies or HTTP/2 streams, measured from request/stream creation through network body completion; parsing and decompression are reported separately and cannot satisfy the network-concurrency gate.",
+		`Sustained-concurrency evidence is time-weighted coverage of the requested number of active HTTP/1 bodies or HTTP/2 streams, measured from request/stream creation through network body completion; at least ${NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT * 100}% of the observed stage must meet the target. Parsing and decompression are reported separately and cannot satisfy the network-concurrency gate.`,
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",
