@@ -1027,12 +1027,38 @@ function semanticError(body: unknown): string | null {
 	if (root.availability !== "READY") return "availability_not_ready";
 	const delivery = isRecord(root.delivery) ? root.delivery : null;
 	const deliveryState = delivery?.state;
-	if (deliveryState !== "FRESH" && deliveryState !== "FINAL") return "unhealthy_delivery";
-	if (delivery?.servedFrom !== "REDIS_CURRENT") return "fallback_delivery";
 	const snapshot = isRecord(root.snapshot) ? root.snapshot : null;
 	if (!snapshot) return "ready_without_snapshot";
+	const detailDelivery = isRecord(snapshot.detailDelivery) ? snapshot.detailDelivery : null;
+	const rootReasonCodes = Array.isArray(delivery?.reasonCodes)
+		? delivery.reasonCodes.filter((value): value is string => typeof value === "string")
+		: [];
+	const detailReasonCodes = Array.isArray(detailDelivery?.reasonCodes)
+		? detailDelivery.reasonCodes.filter((value): value is string => typeof value === "string")
+		: [];
+	// HEAD is allowed to report a started match as DEGRADED while it observes
+	// only the compact detail manifest. This is a valid metadata observation,
+	// not a healthy FULL payload; keep the exception exact so stale/fallback or
+	// infrastructure failures cannot be hidden by the capacity harness.
+	const metadataOnlyHead =
+		mode === "HEAD" &&
+		deliveryState === "DEGRADED" &&
+		delivery?.servedFrom === "REDIS_CURRENT" &&
+		rootReasonCodes.includes("REDIS_CURRENT") &&
+		rootReasonCodes.includes("DETAIL_OR_DESK_DEGRADED") &&
+		rootReasonCodes.every(
+			(reason) => reason === "REDIS_CURRENT" || reason === "DETAIL_OR_DESK_DEGRADED"
+		) &&
+		detailDelivery?.state === "DEGRADED" &&
+		detailDelivery.servedFrom === "REDIS_CURRENT" &&
+		detailReasonCodes.length === 1 &&
+		detailReasonCodes[0] === "DETAIL_METADATA_ONLY";
+	if (mode === "HEAD" && detailReasonCodes.includes("DETAIL_METADATA_ONLY") && !metadataOnlyHead)
+		return "invalid_metadata_only_delivery";
+	if (deliveryState !== "FRESH" && deliveryState !== "FINAL" && !metadataOnlyHead)
+		return "unhealthy_delivery";
+	if (delivery?.servedFrom !== "REDIS_CURRENT") return "fallback_delivery";
 	if (mode === "FULL") {
-		const detailDelivery = isRecord(snapshot.detailDelivery) ? snapshot.detailDelivery : null;
 		const detailState = detailDelivery?.state;
 		if (detailState !== "FRESH" && detailState !== "FINAL") return "unhealthy_detail_delivery";
 		if (detailDelivery?.servedFrom !== "REDIS_CURRENT") return "fallback_detail_delivery";

@@ -22,13 +22,17 @@ const makeClient = (failOn?: string) => {
 
 describe("PostgreSQL health probe", () => {
 	it("recognizes the specific checkout queued behind a busy pool client", () => {
-		expect(poolCheckoutNeedsWaitMetric(0, 1, 0, 0)).toBe(true);
-		expect(poolCheckoutNeedsWaitMetric(1, 2, 0, 0)).toBe(true);
-		expect(poolCheckoutNeedsWaitMetric(0, 1, 1, 0)).toBe(false);
-		expect(poolCheckoutNeedsWaitMetric(0, 1, 1, 1)).toBe(true);
-		expect(poolCheckoutNeedsWaitMetric(0, 1, 2, 1)).toBe(false);
-		expect(poolCheckoutNeedsWaitMetric(1, 1, 0, 0)).toBe(false);
-		expect(poolCheckoutNeedsWaitMetric(-1, 1, 0, 0)).toBe(false);
+		// The checkout is queued behind a saturated pool even if the busy client
+		// is released before a later waitingCount sample.
+		expect(poolCheckoutNeedsWaitMetric(0, 0, 2, 2)).toBe(true);
+		expect(poolCheckoutNeedsWaitMetric(0, 0, 1, 2)).toBe(false);
+		// One idle client is enough for the first queued checkout, but not for
+		// the second checkout behind it.
+		expect(poolCheckoutNeedsWaitMetric(1, 2, 2, 2)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(1, 1, 2, 2)).toBe(true);
+		expect(poolCheckoutNeedsWaitMetric(0, 1, 2, 2)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(-1, 1, 2, 2)).toBe(false);
+		expect(poolCheckoutNeedsWaitMetric(0, 1, 2, 0)).toBe(false);
 	});
 
 	it("scopes a two-second statement timeout to a checked-out transaction", async () => {

@@ -148,12 +148,26 @@ type MatchDeskCandidate = Readonly<{
 type MatchDetailCandidate = Readonly<{
 	publication: MatchDetailPublication;
 	fixtures: readonly MatchFixtureDetail[];
-	/** False for HEAD/DESK metadata reads; omitted means a full candidate. */
-	payloadLoaded?: boolean;
+	/** A complete detail candidate whose immutable bodies have been verified. */
+	payloadLoaded: true;
 	/** Player team IDs retained by metadata reads for desk compatibility checks. */
 	fixturePlayerTeamIds?: ReadonlyMap<number, readonly number[]>;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
+
+/**
+ * A publication/manifest observation whose immutable fixture bodies have not
+ * been read. It is deliberately a different type from MatchDetailCandidate so
+ * metadata cannot accidentally enter the FULL selector or complete LKG.
+ */
+type MatchDetailObservation = Readonly<{
+	publication: MatchDetailPublication;
+	fixtures: readonly [];
+	payloadLoaded: false;
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
+}>;
+
+type MatchDetailReadCandidate = MatchDetailCandidate | MatchDetailObservation;
 
 export type LiveMatchdayRead = Readonly<{
 	season: string;
@@ -161,6 +175,13 @@ export type LiveMatchdayRead = Readonly<{
 	invalidEventId?: boolean;
 	readMode?: LiveMatchReadMode;
 	desk: MatchDeskCandidate | null;
+	/**
+	 * HEAD/DESK may observe a validated publication and item manifest without
+	 * reading immutable detail bodies. This is revision metadata only: it is
+	 * never a complete detail candidate and is never written to the complete
+	 * process LKG (the separate metadata cache may retain this observation).
+	 */
+	detailObservation?: MatchDetailObservation | null;
 	detail: MatchDetailCandidate | null;
 	redisReadFailed: boolean;
 	postgresReadFailed: boolean;
@@ -200,6 +221,11 @@ type SelectedLkg = Readonly<{
 	detail: MatchDetailCandidate | null;
 }>;
 
+type MetadataLkg = Readonly<{
+	desk: MatchDeskCandidate;
+	detail: MatchDetailObservation | null;
+}>;
+
 type CheckpointRow = QueryResultRow & {
 	event_id: unknown;
 	desk: unknown;
@@ -223,7 +249,7 @@ type ScopedEventCheckpointBudget = Readonly<{
 }>;
 
 const processLkg = new Map<string, SelectedLkg>();
-const processMetadataLkg = new Map<string, SelectedLkg>();
+const processMetadataLkg = new Map<string, MetadataLkg>();
 const processActiveEvent = new Map<string, number>();
 const processEventCheckedAt = new Map<string, ScopedEventCheckpointCheck>();
 const processEventCheckpointBudget = new Map<string, ScopedEventCheckpointBudget>();
@@ -1289,12 +1315,12 @@ const decodeDetailCandidate = (
 	};
 };
 
-const decodeDetailMetadataCandidate = (
+const decodeDetailObservation = (
 	raw: RedisDetailRaw,
 	season: string,
 	eventId: number,
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
-): MatchDetailCandidate | null => {
+): MatchDetailObservation | null => {
 	const publication = parseDetailPublication(raw.publication, season, eventId);
 	const manifest = parseDetailPublication(raw.manifest, season, eventId);
 	if (
@@ -1426,15 +1452,31 @@ const rememberLkg = (season: string, eventId: number, value: SelectedLkg): void 
 	}
 };
 
-const asMetadataLkg = (value: SelectedLkg): SelectedLkg => ({
+const asDetailObservation = (
+	candidate: MatchDetailReadCandidate | null
+): MatchDetailObservation | null =>
+	candidate === null
+		? null
+		: {
+				publication: candidate.publication,
+				fixtures: [],
+				payloadLoaded: false,
+				servedFrom: candidate.servedFrom,
+			};
+
+const asMetadataLkg = (value: {
+	desk: MatchDeskCandidate;
+	detail: MatchDetailReadCandidate | null;
+}): MetadataLkg => ({
 	desk: { ...value.desk, fixtures: [], payloadLoaded: false },
-	detail: value.detail ? { ...value.detail, fixtures: [], payloadLoaded: false } : null,
+	detail: asDetailObservation(value.detail),
 });
 
-const rememberMetadataLkg = (season: string, eventId: number, value: SelectedLkg): void => {
+const rememberMetadataLkg = (season: string, eventId: number, value: MetadataLkg): void => {
 	const key = lkgKey(season, eventId);
-	// A complete LKG remains the stronger recovery source. HEAD metadata must
-	// never replace it or cause a full payload to be retained for a heartbeat.
+	// This is a separate metadata observation cache. A complete LKG remains the
+	// stronger recovery source; metadata must never replace it or cause an
+	// unverified detail payload to be retained for a heartbeat.
 	if (processLkg.has(key)) return;
 	if (processMetadataLkg.has(key)) processMetadataLkg.delete(key);
 	processMetadataLkg.set(key, asMetadataLkg(value));
@@ -1446,6 +1488,11 @@ const rememberMetadataLkg = (season: string, eventId: number, value: SelectedLkg
 };
 
 const asProcessLkg = (value: SelectedLkg): SelectedLkg => ({
+	desk: { ...value.desk, servedFrom: "PROCESS_LKG" },
+	detail: value.detail ? { ...value.detail, servedFrom: "PROCESS_LKG" } : null,
+});
+
+const asProcessMetadataLkg = (value: MetadataLkg): MetadataLkg => ({
 	desk: { ...value.desk, servedFrom: "PROCESS_LKG" },
 	detail: value.detail ? { ...value.detail, servedFrom: "PROCESS_LKG" } : null,
 });
@@ -1514,8 +1561,8 @@ const chooseDetail = (
 
 const compatibleDetailMetadata = (
 	desk: MatchDeskCandidate,
-	detail: MatchDetailCandidate | null
-): detail is MatchDetailCandidate => {
+	detail: MatchDetailReadCandidate | null
+): detail is MatchDetailReadCandidate => {
 	if (!detail) return false;
 	if (desk.servedFrom === "REDIS_PREVIOUS" && detail.servedFrom === "REDIS_CURRENT") return false;
 	const coverage =
@@ -1547,7 +1594,9 @@ const compatibleDetailMetadata = (
 			desk.fixtureTeamIds?.get(fixtureId) ??
 			(deskFixture ? ([deskFixture.homeTeamId, deskFixture.awayTeamId] as const) : undefined);
 		const playerTeamIds =
-			detail.fixturePlayerTeamIds?.get(fixtureId) ??
+			("fixturePlayerTeamIds" in detail
+				? detail.fixturePlayerTeamIds?.get(fixtureId)
+				: undefined) ??
 			detail.fixtures
 				.find((fixture) => fixture.fixtureId === fixtureId)
 				?.players.map((player) => player.teamId);
@@ -1566,9 +1615,9 @@ const compatibleDetailMetadata = (
 
 const chooseDetailMetadata = (
 	desk: MatchDeskCandidate,
-	candidates: readonly (MatchDetailCandidate | null)[]
-): MatchDetailCandidate | null => {
-	let selected: MatchDetailCandidate | null = null;
+	candidates: readonly (MatchDetailReadCandidate | null)[]
+): MatchDetailReadCandidate | null => {
+	let selected: MatchDetailReadCandidate | null = null;
 	for (const candidate of candidates) {
 		if (!compatibleDetailMetadata(desk, candidate)) continue;
 		if (!selected || candidate.publication.generation > selected.publication.generation) {
@@ -1828,6 +1877,7 @@ const buildPostgresDetail = (
 		publication: metadata.publication,
 		fixtures,
 		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
+		payloadLoaded: true,
 		servedFrom: "POSTGRES_CHECKPOINT",
 	};
 };
@@ -2015,7 +2065,7 @@ const decodeRedisCandidates = (
 	eventId: number,
 	mode: LiveMatchReadMode,
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
-): { desk: MatchDeskCandidate | null; detail: MatchDetailCandidate | null } => {
+): { desk: MatchDeskCandidate | null; detail: MatchDetailReadCandidate | null } => {
 	// The production Lua reader returns the selected pointer in `active` and
 	// leaves the sibling slot empty. Test doubles and future read scripts may
 	// return both slots, so prefer the explicitly selected slot when it exists
@@ -2036,16 +2086,23 @@ const decodeRedisCandidates = (
 		detail:
 			mode === "FULL"
 				? decodeDetailCandidate(detailRaw, season, eventId, servedFrom)
-				: decodeDetailMetadataCandidate(detailRaw, season, eventId, servedFrom),
+				: decodeDetailObservation(detailRaw, season, eventId, servedFrom),
 	};
 };
 
-const chooseDetailForMode = (
-	mode: LiveMatchReadMode,
+const chooseDetailObservation = (
 	desk: MatchDeskCandidate,
-	candidates: readonly (MatchDetailCandidate | null)[]
-): MatchDetailCandidate | null =>
-	mode === "FULL" ? chooseDetail(desk, candidates) : chooseDetailMetadata(desk, candidates);
+	candidates: readonly (MatchDetailReadCandidate | null)[]
+): MatchDetailObservation | null => asDetailObservation(chooseDetailMetadata(desk, candidates));
+
+const isCompleteDetailCandidate = (
+	candidate: MatchDetailReadCandidate | null
+): candidate is MatchDetailCandidate => candidate !== null && candidate.payloadLoaded === true;
+
+const chooseCompleteDetail = (
+	desk: MatchDeskCandidate,
+	candidates: readonly (MatchDetailReadCandidate | null)[]
+): MatchDetailCandidate | null => chooseDetail(desk, candidates.filter(isCompleteDetailCandidate));
 
 /**
  * Read one publication mode without paying the full detail cost on every
@@ -2157,14 +2214,16 @@ export const readLiveMatchday = async (
 	const active = activeBundle
 		? decodeRedisCandidates(activeBundle, season, selectedEventId, mode, "REDIS_CURRENT")
 		: { desk: null, detail: null };
-	let previous: { desk: MatchDeskCandidate | null; detail: MatchDetailCandidate | null } = {
+	let previous: { desk: MatchDeskCandidate | null; detail: MatchDetailReadCandidate | null } = {
 		desk: null,
 		detail: null,
 	};
 	const activeDetailNeedsFallback =
 		activeBundle !== null &&
 		active.desk !== null &&
-		chooseDetailForMode(mode, active.desk, [active.detail]) === null &&
+		(mode === "FULL"
+			? chooseCompleteDetail(active.desk, [active.detail])
+			: chooseDetailObservation(active.desk, [active.detail])) === null &&
 		(activeBundle.detail.active.publication !== null || allFixturesStarted(active.desk));
 	const previousAttempted =
 		activeBundle !== null && (active.desk === null || activeDetailNeedsFallback);
@@ -2185,11 +2244,19 @@ export const readLiveMatchday = async (
 
 	const scopedEventKey = lkgKey(season, selectedEventId);
 	const scopedCheckpointCheckKey = checkpointCheckKey(season, selectedEventId, mode);
-	const stored =
-		processLkg.get(scopedEventKey) ??
-		(mode === "HEAD" ? processMetadataLkg.get(scopedEventKey) : undefined);
-	const processLkgValue = stored ? asProcessLkg(stored) : null;
-	let effectiveDesk = active.desk ?? previous.desk ?? processLkgValue?.desk ?? null;
+	const processLkgValue = processLkg.get(scopedEventKey);
+	const processMetadataLkgValue =
+		mode === "HEAD" ? processMetadataLkg.get(scopedEventKey) : undefined;
+	const processLkgCandidate = processLkgValue ? asProcessLkg(processLkgValue) : null;
+	const processMetadataCandidate = processMetadataLkgValue
+		? asProcessMetadataLkg(processMetadataLkgValue)
+		: null;
+	let effectiveDesk =
+		active.desk ??
+		previous.desk ??
+		processLkgCandidate?.desk ??
+		processMetadataCandidate?.desk ??
+		null;
 	let postgres: PostgresCheckpointRead | null =
 		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
 	const redisDeskAvailable = active.desk !== null || previous.desk !== null;
@@ -2197,10 +2264,10 @@ export const readLiveMatchday = async (
 		mode === "FULL" &&
 		effectiveDesk !== null &&
 		allFixturesStarted(effectiveDesk) &&
-		chooseDetailForMode(mode, effectiveDesk, [
+		chooseCompleteDetail(effectiveDesk, [
 			active.detail,
 			previous.detail,
-			processLkgValue?.detail ?? null,
+			processLkgCandidate?.detail ?? null,
 		]) === null;
 	const needsPostgres =
 		effectiveDesk === null ||
@@ -2256,17 +2323,31 @@ export const readLiveMatchday = async (
 		};
 	}
 
-	const detail = chooseDetailForMode(mode, effectiveDesk, [
-		active.detail,
-		previous.detail,
-		processLkgValue?.detail ?? null,
-		postgres?.detail ?? null,
-	]);
+	const detailObservation =
+		mode === "FULL"
+			? null
+			: chooseDetailObservation(effectiveDesk, [
+					active.detail,
+					previous.detail,
+					processLkgCandidate?.detail ?? null,
+					processMetadataCandidate?.detail ?? null,
+					postgres?.detail ?? null,
+				]);
+	const detail =
+		mode === "FULL"
+			? chooseCompleteDetail(effectiveDesk, [
+					active.detail,
+					previous.detail,
+					processLkgCandidate?.detail ?? null,
+					postgres?.detail ?? null,
+				])
+			: null;
 	const result = {
 		season,
 		eventId: selectedEventId,
 		readMode: mode,
 		desk: effectiveDesk,
+		detailObservation,
 		detail,
 		redisReadFailed,
 		postgresReadFailed,
@@ -2277,23 +2358,15 @@ export const readLiveMatchday = async (
 	// active-event authority used by later eventless outage fallbacks.
 	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
 	if (mode === "HEAD" && !processLkg.has(scopedEventKey)) {
-		rememberMetadataLkg(season, selectedEventId, { desk: effectiveDesk, detail });
+		rememberMetadataLkg(season, selectedEventId, {
+			desk: effectiveDesk,
+			detail: detailObservation,
+		});
 	}
 	const completeDetailForLkg =
-		detail?.payloadLoaded === false
-			? chooseDetail(
-					effectiveDesk,
-					[
-						active.detail,
-						previous.detail,
-						processLkgValue?.detail ?? null,
-						postgres?.detail ?? null,
-					].filter(
-						(candidate): candidate is MatchDetailCandidate =>
-							candidate !== null && candidate.payloadLoaded !== false
-					)
-				)
-			: detail;
+		mode === "FULL"
+			? detail
+			: chooseCompleteDetail(effectiveDesk, [processLkgCandidate?.detail ?? null]);
 	// A metadata-only observation must never replace a complete process LKG
 	// with an object whose detail payload was deliberately not read. When a
 	// complete PostgreSQL desk is the selected fallback, retain only a complete
@@ -2305,7 +2378,7 @@ export const readLiveMatchday = async (
 	if (
 		completeDeskForLkg !== null &&
 		(mode === "DESK" ||
-			(mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) ||
+			(mode === "FULL" && (detail === null || detail.payloadLoaded === true)) ||
 			completePostgresDesk)
 	) {
 		rememberLkg(season, selectedEventId, {
@@ -2331,6 +2404,7 @@ export const resetLiveMatchProcessStateForTests = (): void => {
 export type {
 	MatchDeskCandidate,
 	MatchDetailCandidate,
+	MatchDetailObservation,
 	MatchDetailPublication,
 	MatchDeskPublication,
 };

@@ -56,6 +56,8 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain('new URL("/health/ready", endpoint.origin)');
 		expect(capacitySource).toContain("runtimeReadinessHealthy");
 		expect(capacitySource).toContain("playerValue.price < 0");
+		expect(capacitySource).toContain("metadataOnlyHead");
+		expect(capacitySource).toContain('"DETAIL_METADATA_ONLY"');
 		expect(capacitySource).not.toContain("playerValue.price <= 0");
 		expect(capacitySource).not.toContain("LIVE_MATCH_LOAD_REQUIRE_READY");
 		expect(capacitySource.indexOf("reserveHttp2Stream(selected.session)")).toBeLessThan(

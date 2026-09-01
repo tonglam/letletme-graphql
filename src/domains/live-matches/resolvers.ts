@@ -8,7 +8,10 @@ import {
 	type LiveMatchReadMode,
 	type MatchDeskCandidate,
 	type MatchDetailCandidate,
+	type MatchDetailObservation,
 } from "./repository";
+
+type ObservedMatchDetail = MatchDetailCandidate | MatchDetailObservation;
 
 const positionName = (position: number): "GOALKEEPER" | "DEFENDER" | "MIDFIELDER" | "FORWARD" => {
 	switch (position) {
@@ -84,7 +87,7 @@ export const deskHasStartedActivity = (desk: MatchDeskCandidate): boolean => {
 
 const detailState = (
 	desk: MatchDeskCandidate,
-	detail: MatchDetailCandidate | null,
+	detail: ObservedMatchDetail | null,
 	final: boolean,
 	mode: LiveMatchReadMode
 ): "FRESH" | "STALE" | "DEGRADED" | "FINAL" | "PENDING" => {
@@ -104,7 +107,7 @@ const detailState = (
 
 const deliveryState = (
 	desk: MatchDeskCandidate,
-	detail: MatchDetailCandidate | null,
+	detail: ObservedMatchDetail | null,
 	final: boolean,
 	mode: LiveMatchReadMode
 ): "FRESH" | "STALE" | "DEGRADED" | "FINAL" => {
@@ -126,15 +129,18 @@ const finalPublication = (read: LiveMatchdayRead): boolean =>
 	read.desk?.publication.state === "FINALIZED" &&
 	read.desk.publication.checkpointedAt !== null &&
 	read.detail?.publication.finalized === true &&
-	read.detail.payloadLoaded !== false &&
+	read.detail.payloadLoaded === true &&
 	read.detail.publication.checkpointedAt !== null &&
 	read.detail.publication.observedDeskGeneration === read.desk.publication.generation &&
 	read.detail.publication.fixtureIdentityRevision ===
 		read.desk.publication.revisions.fixtureIdentity.revision;
 
+const observedDetail = (read: LiveMatchdayRead): ObservedMatchDetail | null =>
+	read.readMode === "FULL" ? read.detail : (read.detailObservation ?? null);
+
 const toRevisionVector = (read: LiveMatchdayRead) => {
 	const desk = read.desk;
-	const detail = read.detail;
+	const detail = observedDetail(read);
 	return {
 		deskPublicationId: desk?.publication.publicationId ?? "unavailable",
 		deskGeneration: desk?.publication.generation ?? 0,
@@ -149,7 +155,7 @@ const toRevisionVector = (read: LiveMatchdayRead) => {
 
 const toTimes = (read: LiveMatchdayRead) => {
 	const desk = read.desk?.publication ?? null;
-	const detail = read.detail?.publication ?? null;
+	const detail = observedDetail(read)?.publication ?? null;
 	return {
 		deskSourceCheckedAt: desk?.sourceCheckedAt ?? new Date(0).toISOString(),
 		deskContentUpdatedAt: desk
@@ -327,8 +333,9 @@ const observeLiveMatchRead = (
 	if (read.desk && read.desk.servedFrom !== "REDIS_CURRENT") {
 		metrics.liveMatchFallbackTotal.labels("desk", read.desk.servedFrom).inc();
 	}
-	if (read.detail && read.detail.servedFrom !== "REDIS_CURRENT") {
-		metrics.liveMatchFallbackTotal.labels("detail", read.detail.servedFrom).inc();
+	const detail = observedDetail(read);
+	if (detail && detail.servedFrom !== "REDIS_CURRENT") {
+		metrics.liveMatchFallbackTotal.labels("detail", detail.servedFrom).inc();
 	}
 	// GraphQL serializes the response after the resolver returns. Avoid a second
 	// full allocation on the hot FULL path; small metadata reads are measured
@@ -345,30 +352,30 @@ const toResult = (read: LiveMatchdayRead) => {
 	if (!read.desk) return toUnavailable(read);
 	const mode = read.readMode ?? "FULL";
 	const final = finalPublication(read);
+	const detail = observedDetail(read);
 	const finalCheckpointPending =
 		!final &&
 		(read.desk.publication.state === "FINALIZED" || read.detail?.publication.finalized === true);
-	const state = deliveryState(read.desk, read.detail, final, mode);
-	const detailDeliveryState = detailState(read.desk, read.detail, final, mode);
+	const state = deliveryState(read.desk, detail, final, mode);
+	const detailDeliveryState = detailState(read.desk, detail, final, mode);
 	const reasonCodes = [servedFromReason(read.desk.servedFrom)];
 	if (read.redisReadFailed) reasonCodes.push("REDIS_READ_FAILED");
 	if (read.postgresReadFailed) reasonCodes.push("POSTGRES_CHECKPOINT_UNAVAILABLE");
 	if (state === "STALE") reasonCodes.push("DESK_STALE");
 	if (state === "DEGRADED") reasonCodes.push("DETAIL_OR_DESK_DEGRADED");
 	if (finalCheckpointPending) reasonCodes.push("FINAL_CHECKPOINT_PENDING");
-	if (read.detail && read.detail.servedFrom !== "REDIS_CURRENT")
-		reasonCodes.push("DETAIL_FALLBACK");
-	if (!read.detail)
+	if (detail && detail.servedFrom !== "REDIS_CURRENT") reasonCodes.push("DETAIL_FALLBACK");
+	if (!detail)
 		reasonCodes.push(detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE");
 	const detailReasonCodes = finalCheckpointPending
 		? ["FINAL_CHECKPOINT_PENDING"]
-		: read.detail
+		: detail
 			? [
-					...(read.detail.servedFrom === "REDIS_CURRENT"
+					...(detail.servedFrom === "REDIS_CURRENT"
 						? []
-						: [detailServedFromReason(read.detail.servedFrom)]),
+						: [detailServedFromReason(detail.servedFrom)]),
 					...(mode !== "FULL" &&
-					read.detail.payloadLoaded === false &&
+					detail.payloadLoaded === false &&
 					detailDeliveryState === "DEGRADED"
 						? ["DETAIL_METADATA_ONLY"]
 						: []),
@@ -392,7 +399,7 @@ const toResult = (read: LiveMatchdayRead) => {
 			times: toTimes(read),
 			detailDelivery: {
 				state: detailDeliveryState,
-				servedFrom: read.detail?.servedFrom ?? null,
+				servedFrom: detail?.servedFrom ?? null,
 				reasonCodes: [...new Set(detailReasonCodes)],
 			},
 			matches: toMatches(read.desk, read.detail, mode),

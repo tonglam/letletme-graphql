@@ -489,8 +489,9 @@ describe("Live Matches V3 read path", () => {
 
 		expect(result.desk?.payloadLoaded).toBe(false);
 		expect(result.desk?.fixtures).toEqual([]);
-		expect(result.detail?.payloadLoaded).toBe(false);
-		expect(result.detail?.fixtures).toEqual([]);
+		expect(result.detail).toBeNull();
+		expect(result.detailObservation?.payloadLoaded).toBe(false);
+		expect(result.detailObservation?.fixtures).toEqual([]);
 		expect(databaseReads).toBe(0);
 	});
 
@@ -508,9 +509,49 @@ describe("Live Matches V3 read path", () => {
 			const result = await readLiveMatchday(buildSnapshotContext(redis), 1, mode);
 
 			expect(result.desk).not.toBeNull();
-			expect(result.detail?.payloadLoaded).toBe(false);
-			expect(result.detail?.fixtures).toEqual([]);
+			expect(result.detail).toBeNull();
+			expect(result.detailObservation?.payloadLoaded).toBe(false);
+			expect(result.detailObservation?.fixtures).toEqual([]);
 		}
+	});
+
+	it("keeps unverified detail metadata out of the authoritative candidate", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const activeItem = bundle.detail.active.items[0];
+		if (!activeItem || activeItem.payload === null) throw new Error("missing active detail item");
+		// Preserve the byte length and sidecar metadata while changing the body.
+		activeItem.payload = activeItem.payload.replace('"position":3', '"position":4');
+		attachBundle(redis, bundle);
+
+		const head = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+		const full = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
+
+		expect(head.detail).toBeNull();
+		expect(head.detailObservation?.servedFrom).toBe("REDIS_CURRENT");
+		expect(head.detailObservation?.payloadLoaded).toBe(false);
+		expect(full.detail).toBeNull();
+	});
+
+	it("does not promote an aggregate revision that was not recomputed from detail bodies", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (bundle.detail.active.publication === null)
+			throw new Error("missing active detail publication");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			detail: { revision: string };
+		};
+		publication.detail.revision = "f".repeat(64);
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		attachBundle(redis, bundle);
+
+		const head = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+		const full = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
+
+		expect(head.detail).toBeNull();
+		expect(head.detailObservation?.publication.detail.revision).toBe("f".repeat(64));
+		expect(full.detail).toBeNull();
 	});
 
 	it("rejects metadata when an immutable detail item is missing and uses previous", async () => {
@@ -522,8 +563,9 @@ describe("Live Matches V3 read path", () => {
 
 		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
 
-		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
-		expect(result.detail?.payloadLoaded).toBe(false);
+		expect(result.detail).toBeNull();
+		expect(result.detailObservation?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detailObservation?.payloadLoaded).toBe(false);
 	});
 
 	it("rejects a corrupt desk item before accepting a HEAD metadata candidate", async () => {
@@ -1987,7 +2029,8 @@ describe("Live Matches V3 read path", () => {
 		const full = await readLiveMatchday(context, 1, "FULL");
 		expect(full.detail?.fixtures).toHaveLength(2);
 		const head = await readLiveMatchday(context, 1, "HEAD");
-		expect(head.detail?.payloadLoaded).toBe(false);
+		expect(head.detail).toBeNull();
+		expect(head.detailObservation?.payloadLoaded).toBe(false);
 
 		control.set(null);
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {

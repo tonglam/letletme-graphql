@@ -1,5 +1,6 @@
 import type { PoolClient, QueryResult, QueryResultRow } from "pg";
 import { dbPool } from "./db-pool";
+import { env } from "./env";
 import { postgresPoolWaitEvents } from "./metrics";
 
 export type DatabaseHealthClient = {
@@ -15,52 +16,45 @@ export interface QueryExecutor {
 }
 
 /**
- * pg-pool briefly puts every checkout behind an idle client into its pending
- * queue before the next-tick pulse hands that client over. Compare the queue
- * before and after this specific connect call, and use the pre-call idle count
- * to exclude that normal handoff. A checkout added while no idle client exists
- * is a real pool wait even if the busy client is released before a later event
- * loop phase can observe the queue.
+ * Infer whether this particular checkout must wait from the pool state at the
+ * call boundary. Sampling `waitingCount` after `connect()` is not sufficient:
+ * a busy client can be released before that sample and make the queue appear
+ * empty again. A checkout waits when an existing waiter is ahead of it, or
+ * when every pool slot is busy and no idle client is available for its queue
+ * position. A pool with room and no idle client opens a new connection
+ * immediately, so that case is explicitly excluded.
  */
 export const poolCheckoutNeedsWaitMetric = (
 	waitingCountBefore: number,
-	waitingCountAfter: number,
 	idleCountBefore: number,
-	idleHandoffReservationsBefore: number
+	totalCountBefore: number,
+	poolMax: number
 ): boolean =>
 	Number.isSafeInteger(waitingCountBefore) &&
-	Number.isSafeInteger(waitingCountAfter) &&
 	Number.isSafeInteger(idleCountBefore) &&
-	Number.isSafeInteger(idleHandoffReservationsBefore) &&
+	Number.isSafeInteger(totalCountBefore) &&
+	Number.isSafeInteger(poolMax) &&
 	waitingCountBefore >= 0 &&
-	waitingCountAfter >= 0 &&
 	idleCountBefore >= 0 &&
-	idleHandoffReservationsBefore >= 0 &&
-	waitingCountAfter > waitingCountBefore &&
-	idleCountBefore <= idleHandoffReservationsBefore;
-
-let idleHandoffReservations = 0;
+	totalCountBefore >= 0 &&
+	poolMax > 0 &&
+	!(idleCountBefore === 0 && totalCountBefore < poolMax) &&
+	idleCountBefore <= waitingCountBefore;
 
 const connectFromPool = (): Promise<PoolClient> => {
 	const waitingCountBefore = dbPool.waitingCount;
 	const idleCountBefore = dbPool.idleCount;
+	const totalCountBefore = dbPool.totalCount;
 	const checkout = dbPool.connect();
 	if (
 		poolCheckoutNeedsWaitMetric(
 			waitingCountBefore,
-			dbPool.waitingCount,
 			idleCountBefore,
-			idleHandoffReservations
+			totalCountBefore,
+			env.DATABASE_POOL_MAX
 		)
 	) {
 		postgresPoolWaitEvents.inc();
-	}
-	if (dbPool.waitingCount > waitingCountBefore && idleCountBefore > idleHandoffReservations) {
-		idleHandoffReservations += 1;
-		const releaseIdleHandoffReservation = (): void => {
-			idleHandoffReservations = Math.max(0, idleHandoffReservations - 1);
-		};
-		void checkout.then(releaseIdleHandoffReservation, releaseIdleHandoffReservation);
 	}
 	return checkout;
 };
