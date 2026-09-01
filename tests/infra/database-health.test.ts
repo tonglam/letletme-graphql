@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
-	poolHasNoImmediateCapacity,
+	poolWaitWasEnqueued,
 	runDatabaseHealthCheck,
 	type DatabaseHealthClient,
 } from "../../src/infra/database";
@@ -21,16 +21,12 @@ const makeClient = (failOn?: string) => {
 };
 
 describe("PostgreSQL health probe", () => {
-	it("only treats a full pool with no idle client as immediate checkout contention", () => {
-		const pool = (totalCount: number, idleCount: number, max: number) => ({
-			totalCount,
-			idleCount,
-			options: { max },
-		});
-
-		expect(poolHasNoImmediateCapacity(pool(1, 1, 2))).toBe(false);
-		expect(poolHasNoImmediateCapacity(pool(2, 1, 2))).toBe(false);
-		expect(poolHasNoImmediateCapacity(pool(2, 0, 2))).toBe(true);
+	it("records a checkout only when pg-pool actually grows its waiting queue", () => {
+		expect(poolWaitWasEnqueued(0, 0)).toBe(false);
+		expect(poolWaitWasEnqueued(1, 1)).toBe(false);
+		expect(poolWaitWasEnqueued(0, 1)).toBe(true);
+		expect(poolWaitWasEnqueued(1, 2)).toBe(true);
+		expect(poolWaitWasEnqueued(2, 1)).toBe(false);
 	});
 
 	it("scopes a two-second statement timeout to a checked-out transaction", async () => {

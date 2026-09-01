@@ -488,6 +488,7 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 				[
 					`blue|1|blue-generation|${now - 1_000}`,
 					`green|2|green-generation|${now - 5_000}`,
+					`blue|5|just-too-old|${now - 5_001}`,
 					`green|3|too-old|${now - 20_001}`,
 					`blue|4|too-future|${now + 5_001}`,
 					"blue|0|zero-pid|1800000000000",

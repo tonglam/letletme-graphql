@@ -294,6 +294,57 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
 	);
 };
 
+const LIVE_MATCH_REVISION_KEYS = ["revision", "contentUpdatedAt"] as const;
+const LIVE_MATCH_PUBLICATION_ITEM_KEYS = [
+	"name",
+	"key",
+	"type",
+	"count",
+	"bytes",
+	"sha256",
+] as const;
+const LIVE_MATCH_DESK_REVISION_KEYS = ["lifecycle", "fixtureIdentity", "scoreState"] as const;
+const LIVE_MATCH_DESK_PUBLICATION_KEYS = [
+	"contractVersion",
+	"publicationId",
+	"generation",
+	"season",
+	"eventId",
+	"state",
+	"sourceCheckedAt",
+	"publishedAt",
+	"checkpointedAt",
+	"expectedNextCheckAt",
+	"staleAt",
+	"revisions",
+	"desk",
+] as const;
+const LIVE_MATCH_DETAIL_ITEM_KEYS = [
+	"fixtureId",
+	"key",
+	"type",
+	"count",
+	"bytes",
+	"sha256",
+] as const;
+const LIVE_MATCH_DETAIL_PUBLICATION_KEYS = [
+	"contractVersion",
+	"publicationId",
+	"generation",
+	"season",
+	"eventId",
+	"finalized",
+	"observedDeskGeneration",
+	"fixtureIdentityRevision",
+	"sourceCheckedAt",
+	"publishedAt",
+	"checkpointedAt",
+	"expectedNextCheckAt",
+	"staleAt",
+	"detail",
+	"fixtures",
+] as const;
+
 const validDetailStat = (value: unknown): value is MatchDetailStat => {
 	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DETAIL_STAT_KEYS)) return false;
 	return (
@@ -801,7 +852,10 @@ const validState = (value: unknown): value is MatchLifecycleState =>
 	]).has(value as MatchLifecycleState);
 
 const validRevision = (value: unknown): value is StreamRevision =>
-	isRecord(value) && /^[0-9a-f]{64}$/.test(String(value.revision)) && isIso(value.contentUpdatedAt);
+	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_REVISION_KEYS) &&
+	/^[0-9a-f]{64}$/.test(String(value.revision)) &&
+	isIso(value.contentUpdatedAt);
 
 const validPublicationItem = (
 	value: unknown,
@@ -809,6 +863,7 @@ const validPublicationItem = (
 	name: "desk"
 ): value is PublicationItem =>
 	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_PUBLICATION_ITEM_KEYS) &&
 	value.name === name &&
 	value.key === expectedKey &&
 	value.type === "string" &&
@@ -830,6 +885,7 @@ const validBasePublication = (
 	desk?: unknown;
 } =>
 	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_DESK_PUBLICATION_KEYS) &&
 	value.contractVersion === LIVE_MATCHES_CONTRACT_VERSION &&
 	validPublicationId(value.publicationId) &&
 	safeInteger(value.generation) !== null &&
@@ -843,6 +899,7 @@ const validBasePublication = (
 	(value.expectedNextCheckAt === null || isIso(value.expectedNextCheckAt)) &&
 	(value.staleAt === null || isIso(value.staleAt)) &&
 	isRecord(value.revisions) &&
+	hasExactKeys(value.revisions, LIVE_MATCH_DESK_REVISION_KEYS) &&
 	validRevision(value.revisions.lifecycle) &&
 	validRevision(value.revisions.fixtureIdentity) &&
 	validRevision(value.revisions.scoreState);
@@ -867,7 +924,7 @@ const validDetailItem = (
 	season: string,
 	eventId: number
 ): value is FixtureDetailItem => {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DETAIL_ITEM_KEYS)) return false;
 	const fixtureId = safeInteger(value.fixtureId);
 	return (
 		fixtureId !== null &&
@@ -895,6 +952,7 @@ const parseDetailPublication = (
 	const value = parsedJson(raw);
 	if (
 		!isRecord(value) ||
+		!hasExactKeys(value, LIVE_MATCH_DETAIL_PUBLICATION_KEYS) ||
 		value.contractVersion !== LIVE_MATCHES_CONTRACT_VERSION ||
 		!validPublicationId(value.publicationId) ||
 		safeInteger(value.generation) === null ||

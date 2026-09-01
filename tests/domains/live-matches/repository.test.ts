@@ -504,6 +504,72 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects unknown fields in desk publication metadata", async () => {
+		const mutations: Array<(publication: Record<string, unknown>) => void> = [
+			(publication) => {
+				publication.retiredField = true;
+			},
+			(publication) => {
+				(publication.revisions as Record<string, unknown>).retiredField = true;
+			},
+			(publication) => {
+				(
+					(publication.revisions as Record<string, unknown>).lifecycle as Record<string, unknown>
+				).retiredField = true;
+			},
+			(publication) => {
+				(publication.desk as Record<string, unknown>).retiredField = true;
+			},
+		];
+
+		for (const mutate of mutations) {
+			const redis = new TestRedis();
+			const bundle = structuredClone(buildBundle().bundle);
+			const active = bundle.desk.active;
+			if (!active.publication) throw new Error("missing active desk publication");
+			const publication = JSON.parse(active.publication) as Record<string, unknown>;
+			mutate(publication);
+			active.publication = JSON.stringify(publication);
+			attachBundle(redis, bundle);
+
+			const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+			expect(result.desk).toBeNull();
+			expect(result.detail).toBeNull();
+		}
+	});
+
+	it("rejects unknown fields in detail publication metadata", async () => {
+		const mutations: Array<(publication: Record<string, unknown>) => void> = [
+			(publication) => {
+				publication.retiredField = true;
+			},
+			(publication) => {
+				(publication.detail as Record<string, unknown>).retiredField = true;
+			},
+			(publication) => {
+				(publication.fixtures as Array<Record<string, unknown>>)[0].retiredField = true;
+			},
+		];
+
+		for (const mutate of mutations) {
+			const redis = new TestRedis();
+			const bundle = structuredClone(buildBundle().bundle);
+			const active = bundle.detail.active;
+			if (!active.publication) throw new Error("missing active detail publication");
+			const publication = JSON.parse(active.publication) as Record<string, unknown>;
+			mutate(publication);
+			active.publication = JSON.stringify(publication);
+			active.manifest = active.publication;
+			attachBundle(redis, bundle);
+
+			const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+			expect(result.desk).not.toBeNull();
+			expect(result.detail).toBeNull();
+		}
+	});
+
 	it("rejects retired fields in a desk fixture before accepting HEAD metadata", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);

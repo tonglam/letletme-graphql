@@ -14,30 +14,20 @@ export interface QueryExecutor {
 	): Promise<QueryResult<Row>>;
 }
 
-type PoolCapacityState = Readonly<{
-	totalCount: number;
-	idleCount: number;
-	options: Readonly<{ max?: number }>;
+type PoolQueueState = Readonly<{
+	waitingCount: number;
 }>;
 
 /**
- * pg-pool can briefly expose an idle checkout through waitingCount while its
- * next-tick pulse is running. Only a pool with no idle client and a reached
- * max can make the request wait for another checkout.
+ * pg-pool enqueues a checkout synchronously before returning the query/connect
+ * promise. Compare the queue before and after the operation so an idle client
+ * that is already promised to another checkout cannot hide real contention.
  */
-export const poolHasNoImmediateCapacity = (pool: PoolCapacityState): boolean => {
-	const max = pool.options.max;
-	return (
-		typeof max === "number" &&
-		Number.isSafeInteger(max) &&
-		max > 0 &&
-		pool.totalCount >= max &&
-		pool.idleCount === 0
-	);
-};
+export const poolWaitWasEnqueued = (before: number, after: number): boolean =>
+	Number.isSafeInteger(before) && Number.isSafeInteger(after) && after > before;
 
-const recordPoolWaitIfAtCapacity = (pool: PoolCapacityState): void => {
-	if (poolHasNoImmediateCapacity(pool)) postgresPoolWaitEvents.inc();
+const recordPoolWaitIfEnqueued = (pool: PoolQueueState, before: number): void => {
+	if (poolWaitWasEnqueued(before, pool.waitingCount)) postgresPoolWaitEvents.inc();
 };
 
 /**
@@ -49,8 +39,9 @@ export const database: QueryExecutor = {
 		text: string,
 		values: readonly unknown[] = []
 	): Promise<QueryResult<Row>> => {
-		recordPoolWaitIfAtCapacity(dbPool);
+		const waitingBefore = dbPool.waitingCount;
 		const result = dbPool.query<Row>(text, [...values]);
+		recordPoolWaitIfEnqueued(dbPool, waitingBefore);
 		return result;
 	},
 };
@@ -85,7 +76,8 @@ export const runDatabaseHealthCheck = async (
 
 export const databaseHealthCheck = async (): Promise<void> =>
 	runDatabaseHealthCheck(() => {
-		recordPoolWaitIfAtCapacity(dbPool);
+		const waitingBefore = dbPool.waitingCount;
 		const client = dbPool.connect() as unknown as Promise<DatabaseHealthClient>;
+		recordPoolWaitIfEnqueued(dbPool, waitingBefore);
 		return client;
 	}, 2_000);

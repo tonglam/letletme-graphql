@@ -25,6 +25,10 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain(".recent.summary.shadowInteractiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".recent.summary.globalDenied == 0");
 		expect(workflow).toContain(".recent.summary.globalWouldDenied == 0");
+		expect(workflow).toContain("remote_slot_proof()");
+		expect(workflow).toContain("sleep 20");
+		expect(workflow).toContain("\\${first%|*}");
+		expect(workflow).toContain("\\${second%|*}");
 		expect(workflow).not.toContain("GRAPHQL_ENV");
 	});
 
