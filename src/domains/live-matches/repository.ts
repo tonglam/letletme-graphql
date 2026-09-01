@@ -209,6 +209,7 @@ type ScopedEventCheckpointBudget = Readonly<{
 }>;
 
 const processLkg = new Map<string, SelectedLkg>();
+const processMetadataLkg = new Map<string, SelectedLkg>();
 const processActiveEvent = new Map<string, number>();
 const processEventCheckedAt = new Map<string, ScopedEventCheckpointCheck>();
 const processEventCheckpointBudget = new Map<string, ScopedEventCheckpointBudget>();
@@ -481,8 +482,23 @@ return cjson.encode({
 })
 `;
 
-/** PostgreSQL is a cold fallback only; it is never part of the warm Redis path. */
-export const LIVE_MATCH_CHECKPOINT_SQL = `
+/**
+ * PostgreSQL is a cold fallback only; it is never part of the warm Redis path.
+ * Keep the projection aligned with the selected read mode: HEAD needs only
+ * publication metadata, DESK needs the desk payload, and FULL is the only
+ * mode allowed to deserialize fixture-player detail from PostgreSQL.
+ */
+const liveMatchCheckpointSql = (
+	includeDeskPayload: boolean,
+	includeDetailPayload: boolean
+): string => {
+	const deskProjection = includeDeskPayload
+		? "to_jsonb(checkpoint)"
+		: "to_jsonb(checkpoint) - 'payload'";
+	const detailProjection = includeDetailPayload
+		? "to_jsonb(checkpoint)"
+		: "to_jsonb(checkpoint) - 'payload'";
+	return `
 WITH target_event AS (
   SELECT COALESCE(
     $2::integer,
@@ -499,7 +515,7 @@ WITH target_event AS (
 SELECT
   target_event.event_id,
   (
-    SELECT to_jsonb(checkpoint)
+    SELECT ${deskProjection}
     FROM fpl.live_match_desk_checkpoints checkpoint
     WHERE checkpoint.season_id = $1
       AND checkpoint.event_id = target_event.event_id
@@ -507,7 +523,7 @@ SELECT
     LIMIT 1
   ) AS desk,
   (
-    SELECT to_jsonb(checkpoint)
+    SELECT ${detailProjection}
     FROM fpl.live_match_detail_checkpoints checkpoint
     WHERE checkpoint.season_id = $1
       AND checkpoint.event_id = target_event.event_id
@@ -516,9 +532,24 @@ SELECT
   ) AS detail
 FROM target_event
 `;
+};
+
+export const LIVE_MATCH_CHECKPOINT_HEAD_SQL = liveMatchCheckpointSql(false, false);
+export const LIVE_MATCH_CHECKPOINT_DESK_SQL = liveMatchCheckpointSql(true, false);
+export const LIVE_MATCH_CHECKPOINT_SQL = liveMatchCheckpointSql(true, true);
 
 /** Planner, decoded-column, and reader-role gate for the cold fallback. */
 export const LIVE_MATCHES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "live-matches-v3.checkpoint-head-metadata",
+		sql: LIVE_MATCH_CHECKPOINT_HEAD_SQL,
+		values: [2026, 1],
+	},
+	{
+		name: "live-matches-v3.checkpoint-desk",
+		sql: LIVE_MATCH_CHECKPOINT_DESK_SQL,
+		values: [2026, 1],
+	},
 	{
 		name: "live-matches-v3.checkpoint-fallback",
 		sql: LIVE_MATCH_CHECKPOINT_SQL,
@@ -1137,6 +1168,7 @@ const isActiveLkgKey = (key: string): boolean => {
 
 const rememberLkg = (season: string, eventId: number, value: SelectedLkg): void => {
 	const key = lkgKey(season, eventId);
+	processMetadataLkg.delete(key);
 	if (processLkg.has(key)) processLkg.delete(key);
 	processLkg.set(key, value);
 	while (processLkg.size > LIVE_MATCHES_PROCESS_LKG_LIMIT) {
@@ -1146,6 +1178,25 @@ const rememberLkg = (season: string, eventId: number, value: SelectedLkg): void 
 		const oldest = [...processLkg.keys()].find((candidate) => !isActiveLkgKey(candidate));
 		if (oldest === undefined) break;
 		processLkg.delete(oldest);
+	}
+};
+
+const asMetadataLkg = (value: SelectedLkg): SelectedLkg => ({
+	desk: { ...value.desk, fixtures: [], payloadLoaded: false },
+	detail: value.detail ? { ...value.detail, fixtures: [], payloadLoaded: false } : null,
+});
+
+const rememberMetadataLkg = (season: string, eventId: number, value: SelectedLkg): void => {
+	const key = lkgKey(season, eventId);
+	// A complete LKG remains the stronger recovery source. HEAD metadata must
+	// never replace it or cause a full payload to be retained for a heartbeat.
+	if (processLkg.has(key)) return;
+	if (processMetadataLkg.has(key)) processMetadataLkg.delete(key);
+	processMetadataLkg.set(key, asMetadataLkg(value));
+	while (processMetadataLkg.size > LIVE_MATCHES_PROCESS_LKG_LIMIT) {
+		const oldest = [...processMetadataLkg.keys()].find((candidate) => !isActiveLkgKey(candidate));
+		if (oldest === undefined) break;
+		processMetadataLkg.delete(oldest);
 	}
 };
 
@@ -1269,11 +1320,18 @@ const checkpointManifest = (value: unknown): string | null => {
 	return Buffer.byteLength(raw, "utf8") <= LIVE_MATCH_MAX_PUBLICATION_BYTES ? raw : null;
 };
 
-const buildPostgresDesk = (
+type PostgresDeskMetadata = Readonly<{
+	publication: MatchDeskPublication;
+	rowCount: number;
+	bytes: number;
+	checksum: string;
+}>;
+
+const parsePostgresDeskMetadata = (
 	row: unknown,
 	season: string,
 	eventId: number
-): MatchDeskCandidate | null => {
+): PostgresDeskMetadata | null => {
 	if (!isRecord(row)) return null;
 	const manifest = checkpointManifest(row.manifest);
 	const publication = parseDeskPublication(manifest, season, eventId);
@@ -1309,23 +1367,60 @@ const buildPostgresDesk = (
 		publication.desk.sha256 !== checksum
 	)
 		return null;
-	const payload = checkpointPayload(row.payload);
-	if (
-		!validDeskPayload(payload, eventId) ||
-		(payload as readonly unknown[]).length !== rowCount ||
-		canonicalBytes(payload) !== bytes ||
-		sha256(payload) !== checksum
-	)
-		return null;
-	if (!deskRevisionsMatchPayload(publication, payload)) return null;
-	return { publication, fixtures: payload, servedFrom: "POSTGRES_CHECKPOINT" };
+	return { publication, rowCount, bytes, checksum };
 };
 
-const buildPostgresDetail = (
+const buildPostgresDeskMetadata = (
 	row: unknown,
 	season: string,
 	eventId: number
-): MatchDetailCandidate | null => {
+): MatchDeskCandidate | null => {
+	const metadata = parsePostgresDeskMetadata(row, season, eventId);
+	if (!metadata) return null;
+	return {
+		publication: metadata.publication,
+		fixtures: [],
+		payloadLoaded: false,
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
+};
+
+const buildPostgresDesk = (
+	row: unknown,
+	season: string,
+	eventId: number
+): MatchDeskCandidate | null => {
+	if (!isRecord(row)) return null;
+	const metadata = parsePostgresDeskMetadata(row, season, eventId);
+	if (!metadata) return null;
+	const payload = checkpointPayload(row.payload);
+	if (
+		!validDeskPayload(payload, eventId) ||
+		(payload as readonly unknown[]).length !== metadata.rowCount ||
+		canonicalBytes(payload) !== metadata.bytes ||
+		sha256(payload) !== metadata.checksum
+	)
+		return null;
+	if (!deskRevisionsMatchPayload(metadata.publication, payload)) return null;
+	return {
+		publication: metadata.publication,
+		fixtures: payload,
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
+};
+
+type PostgresDetailMetadata = Readonly<{
+	publication: MatchDetailPublication;
+	rowCount: number;
+	bytes: number;
+	checksum: string;
+}>;
+
+const parsePostgresDetailMetadata = (
+	row: unknown,
+	season: string,
+	eventId: number
+): PostgresDetailMetadata | null => {
 	if (!isRecord(row)) return null;
 	const manifest = checkpointManifest(row.manifest);
 	const publication = parseDetailPublication(manifest, season, eventId);
@@ -1368,17 +1463,43 @@ const buildPostgresDetail = (
 		publication.fixtures.length !== rowCount
 	)
 		return null;
+	return { publication, rowCount, bytes, checksum };
+};
+
+const buildPostgresDetailMetadata = (
+	row: unknown,
+	season: string,
+	eventId: number
+): MatchDetailCandidate | null => {
+	const metadata = parsePostgresDetailMetadata(row, season, eventId);
+	if (!metadata) return null;
+	return {
+		publication: metadata.publication,
+		fixtures: [],
+		payloadLoaded: false,
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
+};
+
+const buildPostgresDetail = (
+	row: unknown,
+	season: string,
+	eventId: number
+): MatchDetailCandidate | null => {
+	if (!isRecord(row)) return null;
+	const metadata = parsePostgresDetailMetadata(row, season, eventId);
+	if (!metadata) return null;
 	const payload = checkpointPayload(row.payload);
 	if (
 		!validDetailPayload(payload) ||
-		(payload as readonly unknown[]).length !== rowCount ||
-		canonicalBytes(payload) !== bytes ||
-		sha256(payload) !== checksum
+		(payload as readonly unknown[]).length !== metadata.rowCount ||
+		canonicalBytes(payload) !== metadata.bytes ||
+		sha256(payload) !== metadata.checksum
 	)
 		return null;
 	const fixtures = payload as readonly MatchFixtureDetail[];
 	for (const [index, fixture] of fixtures.entries()) {
-		const item = publication.fixtures[index];
+		const item = metadata.publication.fixtures[index];
 		if (
 			!item ||
 			item.fixtureId !== fixture.fixtureId ||
@@ -1388,7 +1509,7 @@ const buildPostgresDetail = (
 		)
 			return null;
 	}
-	return { publication, fixtures, servedFrom: "POSTGRES_CHECKPOINT" };
+	return { publication: metadata.publication, fixtures, servedFrom: "POSTGRES_CHECKPOINT" };
 };
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
@@ -1422,14 +1543,21 @@ const readPostgresCheckpoint = async (
 	context: GraphQLContext,
 	seasonId: number,
 	season: string,
-	eventId: number | null
+	eventId: number | null,
+	mode: LiveMatchReadMode
 ): Promise<PostgresCheckpointRead | null> => {
 	if (!postgresCircuitAllowsRead()) return null;
-	const scope = eventId === null ? `${season}:active` : lkgKey(season, eventId);
+	const scope = `${mode}:${eventId === null ? `${season}:active` : lkgKey(season, eventId)}`;
 	const existing = postgresReadFlights.get(scope);
 	if (existing) return existing;
+	const checkpointSql =
+		mode === "HEAD"
+			? LIVE_MATCH_CHECKPOINT_HEAD_SQL
+			: mode === "DESK"
+				? LIVE_MATCH_CHECKPOINT_DESK_SQL
+				: LIVE_MATCH_CHECKPOINT_SQL;
 	const flight = withTimeout(
-		context.database.query<CheckpointRow>(LIVE_MATCH_CHECKPOINT_SQL, [seasonId, eventId]),
+		context.database.query<CheckpointRow>(checkpointSql, [seasonId, eventId]),
 		LIVE_MATCHES_POSTGRES_TIMEOUT_MS
 	)
 		.then((result) => {
@@ -1439,7 +1567,10 @@ const readPostgresCheckpoint = async (
 			if (!row || selectedEventId === null || selectedEventId <= 0) {
 				return { eventId: null, desk: null, detail: null };
 			}
-			const desk = buildPostgresDesk(row.desk, season, selectedEventId);
+			const desk =
+				mode === "HEAD"
+					? buildPostgresDeskMetadata(row.desk, season, selectedEventId)
+					: buildPostgresDesk(row.desk, season, selectedEventId);
 			if (!desk) {
 				context.logger.warn(
 					{ eventId: selectedEventId },
@@ -1450,7 +1581,10 @@ const readPostgresCheckpoint = async (
 			return {
 				eventId: selectedEventId,
 				desk,
-				detail: buildPostgresDetail(row.detail, season, selectedEventId),
+				detail:
+					mode === "FULL"
+						? buildPostgresDetail(row.detail, season, selectedEventId)
+						: buildPostgresDetailMetadata(row.detail, season, selectedEventId),
 			};
 		})
 		.catch((error) => {
@@ -1658,7 +1792,8 @@ export const readLiveMatchday = async (
 			context,
 			context.currentSeason.seasonId,
 			season,
-			null
+			null,
+			mode
 		);
 		postgresReadFailed = unscopedPostgres === null;
 		selectedEventId = unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
@@ -1710,12 +1845,14 @@ export const readLiveMatchday = async (
 		}
 	}
 
-	const stored = processLkg.get(lkgKey(season, selectedEventId));
+	const scopedEventKey = lkgKey(season, selectedEventId);
+	const stored =
+		processLkg.get(scopedEventKey) ??
+		(mode === "HEAD" ? processMetadataLkg.get(scopedEventKey) : undefined);
 	const processLkgValue = stored ? asProcessLkg(stored) : null;
 	let effectiveDesk = active.desk ?? previous.desk ?? processLkgValue?.desk ?? null;
 	let postgres: PostgresCheckpointRead | null =
 		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
-	const scopedEventKey = lkgKey(season, selectedEventId);
 	const redisDeskAvailable = active.desk !== null || previous.desk !== null;
 	const detailNeedsPostgres =
 		mode === "FULL" &&
@@ -1749,7 +1886,8 @@ export const readLiveMatchday = async (
 			context,
 			context.currentSeason.seasonId,
 			season,
-			selectedEventId
+			selectedEventId,
+			mode
 		);
 		postgresReadFailed = postgres === null;
 		if (detailNeedsPostgres && effectiveDesk !== null && postgres?.detail === null) {
@@ -1789,6 +1927,9 @@ export const readLiveMatchday = async (
 		redisRoundtrips,
 	};
 	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
+	if (mode === "HEAD" && !processLkg.has(scopedEventKey)) {
+		rememberMetadataLkg(season, selectedEventId, { desk: effectiveDesk, detail });
+	}
 	const completeDetailForLkg =
 		detail?.payloadLoaded === false
 			? chooseDetail(
@@ -1828,6 +1969,7 @@ export const readLiveMatchday = async (
 
 export const resetLiveMatchProcessStateForTests = (): void => {
 	processLkg.clear();
+	processMetadataLkg.clear();
 	processActiveEvent.clear();
 	processEventCheckedAt.clear();
 	processEventCheckpointBudget.clear();

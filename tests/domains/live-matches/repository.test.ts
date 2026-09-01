@@ -5,6 +5,8 @@ import { graphql } from "graphql";
 import { schema } from "../../../src/graphql/schema";
 import {
 	LIVE_MATCHES_READ_POINTER_LUA,
+	LIVE_MATCH_CHECKPOINT_DESK_SQL,
+	LIVE_MATCH_CHECKPOINT_HEAD_SQL,
 	LIVE_MATCH_CHECKPOINT_SQL,
 	LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS,
 	LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET,
@@ -533,6 +535,57 @@ describe("Live Matches V3 read path", () => {
 		expect(LIVE_MATCH_CHECKPOINT_SQL.match(/contract_version = 'live-matches-v3'/g)).toHaveLength(
 			3
 		);
+	});
+
+	it("uses metadata-only PostgreSQL projections for HEAD and DESK reads", async () => {
+		const coldRead = async (mode: "HEAD" | "DESK" | "FULL") => {
+			resetLiveMatchProcessStateForTests();
+			const redis = new TestRedis();
+			(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+				throw new Error("redis unavailable");
+			};
+			let query = "";
+			const row = buildCheckpointRow();
+			if (mode !== "FULL") {
+				Object.defineProperty(row.detail, "payload", {
+					configurable: true,
+					get: () => {
+						throw new Error("metadata-only checkpoint parser read detail payload");
+					},
+				});
+			}
+			const result = await readLiveMatchday(
+				buildSnapshotContext(redis, {
+					databaseQuery: async (sql) => {
+						query = String(sql);
+						return { rows: [row] };
+					},
+				}),
+				1,
+				mode
+			);
+			return { query, result };
+		};
+
+		const head = await coldRead("HEAD");
+		expect(head.query).toBe(LIVE_MATCH_CHECKPOINT_HEAD_SQL);
+		expect(head.result.desk?.payloadLoaded).toBe(false);
+		expect(head.result.detail?.payloadLoaded).toBe(false);
+		expect(head.result.desk?.fixtures).toEqual([]);
+		expect(head.result.detail?.fixtures).toEqual([]);
+
+		const desk = await coldRead("DESK");
+		expect(desk.query).toBe(LIVE_MATCH_CHECKPOINT_DESK_SQL);
+		expect(desk.result.desk?.payloadLoaded).not.toBe(false);
+		expect(desk.result.detail?.payloadLoaded).toBe(false);
+		expect(desk.result.desk?.fixtures).toHaveLength(2);
+		expect(desk.result.detail?.fixtures).toEqual([]);
+
+		const full = await coldRead("FULL");
+		expect(full.query).toBe(LIVE_MATCH_CHECKPOINT_SQL);
+		expect(full.result.desk?.payloadLoaded).not.toBe(false);
+		expect(full.result.detail?.payloadLoaded).not.toBe(false);
+		expect(full.result.detail?.fixtures).toHaveLength(2);
 	});
 
 	it("rejects case-insensitive duplicate stat identifiers before serving detail", async () => {
@@ -1211,7 +1264,7 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
-	it("retains a complete PostgreSQL candidate in process LKG for HEAD reads", async () => {
+	it("retains PostgreSQL metadata in a separate process LKG for HEAD reads", async () => {
 		const redis = new TestRedis();
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
 			throw new Error("redis unavailable");
@@ -1228,12 +1281,16 @@ describe("Live Matches V3 read path", () => {
 		const second = await readLiveMatchday(context, 1, "HEAD");
 
 		expect(first.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(first.desk?.payloadLoaded).toBe(false);
+		expect(first.detail?.payloadLoaded).toBe(false);
 		expect(second.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(second.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(second.desk?.payloadLoaded).toBe(false);
+		expect(second.detail?.payloadLoaded).toBe(false);
 		expect(databaseReads).toBe(1);
 	});
 
-	it("retains complete PostgreSQL detail when metadata prefers a Redis manifest", async () => {
+	it("retains PostgreSQL metadata when Redis detail manifest is preferred", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		bundle.desk.active = emptyDesk;
@@ -1259,9 +1316,37 @@ describe("Live Matches V3 read path", () => {
 
 		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
 		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
-		expect(recovered.detail?.payloadLoaded).not.toBe(false);
-		expect(recovered.detail?.fixtures).toHaveLength(2);
+		expect(recovered.detail?.payloadLoaded).toBe(false);
+		expect(recovered.detail?.fixtures).toEqual([]);
 		expect(databaseReads).toBe(1);
+	});
+
+	it("does not replace a complete process LKG with a HEAD metadata read", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle().bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				throw new Error("complete process LKG must avoid PostgreSQL");
+			},
+		});
+
+		const full = await readLiveMatchday(context, 1, "FULL");
+		expect(full.detail?.fixtures).toHaveLength(2);
+		const head = await readLiveMatchday(context, 1, "HEAD");
+		expect(head.detail?.payloadLoaded).toBe(false);
+
+		control.set(null);
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const recovered = await readLiveMatchday(context, 1, "FULL");
+
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.fixtures).toHaveLength(2);
+		expect(databaseReads).toBe(0);
 	});
 
 	it("does not pair current detail metadata with a previous desk", async () => {
