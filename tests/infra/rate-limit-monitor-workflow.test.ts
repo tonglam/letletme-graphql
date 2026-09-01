@@ -32,6 +32,11 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain("inactive_owner");
 		expect(workflow).toContain("after_inactive_proof");
 		expect(workflow).toContain("\\${after_inactive_proof%|*}");
+		expect(workflow).toContain("active_after");
+		expect(workflow).toContain("after_active_proof");
+		expect(workflow).toContain("\\${after_active_proof%|*}");
+		expect(workflow).toContain("active slot changed during report");
+		expect(workflow).toContain("active slot liveness changed during report");
 		expect(workflow).not.toContain("GRAPHQL_ENV");
 	});
 

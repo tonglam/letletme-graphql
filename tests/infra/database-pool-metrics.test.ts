@@ -32,6 +32,13 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("remoteMaxConcurrentStreams");
 		expect(capacitySource).toContain("beginNetworkRequest");
 		expect(capacitySource).toContain("endNetworkRequest");
+		expect(capacitySource).toContain('request.once("socket", observeSocket)');
+		expect(capacitySource).toContain('socket.once("connect"');
+		expect(capacitySource).toContain('tlsSocket.once("secureConnect"');
+		expect(capacitySource).toContain("requestEnded");
+		expect(capacitySource.indexOf('request.once("socket", observeSocket)')).toBeLessThan(
+			capacitySource.indexOf("request.end(requestBody)")
+		);
 		expect(capacitySource).toContain("beginNetworkConcurrencyStage");
 		expect(capacitySource).toContain("finishNetworkConcurrencyStage");
 		expect(capacitySource).toContain("targetCoverageRatio");

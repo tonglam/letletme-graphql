@@ -817,6 +817,8 @@ const dirtyWindowMarkerRecords = new Map<string, RateLimitAggregateRecord>();
 const ownedDirtyWindowMarkers = new Set<string>();
 const seenDirtyWindowMarkers = new Set<string>();
 const uncleanTelemetryWindows = new Set<string>();
+const failedTelemetryWindows = new Set<string>();
+const overflowTelemetryWindows = new Set<string>();
 const persistenceFailureMarkerRetryRecords = new Map<string, RateLimitAggregateRecord>();
 const overflowMarkerRetryRecords = new Map<string, RateLimitAggregateRecord>();
 const markerRetryScanAt = new WeakMap<Redis, number>();
@@ -909,6 +911,13 @@ const removeOwnedDirtyWindowMarker = (windowKey: string): void => {
 	}
 };
 
+const markOverflowTelemetryWindowDurable = (record: RateLimitAggregateRecord): void => {
+	const windowKey = telemetryWindowKey(record);
+	overflowTelemetryWindows.delete(windowKey);
+	if (!failedTelemetryWindows.has(windowKey)) uncleanTelemetryWindows.delete(windowKey);
+	removeOwnedDirtyWindowMarker(windowKey);
+};
+
 const clearTelemetryFlushTimer = (): void => {
 	if (telemetryFlushTimer === null) return;
 	clearTimeout(telemetryFlushTimer);
@@ -924,6 +933,7 @@ const flushTelemetryQueue = async (): Promise<void> => {
 		for (const windowKey of result.successfulWindows) successfulWindows.add(windowKey);
 		for (const windowKey of result.failedWindows) {
 			failedWindows.add(windowKey);
+			failedTelemetryWindows.add(windowKey);
 			uncleanTelemetryWindows.add(windowKey);
 		}
 	}
@@ -1188,7 +1198,10 @@ const persistOverflowMarker = (record: RateLimitAggregateRecord): Promise<void> 
 		rateLimitAggregateDate(record.date),
 		record.policyVersion
 	);
-	if (persistedOverflowMarkers.has(key)) return Promise.resolve();
+	if (persistedOverflowMarkers.has(key)) {
+		markOverflowTelemetryWindowDurable(record);
+		return Promise.resolve();
+	}
 	const existing = overflowMarkerFlights.get(key);
 	if (existing) return existing;
 	overflowMarkerRetryRecords.set(key, record);
@@ -1218,6 +1231,7 @@ const persistOverflowMarker = (record: RateLimitAggregateRecord): Promise<void> 
 		persistedOverflowMarkers.add(key);
 		overflowMarkerRetryRecords.delete(key);
 		await removeTelemetryMarker(record, "overflow");
+		markOverflowTelemetryWindowDurable(record);
 	})().finally(() => {
 		overflowMarkerFlights.delete(key);
 	});
@@ -1254,6 +1268,9 @@ export const enqueueRateLimitAggregate = (input: {
 		.inc();
 	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE) {
 		metrics.rateLimitTelemetryOverflows.labels(record.policyVersion).inc();
+		const windowKey = telemetryWindowKey(record);
+		overflowTelemetryWindows.add(windowKey);
+		uncleanTelemetryWindows.add(windowKey);
 		void persistOverflowMarker(record);
 		return;
 	}

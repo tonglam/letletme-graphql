@@ -658,6 +658,10 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 	it("retains an overflow marker before Redis and retries it after recovery", async () => {
 		const date = new Date("2026-08-23T00:00:00.000Z");
 		const dateText = rateLimitAggregateDate(date);
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const dirtyPrefix = `dirty.v3.${dateText}.${process.pid}.`;
 		let releasePipeline!: () => void;
 		let markerAttempts = 0;
 		let observeSpool!: (value: boolean) => void;
@@ -684,43 +688,66 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 				return "OK";
 			},
 		} as unknown as Redis;
-
-		for (
-			let index = 0;
-			index <= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE + RATE_LIMIT_TELEMETRY_BATCH_SIZE;
-			index += 1
-		) {
-			enqueueRateLimitAggregate({
-				redis,
-				trafficClass: "web_rsc",
-				workload: "fixtures",
-				scope: "workload",
-				outcome: "allowed",
-				fingerprint: "abc123abc123",
-				date,
-				logger: { warn: () => undefined } as never,
-			});
+		await mkdir(spoolDirectory, { recursive: true });
+		for (const name of await readdir(spoolDirectory)) {
+			if (name.startsWith(dirtyPrefix))
+				await unlink(join(spoolDirectory, name)).catch(() => undefined);
 		}
 
-		await expect(markerSawSpool).resolves.toBe(true);
-		await expect(flushRateLimitAggregateTelemetry(10)).rejects.toThrow(
-			"rate-limit telemetry flush timed out"
-		);
-		expect(await readRateLimitTelemetryOverflowSpool("graphql-v3", [dateText])).toEqual([dateText]);
+		try {
+			for (
+				let index = 0;
+				index <= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE + RATE_LIMIT_TELEMETRY_BATCH_SIZE;
+				index += 1
+			) {
+				enqueueRateLimitAggregate({
+					redis,
+					trafficClass: "web_rsc",
+					workload: "fixtures",
+					scope: "workload",
+					outcome: "allowed",
+					fingerprint: "abc123abc123",
+					date,
+					logger: { warn: () => undefined } as never,
+				});
+			}
 
-		releasePipeline();
-		await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
-			"rate-limit telemetry persistence failed"
-		);
-		await expect(
-			retryRateLimitTelemetryOverflowMarkers({
-				redis,
-				policyVersion: "graphql-v3",
-				dates: [dateText],
-			})
-		).resolves.toEqual([]);
-		expect(markerAttempts).toBe(2);
-		expect(await readRateLimitTelemetryOverflowSpool("graphql-v3", [dateText])).toEqual([]);
+			await expect(markerSawSpool).resolves.toBe(true);
+			expect((await readdir(spoolDirectory)).some((name) => name.startsWith(dirtyPrefix))).toBe(
+				true
+			);
+			await expect(flushRateLimitAggregateTelemetry(10)).rejects.toThrow(
+				"rate-limit telemetry flush timed out"
+			);
+			expect(await readRateLimitTelemetryOverflowSpool("graphql-v3", [dateText])).toEqual([
+				dateText,
+			]);
+
+			releasePipeline();
+			await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
+				"rate-limit telemetry persistence failed"
+			);
+			expect((await readdir(spoolDirectory)).some((name) => name.startsWith(dirtyPrefix))).toBe(
+				true
+			);
+			await expect(
+				retryRateLimitTelemetryOverflowMarkers({
+					redis,
+					policyVersion: "graphql-v3",
+					dates: [dateText],
+				})
+			).resolves.toEqual([]);
+			expect(markerAttempts).toBe(2);
+			expect(await readRateLimitTelemetryOverflowSpool("graphql-v3", [dateText])).toEqual([]);
+			expect((await readdir(spoolDirectory)).some((name) => name.startsWith(dirtyPrefix))).toBe(
+				false
+			);
+		} finally {
+			for (const name of await readdir(spoolDirectory).catch(() => [] as string[])) {
+				if (name.startsWith(dirtyPrefix))
+					await unlink(join(spoolDirectory, name)).catch(() => undefined);
+			}
+		}
 	});
 
 	it("fails a shutdown flush when telemetry persistence exceeds its bound", async () => {

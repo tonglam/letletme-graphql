@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import type { Socket } from "node:net";
 import { request as httpRequest, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { TLSSocket } from "node:tls";
 import {
 	connect as http2Connect,
 	constants as http2Constants,
@@ -647,11 +649,46 @@ function requestOnceHttp1(stage: number): Promise<RawResponse> {
 		let settled = false;
 		let bodyEnded = false;
 		let networkEnded = false;
+		let networkStarted = false;
+		let requestEnded = false;
+		let socketReady = false;
+		let observedSocket: Socket | null = null;
 		let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+		const startNetworkRequestIfReady = (): void => {
+			if (networkStarted || settled || networkEnded || !requestEnded || !socketReady) return;
+			networkStarted = true;
+			beginNetworkRequest(stage);
+		};
+		const observeSocket = (socket: Socket): void => {
+			if (observedSocket === socket) return;
+			observedSocket = socket;
+			if (endpoint.protocol === "https:") {
+				const tlsSocket = socket as TLSSocket & { secureConnecting?: boolean };
+				if (!tlsSocket.secureConnecting) {
+					socketReady = true;
+					startNetworkRequestIfReady();
+				} else {
+					tlsSocket.once("secureConnect", () => {
+						socketReady = true;
+						startNetworkRequestIfReady();
+					});
+				}
+				return;
+			}
+			if (!socket.connecting) {
+				socketReady = true;
+				startNetworkRequestIfReady();
+			} else {
+				socket.once("connect", () => {
+					socketReady = true;
+					startNetworkRequestIfReady();
+				});
+			}
+		};
 		const completeNetworkRequest = (): void => {
 			if (networkEnded) return;
 			networkEnded = true;
-			endNetworkRequest(stage);
+			if (networkStarted) endNetworkRequest(stage);
 		};
 		const finish = (value: RawResponse) => {
 			if (settled) return;
@@ -663,7 +700,6 @@ function requestOnceHttp1(stage: number): Promise<RawResponse> {
 			resolve(value);
 		};
 		const requester = endpoint.protocol === "https:" ? httpsRequest : httpRequest;
-		beginNetworkRequest(stage);
 		let request: ClientRequest;
 		try {
 			request = requester(
@@ -764,6 +800,8 @@ function requestOnceHttp1(stage: number): Promise<RawResponse> {
 			});
 			return;
 		}
+		request.once("socket", observeSocket);
+		if (request.socket) observeSocket(request.socket);
 		request.setTimeout(timeoutMs, () => {
 			completeNetworkRequest();
 			request.destroy(new Error("request timeout"));
@@ -787,7 +825,25 @@ function requestOnceHttp1(stage: number): Promise<RawResponse> {
 			completeNetworkRequest();
 			request.destroy(new Error("request timeout"));
 		}, timeoutMs);
-		request.end(requestBody);
+		try {
+			request.end(requestBody);
+			requestEnded = true;
+			startNetworkRequestIfReady();
+		} catch (error) {
+			completeNetworkRequest();
+			const now = performance.now();
+			finish({
+				status: 0,
+				ttfbMs: Math.max(0, (headersAt ?? now) - startedAt),
+				bodyDownloadMs: 0,
+				durationMs: Math.max(0, now - startedAt),
+				encoded: Buffer.alloc(0),
+				decoded: Buffer.alloc(0),
+				decodeError: error instanceof Error ? error.message : String(error),
+				globalRateLimit: false,
+				rateLimitScope: null,
+			});
+		}
 	});
 }
 
