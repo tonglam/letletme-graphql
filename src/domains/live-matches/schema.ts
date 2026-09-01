@@ -48,6 +48,9 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 		lifecycle: String!
 		fixtureIdentity: String!
 		scoreState: String!
+		# Descriptor-only token returned by HEAD/DESK. It does not certify the
+		# immutable player bodies; playerDetail is the verified FULL revision.
+		detailObservation: String
 		detailPublicationId: ID
 		detailGeneration: Int
 		playerDetail: String

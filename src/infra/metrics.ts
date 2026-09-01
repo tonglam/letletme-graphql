@@ -222,7 +222,7 @@ const postgresPoolClients = new Gauge({
 
 export const postgresPoolWaitEvents = new Counter({
 	name: "postgres_pool_wait_events_total",
-	help: "PostgreSQL pool checkout requests that entered the pending queue",
+	help: "PostgreSQL pool checkout requests that waited for a client",
 });
 
 registry.registerMetric(rateLimitStorageFailures);

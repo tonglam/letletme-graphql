@@ -148,6 +148,8 @@ type MatchDeskCandidate = Readonly<{
 type MatchDetailCandidate = Readonly<{
 	publication: MatchDetailPublication;
 	fixtures: readonly MatchFixtureDetail[];
+	/** Same descriptor-only token exposed by HEAD for refresh comparison. */
+	observationRevision: string;
 	/** A complete detail candidate whose immutable bodies have been verified. */
 	payloadLoaded: true;
 	/** Player team IDs retained by metadata reads for desk compatibility checks. */
@@ -162,6 +164,12 @@ type MatchDetailCandidate = Readonly<{
  */
 type MatchDetailObservation = Readonly<{
 	publication: MatchDetailPublication;
+	/**
+	 * A descriptor-only change token. It is useful to decide whether a FULL
+	 * refresh is worth attempting, but it is not the verified `playerDetail`
+	 * revision and must never be used as a detail payload authority.
+	 */
+	observationRevision: string;
 	fixtures: readonly [];
 	payloadLoaded: false;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
@@ -398,6 +406,34 @@ const stableJson = (value: unknown): string => {
 
 const sha256 = (value: unknown): string =>
 	createHash("sha256").update(stableJson(value), "utf8").digest("hex");
+
+/**
+ * Build a safe HEAD change token from the publication descriptor and
+ * content-addressed item descriptors. The aggregate detail revision is
+ * intentionally excluded: without reading the immutable bodies, HEAD cannot
+ * prove that aggregate hash. FULL remains the only path that exposes the
+ * verified aggregate revision or serves player rows.
+ */
+const detailManifestObservationRevision = (publication: MatchDetailPublication): string =>
+	sha256({
+		contractVersion: publication.contractVersion,
+		publicationId: publication.publicationId,
+		generation: publication.generation,
+		season: publication.season,
+		eventId: publication.eventId,
+		finalized: publication.finalized,
+		observedDeskGeneration: publication.observedDeskGeneration,
+		fixtureIdentityRevision: publication.fixtureIdentityRevision,
+		contentUpdatedAt: publication.detail.contentUpdatedAt,
+		fixtures: publication.fixtures.map((item) => ({
+			fixtureId: item.fixtureId,
+			key: item.key,
+			type: item.type,
+			count: item.count,
+			bytes: item.bytes,
+			sha256: item.sha256,
+		})),
+	});
 
 const sha256Raw = (value: string): string =>
 	createHash("sha256").update(value, "utf8").digest("hex");
@@ -1309,6 +1345,7 @@ const decodeDetailCandidate = (
 	return {
 		publication,
 		fixtures,
+		observationRevision: detailManifestObservationRevision(publication),
 		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
 		payloadLoaded: true,
 		servedFrom,
@@ -1349,6 +1386,7 @@ const decodeDetailObservation = (
 	if (seen.size !== publication.fixtures.length) return null;
 	return {
 		publication,
+		observationRevision: detailManifestObservationRevision(publication),
 		fixtures: [],
 		payloadLoaded: false,
 		servedFrom,
@@ -1459,6 +1497,7 @@ const asDetailObservation = (
 		? null
 		: {
 				publication: candidate.publication,
+				observationRevision: candidate.observationRevision,
 				fixtures: [],
 				payloadLoaded: false,
 				servedFrom: candidate.servedFrom,
@@ -1876,6 +1915,7 @@ const buildPostgresDetail = (
 	return {
 		publication: metadata.publication,
 		fixtures,
+		observationRevision: detailManifestObservationRevision(metadata.publication),
 		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
 		payloadLoaded: true,
 		servedFrom: "POSTGRES_CHECKPOINT",
@@ -2221,9 +2261,8 @@ export const readLiveMatchday = async (
 	const activeDetailNeedsFallback =
 		activeBundle !== null &&
 		active.desk !== null &&
-		(mode === "FULL"
-			? chooseCompleteDetail(active.desk, [active.detail])
-			: chooseDetailObservation(active.desk, [active.detail])) === null &&
+		(mode === "FULL" ? chooseCompleteDetail(active.desk, [active.detail]) : active.detail) ===
+			null &&
 		(activeBundle.detail.active.publication !== null || allFixturesStarted(active.desk));
 	const previousAttempted =
 		activeBundle !== null && (active.desk === null || activeDetailNeedsFallback);

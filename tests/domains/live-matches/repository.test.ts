@@ -415,7 +415,7 @@ describe("Live Matches V3 read path", () => {
 					throw new Error("warm Live Matches reads must not touch PostgreSQL");
 				},
 			}),
-			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id price totalPoints stats { identifier awardedPoints } } } } } }`,
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId revisions { detailObservation detailPublicationId detailGeneration playerDetail } matches { fixtureId players { id price totalPoints stats { identifier awardedPoints } } } } } }`,
 		});
 
 		expect(result.errors).toBeUndefined();
@@ -424,6 +424,12 @@ describe("Live Matches V3 read path", () => {
 			delivery: { state: "FRESH", servedFrom: "REDIS_CURRENT" },
 			snapshot: {
 				eventId: 1,
+				revisions: {
+					detailObservation: expect.any(String) as unknown,
+					detailPublicationId: publicationId(12),
+					detailGeneration: 12,
+					playerDetail: expect.any(String) as unknown,
+				},
 				matches: [
 					{ fixtureId: 101, players: [{ id: 9001, price: 55, totalPoints: 3 }] },
 					{ fixtureId: 102, players: [{ id: 9001, price: 55, totalPoints: 8 }] },
@@ -517,7 +523,8 @@ describe("Live Matches V3 read path", () => {
 
 	it("keeps unverified detail metadata out of the authoritative candidate", async () => {
 		const redis = new TestRedis();
-		const bundle = structuredClone(buildBundle().bundle);
+		const built = buildBundle();
+		const bundle = structuredClone(built.bundle);
 		const activeItem = bundle.detail.active.items[0];
 		if (!activeItem || activeItem.payload === null) throw new Error("missing active detail item");
 		// Preserve the byte length and sidecar metadata while changing the body.
@@ -530,6 +537,9 @@ describe("Live Matches V3 read path", () => {
 		expect(head.detail).toBeNull();
 		expect(head.detailObservation?.servedFrom).toBe("REDIS_CURRENT");
 		expect(head.detailObservation?.payloadLoaded).toBe(false);
+		expect(head.detailObservation?.observationRevision).not.toBe(
+			built.detailPublication.detail.revision
+		);
 		expect(full.detail).toBeNull();
 	});
 
@@ -550,8 +560,26 @@ describe("Live Matches V3 read path", () => {
 		const full = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
 
 		expect(head.detail).toBeNull();
-		expect(head.detailObservation?.publication.detail.revision).toBe("f".repeat(64));
+		expect(head.detailObservation?.observationRevision).toMatch(/^[0-9a-f]{64}$/);
 		expect(full.detail).toBeNull();
+
+		const response = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { snapshot { revisions { detailObservation detailPublicationId detailGeneration playerDetail } } } }`,
+		});
+
+		expect(response.errors).toBeUndefined();
+		expect(response.data?.liveMatchday).toMatchObject({
+			snapshot: {
+				revisions: {
+					detailObservation: expect.any(String) as unknown,
+					detailPublicationId: null,
+					detailGeneration: null,
+					playerDetail: null,
+				},
+			},
+		});
 	});
 
 	it("rejects metadata when an immutable detail item is missing and uses previous", async () => {

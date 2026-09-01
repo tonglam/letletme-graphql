@@ -140,13 +140,15 @@ const observedDetail = (read: LiveMatchdayRead): ObservedMatchDetail | null =>
 
 const toRevisionVector = (read: LiveMatchdayRead) => {
 	const desk = read.desk;
-	const detail = observedDetail(read);
+	const observed = observedDetail(read);
+	const detail = read.detail;
 	return {
 		deskPublicationId: desk?.publication.publicationId ?? "unavailable",
 		deskGeneration: desk?.publication.generation ?? 0,
 		lifecycle: desk?.publication.revisions.lifecycle.revision ?? "unavailable",
 		fixtureIdentity: desk?.publication.revisions.fixtureIdentity.revision ?? "unavailable",
 		scoreState: desk?.publication.revisions.scoreState.revision ?? "unavailable",
+		detailObservation: observed?.observationRevision ?? null,
 		detailPublicationId: detail?.publication.publicationId ?? null,
 		detailGeneration: detail?.publication.generation ?? null,
 		playerDetail: detail?.publication.detail.revision ?? null,

@@ -16,29 +16,31 @@ export interface QueryExecutor {
 }
 
 /**
- * Infer whether this particular checkout must wait from the pool state at the
- * call boundary. Sampling `waitingCount` after `connect()` is not sufficient:
- * a busy client can be released before that sample and make the queue appear
- * empty again. A checkout waits when an existing waiter is ahead of it, or
- * when every pool slot is busy and no idle client is available for its queue
- * position. A pool with room and no idle client opens a new connection
- * immediately, so that case is explicitly excluded.
+ * Infer whether this particular checkout had to wait from the synchronous
+ * queue transition at the call boundary. `pg-pool` appends exactly one
+ * pending item synchronously when a checkout cannot be handed off
+ * immediately; observing the delta on this call avoids losing a short wait
+ * when another client is released before a later pool-wide sample. An idle
+ * handoff with a spare pool slot is deliberately not counted as contention.
  */
 export const poolCheckoutNeedsWaitMetric = (
 	waitingCountBefore: number,
+	waitingCountAfter: number,
 	idleCountBefore: number,
 	totalCountBefore: number,
 	poolMax: number
 ): boolean =>
 	Number.isSafeInteger(waitingCountBefore) &&
+	Number.isSafeInteger(waitingCountAfter) &&
 	Number.isSafeInteger(idleCountBefore) &&
 	Number.isSafeInteger(totalCountBefore) &&
 	Number.isSafeInteger(poolMax) &&
 	waitingCountBefore >= 0 &&
+	waitingCountAfter === waitingCountBefore + 1 &&
 	idleCountBefore >= 0 &&
 	totalCountBefore >= 0 &&
 	poolMax > 0 &&
-	!(idleCountBefore === 0 && totalCountBefore < poolMax) &&
+	totalCountBefore >= poolMax &&
 	idleCountBefore <= waitingCountBefore;
 
 const connectFromPool = (): Promise<PoolClient> => {
@@ -46,9 +48,11 @@ const connectFromPool = (): Promise<PoolClient> => {
 	const idleCountBefore = dbPool.idleCount;
 	const totalCountBefore = dbPool.totalCount;
 	const checkout = dbPool.connect();
+	const waitingCountAfter = dbPool.waitingCount;
 	if (
 		poolCheckoutNeedsWaitMetric(
 			waitingCountBefore,
+			waitingCountAfter,
 			idleCountBefore,
 			totalCountBefore,
 			env.DATABASE_POOL_MAX
