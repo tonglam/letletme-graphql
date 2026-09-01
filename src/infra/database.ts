@@ -14,9 +14,30 @@ export interface QueryExecutor {
 	): Promise<QueryResult<Row>>;
 }
 
-const recordNewlyQueuedPoolWaits = (waitingBefore: number): void => {
-	const newlyQueued = Math.max(0, dbPool.waitingCount - waitingBefore);
-	if (newlyQueued > 0) postgresPoolWaitEvents.inc(newlyQueued);
+type PoolCapacityState = Readonly<{
+	totalCount: number;
+	idleCount: number;
+	options: Readonly<{ max?: number }>;
+}>;
+
+/**
+ * pg-pool can briefly expose an idle checkout through waitingCount while its
+ * next-tick pulse is running. Only a pool with no idle client and a reached
+ * max can make the request wait for another checkout.
+ */
+export const poolHasNoImmediateCapacity = (pool: PoolCapacityState): boolean => {
+	const max = pool.options.max;
+	return (
+		typeof max === "number" &&
+		Number.isSafeInteger(max) &&
+		max > 0 &&
+		pool.totalCount >= max &&
+		pool.idleCount === 0
+	);
+};
+
+const recordPoolWaitIfAtCapacity = (pool: PoolCapacityState): void => {
+	if (poolHasNoImmediateCapacity(pool)) postgresPoolWaitEvents.inc();
 };
 
 /**
@@ -28,9 +49,8 @@ export const database: QueryExecutor = {
 		text: string,
 		values: readonly unknown[] = []
 	): Promise<QueryResult<Row>> => {
-		const waitingBefore = dbPool.waitingCount;
+		recordPoolWaitIfAtCapacity(dbPool);
 		const result = dbPool.query<Row>(text, [...values]);
-		recordNewlyQueuedPoolWaits(waitingBefore);
 		return result;
 	},
 };
@@ -65,8 +85,7 @@ export const runDatabaseHealthCheck = async (
 
 export const databaseHealthCheck = async (): Promise<void> =>
 	runDatabaseHealthCheck(() => {
-		const waitingBefore = dbPool.waitingCount;
+		recordPoolWaitIfAtCapacity(dbPool);
 		const client = dbPool.connect() as unknown as Promise<DatabaseHealthClient>;
-		recordNewlyQueuedPoolWaits(waitingBefore);
 		return client;
 	}, 2_000);

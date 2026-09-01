@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { runDatabaseHealthCheck, type DatabaseHealthClient } from "../../src/infra/database";
+import {
+	poolHasNoImmediateCapacity,
+	runDatabaseHealthCheck,
+	type DatabaseHealthClient,
+} from "../../src/infra/database";
 
 const makeClient = (failOn?: string) => {
 	const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
@@ -17,6 +21,18 @@ const makeClient = (failOn?: string) => {
 };
 
 describe("PostgreSQL health probe", () => {
+	it("only treats a full pool with no idle client as immediate checkout contention", () => {
+		const pool = (totalCount: number, idleCount: number, max: number) => ({
+			totalCount,
+			idleCount,
+			options: { max },
+		});
+
+		expect(poolHasNoImmediateCapacity(pool(1, 1, 2))).toBe(false);
+		expect(poolHasNoImmediateCapacity(pool(2, 1, 2))).toBe(false);
+		expect(poolHasNoImmediateCapacity(pool(2, 0, 2))).toBe(true);
+	});
+
 	it("scopes a two-second statement timeout to a checked-out transaction", async () => {
 		const fake = makeClient();
 		await runDatabaseHealthCheck(async () => fake.client, 2_000);

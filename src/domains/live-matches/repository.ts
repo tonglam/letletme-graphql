@@ -519,11 +519,19 @@ const liveMatchCheckpointSql = (
 	includeDeskPayload: boolean,
 	includeDetailPayload: boolean
 ): string => {
-	const metadataProjection = (alias: string, includeDetailColumns: boolean): string => {
+	const metadataProjection = (
+		alias: string,
+		includeDetailColumns: boolean,
+		includePayload: boolean
+	): string => {
 		const detailColumns = includeDetailColumns
 			? `
     'observed_desk_generation', ${alias}.observed_desk_generation,
     'fixture_identity_revision', ${alias}.fixture_identity_revision,`
+			: "";
+		const payloadColumn = includePayload
+			? `
+    'payload', ${alias}.payload,`
 			: "";
 		const deskCoverage = includeDetailColumns
 			? ""
@@ -551,6 +559,7 @@ const liveMatchCheckpointSql = (
     'generation', ${alias}.generation,
     'state', ${alias}.state,${detailColumns}
     ${deskCoverage}
+    ${payloadColumn}
     'manifest', ${alias}.manifest,
     'revisions', ${alias}.revisions,
     'row_count', ${alias}.row_count,
@@ -565,10 +574,10 @@ const liveMatchCheckpointSql = (
 	};
 	const deskProjection = includeDeskPayload
 		? "to_jsonb(checkpoint)"
-		: metadataProjection("checkpoint", false);
+		: metadataProjection("checkpoint", false, true);
 	const detailProjection = includeDetailPayload
 		? "to_jsonb(checkpoint)"
-		: metadataProjection("checkpoint", true);
+		: metadataProjection("checkpoint", true, false);
 	return `
 WITH target_event AS (
   SELECT COALESCE(
@@ -1370,7 +1379,12 @@ const compatibleDetailMetadata = (
 	if (
 		detailFixtureIdSet.size !== detailFixtureIds.length ||
 		detailFixtureIds.some((fixtureId) => !deskFixtureIds.has(fixtureId)) ||
-		coverage.startedFixtureIds.some((fixtureId) => !detailFixtureIdSet.has(fixtureId))
+		coverage.startedFixtureIds.some((fixtureId) => {
+			const descriptor = detail.publication.fixtures.find((item) => item.fixtureId === fixtureId);
+			return (
+				!detailFixtureIdSet.has(fixtureId) || descriptor === undefined || descriptor.count <= 0
+			);
+		})
 	)
 		return false;
 	return (
@@ -1503,12 +1517,26 @@ const buildPostgresDeskMetadata = (
 	season: string,
 	eventId: number
 ): MatchDeskCandidate | null => {
+	if (!isRecord(row)) return null;
 	const metadata = parsePostgresDeskMetadata(row, season, eventId);
 	if (!metadata) return null;
+	const payload = checkpointPayload(row.payload);
+	const deskPayload = validDeskPayload(payload, eventId) ? payload : null;
+	const fixtureCoverage = deskPayload === null ? null : deskFixtureCoverage(deskPayload);
+	if (
+		deskPayload === null ||
+		deskPayload.length !== metadata.rowCount ||
+		canonicalBytes(deskPayload) !== metadata.bytes ||
+		sha256(deskPayload) !== metadata.checksum ||
+		!deskRevisionsMatchPayload(metadata.publication, deskPayload) ||
+		fixtureCoverage === null ||
+		stableJson(fixtureCoverage) !== stableJson(metadata.fixtureCoverage)
+	)
+		return null;
 	return {
 		publication: metadata.publication,
 		fixtures: [],
-		fixtureCoverage: metadata.fixtureCoverage,
+		fixtureCoverage,
 		payloadLoaded: false,
 		servedFrom: "POSTGRES_CHECKPOINT",
 	};

@@ -5,8 +5,9 @@ import {
 	connect as http2Connect,
 	constants as http2Constants,
 	type ClientHttp2Session,
+	type Settings,
 } from "node:http2";
-import { gunzipSync, brotliDecompressSync, inflateSync } from "node:zlib";
+import { brotliDecompress, gunzip, inflate } from "node:zlib";
 import { writeFile } from "node:fs/promises";
 
 type ReadMode = "HEAD" | "DESK" | "FULL";
@@ -245,12 +246,26 @@ const headerValue = (headers: Record<string, HeaderValue>, name: string): string
 	return first === undefined ? undefined : String(first);
 };
 
-function decodeBody(body: Buffer, contentEncoding: string | undefined): Buffer {
+const decodeWith = (
+	decoder: (body: Buffer, callback: (error: Error | null, decoded: Buffer) => void) => void,
+	body: Buffer
+): Promise<Buffer> =>
+	new Promise((resolve, reject) => {
+		decoder(body, (error, decoded) => {
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve(decoded);
+		});
+	});
+
+async function decodeBody(body: Buffer, contentEncoding: string | undefined): Promise<Buffer> {
 	const encoding = contentEncoding?.toLowerCase().trim();
 	if (!encoding || encoding === "identity") return body;
-	if (encoding === "gzip" || encoding === "x-gzip") return gunzipSync(body);
-	if (encoding === "br") return brotliDecompressSync(body);
-	if (encoding === "deflate") return inflateSync(body);
+	if (encoding === "gzip" || encoding === "x-gzip") return decodeWith(gunzip, body);
+	if (encoding === "br") return decodeWith(brotliDecompress, body);
+	if (encoding === "deflate") return decodeWith(inflate, body);
 	throw new Error(`unsupported content encoding: ${encoding}`);
 }
 
@@ -268,21 +283,48 @@ type RawResponse = {
 
 const agent = false;
 
-let http2Session: ClientHttp2Session | null = null;
+const MAX_HTTP2_SESSIONS = 16;
+
+type Http2SessionSlot = {
+	session: ClientHttp2Session;
+	maxConcurrentStreams: number;
+	activeStreams: number;
+};
+
+type Http2CapacityEvidence = Readonly<{
+	requestedConcurrency: number;
+	sessionCount: number;
+	remoteMaxConcurrentStreams: readonly number[];
+	effectiveConcurrentStreams: number;
+	capacitySatisfied: boolean;
+}>;
+
+const http2Sessions: Http2SessionSlot[] = [];
 let http2SessionPromise: Promise<ClientHttp2Session> | null = null;
+let http2RoundRobin = 0;
 const http2UnusableSessions = new WeakSet<ClientHttp2Session>();
+let http2CapacityEvidence: Http2CapacityEvidence | null = null;
 
 const isHttp2SessionUsable = (session: ClientHttp2Session): boolean =>
 	!session.closed && !session.destroyed && !http2UnusableSessions.has(session);
 
-function getHttp2Session(): Promise<ClientHttp2Session> {
-	if (http2Session && isHttp2SessionUsable(http2Session)) {
-		return Promise.resolve(http2Session);
-	}
-	if (http2SessionPromise) return http2SessionPromise;
+const removeHttp2Session = (session: ClientHttp2Session): void => {
+	const index = http2Sessions.findIndex((slot) => slot.session === session);
+	if (index < 0) return;
+	http2Sessions.splice(index, 1);
+	if (http2RoundRobin >= http2Sessions.length) http2RoundRobin = 0;
+};
 
-	http2SessionPromise = new Promise((resolve, reject) => {
-		let session: ClientHttp2Session;
+const usableHttp2Slots = (): Http2SessionSlot[] => {
+	for (const slot of [...http2Sessions]) {
+		if (!isHttp2SessionUsable(slot.session)) removeHttp2Session(slot.session);
+	}
+	return http2Sessions.filter((slot) => isHttp2SessionUsable(slot.session));
+};
+
+const createHttp2Session = (): Promise<ClientHttp2Session> =>
+	new Promise((resolve, reject) => {
+		let session: ClientHttp2Session | null = null;
 		let settled = false;
 		let timer: ReturnType<typeof setTimeout> | null = null;
 		const finishReject = (error: Error) => {
@@ -291,9 +333,7 @@ function getHttp2Session(): Promise<ClientHttp2Session> {
 			if (timer !== null) clearTimeout(timer);
 			reject(error);
 		};
-		const onError = (error: Error) => {
-			finishReject(error);
-		};
+		const onError = (error: Error) => finishReject(error);
 		try {
 			session = http2Connect(endpoint.origin, { rejectUnauthorized: true });
 		} catch (error) {
@@ -302,28 +342,61 @@ function getHttp2Session(): Promise<ClientHttp2Session> {
 		}
 		session.on("error", onError);
 		session.once("connect", () => {
-			if (settled) return;
+			if (settled || session === null) return;
+			const maxConcurrentStreams = session.remoteSettings.maxConcurrentStreams;
+			if (
+				typeof maxConcurrentStreams !== "number" ||
+				!Number.isSafeInteger(maxConcurrentStreams) ||
+				maxConcurrentStreams <= 0
+			) {
+				finishReject(new Error("http2 peer did not advertise a usable maxConcurrentStreams"));
+				if (!session.closed && !session.destroyed) session.destroy();
+				return;
+			}
 			settled = true;
 			if (timer !== null) clearTimeout(timer);
-			http2Session = session;
+			http2Sessions.push({ session, maxConcurrentStreams, activeStreams: 0 });
 			resolve(session);
 		});
-		session.once("close", () => {
-			if (http2Session === session) http2Session = null;
+		session.once("close", () => removeHttp2Session(session!));
+		session.on("remoteSettings", (settings: Settings) => {
+			const maxConcurrentStreams = settings.maxConcurrentStreams;
+			if (
+				typeof maxConcurrentStreams !== "number" ||
+				!Number.isSafeInteger(maxConcurrentStreams) ||
+				maxConcurrentStreams <= 0
+			)
+				return;
+			const index = http2Sessions.findIndex((slot) => slot.session === session);
+			if (index >= 0) {
+				const slot = http2Sessions[index]!;
+				http2Sessions[index] = { ...slot, maxConcurrentStreams };
+			}
 		});
 		session.on("goaway", () => {
-			http2UnusableSessions.add(session);
-			if (http2Session === session) {
-				http2Session = null;
-				if (!session.closed && !session.destroyed) session.close();
-			}
+			http2UnusableSessions.add(session!);
+			removeHttp2Session(session!);
+			if (!session!.closed && !session!.destroyed) session!.close();
 		});
 		timer = setTimeout(() => {
 			const error = new Error("http2 session timeout");
 			finishReject(error);
-			if (!session.closed && !session.destroyed) session.destroy();
+			if (session && !session.closed && !session.destroyed) session.destroy();
 		}, timeoutMs);
 	});
+
+function getHttp2Session(): Promise<ClientHttp2Session> {
+	const slots = usableHttp2Slots();
+	if (slots.length > 0) {
+		const available = slots.filter((slot) => slot.activeStreams < slot.maxConcurrentStreams);
+		const candidates = available.length > 0 ? available : slots;
+		const slot = candidates[http2RoundRobin % candidates.length];
+		http2RoundRobin = (http2RoundRobin + 1) % candidates.length;
+		return Promise.resolve(slot!.session);
+	}
+	if (http2SessionPromise) return http2SessionPromise;
+
+	http2SessionPromise = createHttp2Session();
 	const pending = http2SessionPromise;
 	void pending.then(
 		() => {
@@ -336,10 +409,58 @@ function getHttp2Session(): Promise<ClientHttp2Session> {
 	return pending;
 }
 
+const reserveHttp2Stream = (session: ClientHttp2Session): void => {
+	const index = http2Sessions.findIndex((slot) => slot.session === session);
+	if (index < 0) return;
+	const slot = http2Sessions[index]!;
+	http2Sessions[index] = { ...slot, activeStreams: slot.activeStreams + 1 };
+};
+
+const releaseHttp2Stream = (session: ClientHttp2Session): void => {
+	const index = http2Sessions.findIndex((slot) => slot.session === session);
+	if (index < 0) return;
+	const slot = http2Sessions[index]!;
+	http2Sessions[index] = { ...slot, activeStreams: Math.max(0, slot.activeStreams - 1) };
+};
+
+const ensureHttp2Capacity = async (): Promise<Http2CapacityEvidence> => {
+	const requestedConcurrency = Math.max(...stages);
+	await getHttp2Session();
+	while (
+		usableHttp2Slots().reduce((total, slot) => total + slot.maxConcurrentStreams, 0) <
+			requestedConcurrency &&
+		http2Sessions.length < MAX_HTTP2_SESSIONS
+	) {
+		await createHttp2Session();
+	}
+	const slots = usableHttp2Slots();
+	const effectiveConcurrentStreams = slots.reduce(
+		(total, slot) => total + slot.maxConcurrentStreams,
+		0
+	);
+	const evidence: Http2CapacityEvidence = {
+		requestedConcurrency,
+		sessionCount: slots.length,
+		remoteMaxConcurrentStreams: slots.map((slot) => slot.maxConcurrentStreams),
+		effectiveConcurrentStreams,
+		capacitySatisfied: effectiveConcurrentStreams >= requestedConcurrency,
+	};
+	http2CapacityEvidence = evidence;
+	if (!evidence.capacitySatisfied) {
+		throw new Error(
+			`HTTP/2 peer stream capacity ${effectiveConcurrentStreams} is below requested concurrency ${requestedConcurrency}`
+		);
+	}
+	return evidence;
+};
+
 function closeHttp2Session(): void {
-	const session = http2Session as ClientHttp2Session | null;
-	http2Session = null;
-	if (session && !session.closed && !session.destroyed) session.close();
+	const sessions = http2Sessions.map((slot) => slot.session);
+	http2Sessions.length = 0;
+	http2RoundRobin = 0;
+	for (const session of sessions) {
+		if (!session.closed && !session.destroyed) session.close();
+	}
 }
 
 function requestOnceHttp1(): Promise<RawResponse> {
@@ -347,6 +468,7 @@ function requestOnceHttp1(): Promise<RawResponse> {
 		const startedAt = performance.now();
 		let headersAt: number | null = null;
 		let settled = false;
+		let bodyEnded = false;
 		let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 		const finish = (value: RawResponse) => {
 			if (settled) return;
@@ -386,30 +508,43 @@ function requestOnceHttp1(): Promise<RawResponse> {
 					chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 				});
 				response.on("end", () => {
+					bodyEnded = true;
 					const endedAt = performance.now();
 					const encoded = Buffer.concat(chunks);
-					let decoded: Buffer<ArrayBufferLike> = encoded;
-					let decodeError: string | null = null;
-					try {
-						decoded = decodeBody(encoded, headerValue(response.headers, "content-encoding"));
-					} catch (error) {
-						decodeError = error instanceof Error ? error.message : String(error);
-					}
-					finish({
-						status: response.statusCode ?? 0,
+					const status = response.statusCode ?? 0;
+					const rateLimitScope = headerValue(response.headers, "x-ratelimit-scope") ?? null;
+					const timing = {
 						ttfbMs: Math.max(0, (headersAt ?? endedAt) - startedAt),
 						bodyDownloadMs: Math.max(0, endedAt - (headersAt ?? endedAt)),
 						durationMs: Math.max(0, endedAt - startedAt),
-						encoded,
-						decoded,
-						decodeError,
-						globalRateLimit:
-							response.statusCode === 429 &&
-							headerValue(response.headers, "x-ratelimit-scope") === "global",
-						rateLimitScope: headerValue(response.headers, "x-ratelimit-scope") ?? null,
-					});
+					};
+					void decodeBody(encoded, headerValue(response.headers, "content-encoding")).then(
+						(decoded) => {
+							finish({
+								status,
+								...timing,
+								encoded,
+								decoded,
+								decodeError: null,
+								globalRateLimit: status === 429 && rateLimitScope === "global",
+								rateLimitScope,
+							});
+						},
+						(error) => {
+							finish({
+								status,
+								...timing,
+								encoded,
+								decoded: Buffer.alloc(0),
+								decodeError: error instanceof Error ? error.message : String(error),
+								globalRateLimit: status === 429 && rateLimitScope === "global",
+								rateLimitScope,
+							});
+						}
+					);
 				});
 				response.on("error", (error) => {
+					if (bodyEnded) return;
 					const now = performance.now();
 					finish({
 						status: 0,
@@ -456,11 +591,17 @@ function requestOnceHttp2(): Promise<RawResponse> {
 		let status = 0;
 		let timeout: ReturnType<typeof setTimeout> | null = null;
 		let settled = false;
+		let bodyEnded = false;
 		let sessionRetryUsed = false;
+		let assignedSession: ClientHttp2Session | null = null;
 		const finish = (value: RawResponse) => {
 			if (settled) return;
 			settled = true;
 			if (timeout) clearTimeout(timeout);
+			if (assignedSession !== null) {
+				releaseHttp2Stream(assignedSession);
+				assignedSession = null;
+			}
 			resolve(value);
 		};
 		const fail = (error: unknown, now = performance.now()) => {
@@ -484,7 +625,7 @@ function requestOnceHttp2(): Promise<RawResponse> {
 					return;
 				}
 				sessionRetryUsed = true;
-				if (http2Session === session) http2Session = null;
+				removeHttp2Session(session);
 				void getHttp2Session().then(assignStream).catch(fail);
 				return;
 			}
@@ -507,13 +648,15 @@ function requestOnceHttp2(): Promise<RawResponse> {
 			} catch (error) {
 				if (!sessionRetryUsed && !isHttp2SessionUsable(session)) {
 					sessionRetryUsed = true;
-					if (http2Session === session) http2Session = null;
+					removeHttp2Session(session);
 					void getHttp2Session().then(assignStream).catch(fail);
 					return;
 				}
 				fail(error);
 				return;
 			}
+			reserveHttp2Stream(session);
+			assignedSession = session;
 
 			const chunks: Buffer[] = [];
 			let rateLimitScope: string | null = null;
@@ -528,30 +671,49 @@ function requestOnceHttp2(): Promise<RawResponse> {
 				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 			});
 			stream.once("end", () => {
+				bodyEnded = true;
+				if (assignedSession !== null) {
+					releaseHttp2Stream(assignedSession);
+					assignedSession = null;
+				}
 				const endedAt = performance.now();
 				const encoded = Buffer.concat(chunks);
-				let decoded: Buffer = encoded;
-				let decodeError: string | null = null;
-				try {
-					decoded = decodeBody(encoded, contentEncoding);
-				} catch (error) {
-					decodeError = error instanceof Error ? error.message : String(error);
-				}
-				finish({
-					status,
+				const timing = {
 					ttfbMs: Math.max(0, (headersAt ?? endedAt) - startedAt),
 					bodyDownloadMs: Math.max(0, endedAt - (headersAt ?? endedAt)),
 					durationMs: Math.max(0, endedAt - startedAt),
-					encoded,
-					decoded,
-					decodeError,
-					globalRateLimit: status === 429 && rateLimitScope === "global",
-					rateLimitScope,
-				});
+				};
+				void decodeBody(encoded, contentEncoding).then(
+					(decoded) => {
+						finish({
+							status,
+							...timing,
+							encoded,
+							decoded,
+							decodeError: null,
+							globalRateLimit: status === 429 && rateLimitScope === "global",
+							rateLimitScope,
+						});
+					},
+					(error) => {
+						finish({
+							status,
+							...timing,
+							encoded,
+							decoded: Buffer.alloc(0),
+							decodeError: error instanceof Error ? error.message : String(error),
+							globalRateLimit: status === 429 && rateLimitScope === "global",
+							rateLimitScope,
+						});
+					}
+				);
 			});
-			stream.once("error", fail);
+			stream.once("error", (error) => {
+				if (!bodyEnded) fail(error);
+			});
 			stream.once("close", () => {
-				if (!settled) fail(new Error("http2 stream closed before response body completed"));
+				if (!settled && !bodyEnded)
+					fail(new Error("http2 stream closed before response body completed"));
 			});
 			timeout = setTimeout(() => {
 				stream.close(http2Constants.NGHTTP2_CANCEL);
@@ -941,7 +1103,7 @@ const monitor = (async () => {
 	}
 })();
 
-if (transport === "warm") await getHttp2Session();
+if (transport === "warm") await ensureHttp2Capacity();
 const startedAt = new Date().toISOString();
 let stageExecutionAborted = false;
 for (const stage of stages) {
@@ -1095,6 +1257,7 @@ const report = {
 	endpoint: `${endpoint.origin}${endpoint.pathname}`,
 	mode,
 	transport,
+	http2Capacity: http2CapacityEvidence,
 	eventId: eventId ?? null,
 	startedAt,
 	finishedAt: new Date().toISOString(),
@@ -1120,7 +1283,8 @@ const report = {
 	capacityGate,
 	metricObservations,
 	notes: [
-		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses one HTTPS HTTP/2 session with multiplexed keep-alive streams.",
+		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
+		"Warm HTTP/2 evidence records each peer maxConcurrentStreams and the summed effective capacity; the run fails before load if it cannot cover the requested stage concurrency.",
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",

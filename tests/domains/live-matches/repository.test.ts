@@ -650,6 +650,26 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects metadata detail with an empty started-fixture descriptor", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		if (!bundle.detail.active.publication) throw new Error("missing detail publication");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: Array<{ fixtureId: number; count: number }>;
+		};
+		const firstFixture = publication.fixtures[0];
+		if (!firstFixture) throw new Error("missing detail fixture descriptor");
+		firstFixture.count = 0;
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("never selects sealed V2 rows during PostgreSQL cold fallback", () => {
 		expect(LIVE_MATCH_CHECKPOINT_SQL).toContain("checkpoint.contract_version = 'live-matches-v3'");
 		expect(LIVE_MATCH_CHECKPOINT_SQL.match(/contract_version = 'live-matches-v3'/g)).toHaveLength(
@@ -657,15 +677,15 @@ describe("Live Matches V3 read path", () => {
 		);
 	});
 
-	it("does not materialize checkpoint payloads for HEAD or DESK cold reads", () => {
+	it("does not materialize detail checkpoint payloads for HEAD or DESK cold reads", () => {
 		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).toContain("jsonb_build_object(");
 		expect(LIVE_MATCH_CHECKPOINT_DESK_SQL).toContain("jsonb_build_object(");
-		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL).not.toContain("to_jsonb(checkpoint)");
+		expect(LIVE_MATCH_CHECKPOINT_HEAD_SQL.match(/'payload', checkpoint\.payload/g)).toHaveLength(1);
 		expect(LIVE_MATCH_CHECKPOINT_DESK_SQL.match(/to_jsonb\(checkpoint\)/g)).toHaveLength(1);
 		expect(LIVE_MATCH_CHECKPOINT_SQL.match(/to_jsonb\(checkpoint\)/g)).toHaveLength(2);
 	});
 
-	it("uses metadata-only PostgreSQL projections for HEAD and DESK reads", async () => {
+	it("uses compact PostgreSQL projections for HEAD and DESK reads", async () => {
 		const coldRead = async (mode: "HEAD" | "DESK" | "FULL") => {
 			resetLiveMatchProcessStateForTests();
 			const redis = new TestRedis();
@@ -1912,6 +1932,23 @@ describe("Live Matches V3 read path", () => {
 
 		expect(result.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
 		expect(result.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+	});
+
+	it("rejects a PostgreSQL HEAD checkpoint when its desk payload is corrupted", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const row = buildCheckpointRow();
+		row.desk.payload = [];
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [row] }),
+		});
+
+		const result = await readLiveMatchday(context, 1, "HEAD");
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
 	});
 
 	it("rejects a PostgreSQL row whose manifest and columns are not the same publication", async () => {

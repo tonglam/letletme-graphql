@@ -22,6 +22,12 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("postgres_pool_wait_events_total");
 		expect(capacitySource).toContain("dbPoolWaitEventsZero");
 		expect(capacitySource).toContain('session.on("goaway"');
+		expect(capacitySource).toContain("remoteSettings.maxConcurrentStreams");
+		expect(capacitySource).toContain("ensureHttp2Capacity");
+		expect(capacitySource).toContain("remoteMaxConcurrentStreams");
+		expect(capacitySource).not.toContain("gunzipSync");
+		expect(capacitySource).not.toContain("brotliDecompressSync");
+		expect(capacitySource).not.toContain("inflateSync");
 	});
 
 	it("keeps zero-valued fallback series available for the Ops required rules", async () => {
