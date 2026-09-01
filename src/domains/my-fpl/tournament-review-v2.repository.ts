@@ -839,7 +839,12 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		)
 	  )
 	  AND ($4::integer IS NULL OR tournament.tournament_id < $4::integer)
-	  AND ($5::text IS NULL OR tournament.name ILIKE '%' || $5::text || '%' OR tournament.creator ILIKE '%' || $5::text || '%')
+	  -- Search also accepts an exact tournament ID.  This gives an authorized
+	  -- deep link a bounded lookup instead of forcing the Web server to walk an
+	  -- unbounded number of keyset pages before it can render one tournament.
+	  AND ($5::text IS NULL OR tournament.tournament_id::text = btrim($5::text)
+	       OR tournament.name ILIKE '%' || $5::text || '%'
+	       OR tournament.creator ILIKE '%' || $5::text || '%')
 	ORDER BY tournament.tournament_id DESC
 	LIMIT $6::integer
 `;
