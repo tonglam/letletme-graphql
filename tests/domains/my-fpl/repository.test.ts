@@ -1062,7 +1062,7 @@ describe("My FPL review repository", () => {
 		).toBeNull();
 	});
 
-	it("rejects a FINAL entry contract when any rank is null or negative", () => {
+	it("requires positive FINAL ranks except the authoritative first-event unranked case", () => {
 		const finalPublication = parseSnapshotPublicationRow({
 			...snapshotPublicationRow,
 			kind: "FINAL",
@@ -1073,6 +1073,61 @@ describe("My FPL review repository", () => {
 		});
 		expect(finalPublication?.settlementState).toBe("FINAL");
 		expect(parseSnapshotEntryContractRow(snapshotEntryRow(), finalPublication!, 123, 1)).toBeNull();
+
+		const zeroRankPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
+			entry: { overallRank: number };
+			gameweek: { result: { eventRank: number | null; overallRank: number | null } };
+			review: {
+				timeline: Array<{
+					status: "PROVISIONAL" | "FINAL";
+					eventRank: number | null;
+					overallRank: number | null;
+				}>;
+			};
+		};
+		zeroRankPayload.entry.overallRank = 0;
+		zeroRankPayload.gameweek.result!.eventRank = 1;
+		zeroRankPayload.gameweek.result!.overallRank = 1;
+		zeroRankPayload.review.timeline[0]!.status = "FINAL";
+		zeroRankPayload.review.timeline[0]!.eventRank = 1;
+		zeroRankPayload.review.timeline[0]!.overallRank = 1;
+		expect(
+			parseSnapshotEntryContractRow(
+				{ ...snapshotEntryRow(), payload: zeroRankPayload },
+				finalPublication!,
+				123,
+				1
+			)
+		).toBeNull();
+
+		const firstEventUnrankedPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
+			entry: { overallPoints: number; overallRank: number };
+			gameweek: { result: { eventRank: number | null; overallRank: number | null } };
+			review: {
+				summary: { provisionalGameweeks: number };
+				timeline: Array<{
+					status: "PROVISIONAL" | "FINAL";
+					eventRank: number | null;
+					overallRank: number | null;
+				}>;
+			};
+		};
+		firstEventUnrankedPayload.entry.overallPoints = 0;
+		firstEventUnrankedPayload.entry.overallRank = 0;
+		firstEventUnrankedPayload.gameweek.result!.eventRank = 0;
+		firstEventUnrankedPayload.gameweek.result!.overallRank = 0;
+		firstEventUnrankedPayload.review.summary.provisionalGameweeks = 0;
+		firstEventUnrankedPayload.review.timeline[0]!.status = "FINAL";
+		firstEventUnrankedPayload.review.timeline[0]!.eventRank = 0;
+		firstEventUnrankedPayload.review.timeline[0]!.overallRank = 0;
+		expect(
+			parseSnapshotEntryContractRow(
+				{ ...snapshotEntryRow(), payload: firstEventUnrankedPayload },
+				finalPublication!,
+				123,
+				1
+			)
+		).not.toBeNull();
 
 		const negativeRankPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
 			entry: { overallRank: number };
@@ -1259,7 +1314,11 @@ describe("My FPL review repository", () => {
 						params.includes("42")
 				)
 			).toBe(true);
-			expect(fixture.queries.every(({ sql }) => !sql.includes("active OR"))).toBe(true);
+			expect(
+				fixture.queries.some(({ sql }) =>
+					sql.includes("AND (NOT publication.active OR status.revision IS NOT NULL)")
+				)
+			).toBe(true);
 		}
 	});
 

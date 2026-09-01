@@ -73,7 +73,7 @@ export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
 		COALESCE(status.observed_tournament_scope_sha256, publication.tournament_scope_sha256)
 			AS observed_tournament_scope_sha256
 	FROM competition.my_fpl_snapshot_publications publication
-	LEFT JOIN reporting.my_fpl_active_snapshot_status status
+	JOIN reporting.my_fpl_active_snapshot_status status
 		ON status.season_id = publication.season_id
 		AND status.event_id = publication.event_id
 		AND status.revision = publication.revision
@@ -138,6 +138,7 @@ export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
 	WHERE publication.season_id = $1
 		AND publication.event_id = $2
 		AND publication.revision = $3::bigint
+		AND (NOT publication.active OR status.revision IS NOT NULL)
 	LIMIT 1
 `;
 
@@ -194,6 +195,7 @@ export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
 		AND lifecycle.event_id = publication.event_id
 	WHERE publication.season_id = $1
 		AND publication.revision = $2::bigint
+		AND (NOT publication.active OR status.revision IS NOT NULL)
 	ORDER BY publication.event_id
 	LIMIT 1
 `;
@@ -1338,6 +1340,9 @@ const isSafeInteger = (value: unknown): value is number =>
 const isNonNegativeSafeInteger = (value: unknown): value is number =>
 	isSafeInteger(value) && value >= 0;
 
+const isPositiveSafeInteger = (value: unknown): value is number =>
+	isSafeInteger(value) && value > 0;
+
 const isoString = (value: Date | string | null): string | null => {
 	if (value === null) return null;
 	const date = new Date(value);
@@ -2041,7 +2046,9 @@ const settlementStateFromRow = (row: DbSnapshotPublicationRow): MyFplSettlementS
 		Number.isSafeInteger(expected) &&
 		Number.isSafeInteger(observed) &&
 		expected === observed &&
-		row.status_expected_tournament_count === row.observed_tournament_count;
+		row.status_expected_tournament_count === row.observed_tournament_count &&
+		row.expected_entry_scope_sha256 === row.observed_entry_scope_sha256 &&
+		row.expected_tournament_scope_sha256 === row.observed_tournament_scope_sha256;
 	if (complete) return "FINAL";
 	const dueAt = isoString(row.finalization_due_at);
 	if (dueAt && Date.now() >= Date.parse(dueAt)) return "DELAYED";
@@ -2111,6 +2118,17 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!sourceMaxCheckedAt ||
 		Date.parse(sourceCheckedAt) !== Date.parse(sourceMinCheckedAt) ||
 		Date.parse(sourceMinCheckedAt) > Date.parse(sourceMaxCheckedAt)
+	) {
+		return false;
+	}
+	if (
+		row.kind === "FINAL" &&
+		(row.coverage_state !== "COMPLETE" ||
+			row.status_expected_entry_count !== row.observed_entry_count ||
+			row.status_expected_tournament_count !== row.observed_tournament_count ||
+			row.pending_correction_entry_count !== 0 ||
+			row.expected_entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+			row.expected_tournament_scope_sha256 !== row.observed_tournament_scope_sha256)
 	) {
 		return false;
 	}
@@ -2441,6 +2459,18 @@ export const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload 
 	};
 };
 
+const isAuthoritativeFinalUnrankedFirstEvent = (payload: SnapshotEntryPayload): boolean => {
+	const result = payload.gameweek.result;
+	const firstScoringEvent = Math.max(1, payload.entry.startedEvent ?? 1);
+	return (
+		result !== null &&
+		result.eventId === firstScoringEvent &&
+		payload.entry.overallPoints === 0 &&
+		payload.entry.overallRank === 0 &&
+		!payload.review.timeline.some((row) => row.eventId < result.eventId)
+	);
+};
+
 export type SnapshotEntryContractRow = Readonly<{
 	payload: SnapshotEntryPayload;
 	isEmpty: boolean;
@@ -2474,18 +2504,34 @@ export const parseSnapshotEntryContractRow = (
 	const picksCount = asInteger(value.picks_count);
 	const entryRowCount = asInteger(value.entry_row_count);
 	const aggregateRowCount = asInteger(value.aggregate_row_count);
+	const allowUnrankedFirstEvent = payload ? isAuthoritativeFinalUnrankedFirstEvent(payload) : false;
+	const gameweekResult = payload?.gameweek.result;
+	const rankIsValid = (rank: unknown, allowZero: boolean): boolean =>
+		allowZero ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
 	const finalRankContractValid =
 		publication.settlementState !== "FINAL" ||
 		payload?.gameweek.state === "EMPTY" ||
 		(payload?.entry.overallRank !== null &&
-			isNonNegativeSafeInteger(payload?.entry.overallRank) &&
-			isNonNegativeSafeInteger(payload?.gameweek.result?.eventRank) &&
-			isNonNegativeSafeInteger(payload?.gameweek.result?.overallRank) &&
+			rankIsValid(payload?.entry.overallRank, allowUnrankedFirstEvent) &&
+			rankIsValid(
+				gameweekResult?.eventRank ?? null,
+				allowUnrankedFirstEvent && gameweekResult?.eventId === payload?.gameweek.eventId
+			) &&
+			rankIsValid(
+				gameweekResult?.overallRank ?? null,
+				allowUnrankedFirstEvent && gameweekResult?.eventId === payload?.gameweek.eventId
+			) &&
 			payload?.review.timeline.every(
 				(row) =>
 					row.status === "FINAL" &&
-					isNonNegativeSafeInteger(row.eventRank) &&
-					isNonNegativeSafeInteger(row.overallRank)
+					rankIsValid(
+						row.eventRank,
+						allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
+					) &&
+					rankIsValid(
+						row.overallRank,
+						allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
+					)
 			));
 	if (
 		!payload ||
