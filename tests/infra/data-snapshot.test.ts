@@ -64,7 +64,7 @@ describe("typed Data snapshots", () => {
 		expect(mgetCalls).toBe(0);
 	});
 
-	it("loads current-event context from only Core events and currentEventId", async () => {
+	it("loads current-event context and selection rules from bounded Core items", async () => {
 		const core = buildTestCoreData(1);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
 		const requested: string[][] = [];
@@ -83,6 +83,7 @@ describe("typed Data snapshots", () => {
 		expect(requested[0]?.map((key) => key.split(":").at(-1)).sort()).toEqual([
 			"currentEventId",
 			"events",
+			"selectionRules",
 		]);
 	});
 

@@ -729,16 +729,15 @@ describe("GraphQL request limits", () => {
 	});
 
 	it("charges bounded My FPL review desks and detail reads", () => {
-		for (const query of [
-			"query { myFplTeamDesk { state } }",
-			"query { myFplTeamGameweek(eventId: 1) { state } }",
-			"query { myFplTeamTransfers { state } }",
-			"query { myFplCompetitionSeasonPath(tournamentId: 1, throughEventId: 1) { state } }",
-			"query { myFplCompetitionSetupStatus(tournamentId: 1) { ready } }",
-		]) {
+		for (const [query, rateLimitCostUnits] of [
+			["query { myFplManagerReview { state } }", 8],
+			["query { myFplManagerGameweek(eventId: 1) { state } }", 5],
+			["query { myFplCompetitionSeasonPath(tournamentId: 1, throughEventId: 1) { state } }", 5],
+			["query { myFplCompetitionSetupStatus(tournamentId: 1) { ready } }", 5],
+		] as const) {
 			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
 				ok: true,
-				rateLimitCostUnits: 5,
+				rateLimitCostUnits,
 			});
 		}
 
@@ -751,6 +750,47 @@ describe("GraphQL request limits", () => {
 				rateLimitCostUnits: 10,
 			});
 		}
+	});
+
+	it("scopes wider AST budgets to one exact Manager Review root", () => {
+		const reviewFields = Array.from({ length: 250 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { myFplManagerReview { ${reviewFields} } }` },
+				schema
+			)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["myFplManagerReview"],
+			rateLimitCostUnits: 8,
+		});
+
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { review: myFplManagerReview { ${reviewFields} } }` },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+
+		const oversizedReview = Array.from({ length: 360 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { myFplManagerReview { ${oversizedReview} } }` },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+
+		const gameweekFields = Array.from({ length: 110 }, () => "__typename").join(" ");
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: `query { myFplManagerGameweek(eventId: 1) { ${gameweekFields} } }` },
+				schema
+			)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["myFplManagerGameweek"],
+			rateLimitCostUnits: 5,
+		});
 	});
 
 	it("charges V2 tournament review roots by bounded workload", () => {

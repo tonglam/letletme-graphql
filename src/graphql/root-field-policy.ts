@@ -159,12 +159,7 @@ add(
 	{ arg: "tournamentId" }
 );
 
-for (const field of [
-	"myFplTeamDesk",
-	"myFplTeamGameweek",
-	"myFplTeamTransfers",
-	"myFplCompetitionsDesk",
-]) {
+for (const field of ["myFplManagerReview", "myFplManagerGameweek", "myFplCompetitionsDesk"]) {
 	registry.set(field, policy("viewerEntry"));
 }
 registry.set("myTournamentReviewCatalog", policy("viewerEntry"));
@@ -252,9 +247,8 @@ const lightweightFields = [
 	"tournamentDetailDesk",
 	"entryOfficialH2HDesk",
 	"managedTournamentStatus",
-	"myFplTeamDesk",
-	"myFplTeamGameweek",
-	"myFplTeamTransfers",
+	"myFplManagerReview",
+	"myFplManagerGameweek",
 	"myFplCompetitionsDesk",
 	"myFplCompetitionBoard",
 	"myFplCompetitionSeasonPath",

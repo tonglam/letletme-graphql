@@ -108,6 +108,15 @@ describe("authorizeGraphQLRequest", () => {
 		expect(fields.filter((field) => !isGraphQLRootFieldClassified(field))).toEqual([]);
 	});
 
+	it("exposes only the breaking Manager Review personal contract", () => {
+		const fields = Object.keys(schema.getQueryType()?.getFields() ?? {});
+		expect(fields).toContain("myFplManagerReview");
+		expect(fields).toContain("myFplManagerGameweek");
+		expect(fields).not.toContain("myFplTeamDesk");
+		expect(fields).not.toContain("myFplTeamGameweek");
+		expect(fields).not.toContain("myFplTeamTransfers");
+	});
+
 	it("fails closed for a future root field without a policy", async () => {
 		const result = await authorize(`query { futureSensitiveField }`, undefined, websitePrincipal);
 
@@ -174,9 +183,8 @@ describe("authorizeGraphQLRequest", () => {
 
 	it("derives My FPL Team identity from a verified Web or selected Mini viewer", async () => {
 		for (const query of [
-			`query { myFplTeamDesk { state } }`,
-			`query { myFplTeamGameweek(eventId: 1) { state } }`,
-			`query { myFplTeamTransfers { state } }`,
+			`query { myFplManagerReview { state } }`,
+			`query { myFplManagerGameweek(eventId: 1) { state } }`,
 		]) {
 			expect(await authorize(query)).toMatchObject({
 				ok: false,

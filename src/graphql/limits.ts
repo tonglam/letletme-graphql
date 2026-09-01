@@ -62,6 +62,13 @@ const CALC_LIVE_POINTS_MAX_AST_NODES = 320;
 // Scope the larger document allowance to this sole unaliased root; page-size,
 // weighted-complexity, depth and rate-limit guards remain unchanged.
 const ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES = 400;
+// Manager Review is one revision-coherent response: up to 38 timeline rows,
+// one fixed 15-player replay, transfer windows, holdings, and season rules.
+// The field projection is wide but every collection is server-bounded. Scope
+// these allowances to one exact, unaliased root so aliases and mixed roots
+// remain under the general document cap.
+const MY_FPL_MANAGER_REVIEW_MAX_AST_NODES = 700;
+const MY_FPL_MANAGER_GAMEWEEK_MAX_AST_NODES = 300;
 
 const MAX_LIST_ARGUMENT_WEIGHT = 200;
 
@@ -1152,9 +1159,8 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["tournamentOfficialH2H", 30],
 	["tournamentDetailDesk", 30],
 	["managedTournamentStatus", 2],
-	["myFplTeamDesk", 5],
-	["myFplTeamGameweek", 5],
-	["myFplTeamTransfers", 5],
+	["myFplManagerReview", 8],
+	["myFplManagerGameweek", 5],
 	["myFplCompetitionsDesk", 10],
 	["myFplCompetitionBoard", 10],
 	["myFplCompetitionSeasonPath", 5],
@@ -1226,9 +1232,8 @@ const accepted = ({
 	const boundedPublicDeskRequest =
 		rootFields.length > 0 && rootFields.every((field) => BOUNDED_PUBLIC_DESK_ROOTS.has(field.name));
 	const optimizedMyFplRoots = new Set([
-		"myFplTeamDesk",
-		"myFplTeamGameweek",
-		"myFplTeamTransfers",
+		"myFplManagerReview",
+		"myFplManagerGameweek",
 		"myFplCompetitionsDesk",
 		"myFplCompetitionBoard",
 		"myFplCompetitionSeasonPath",
@@ -1332,6 +1337,21 @@ export const validateGraphQLPayloadLimits = (
 				field.name === "entryLiveCompetitionBoard" &&
 				field.responseKey === "entryLiveCompetitionBoard"
 		);
+	const usesMyFplManagerReview =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) => field.name === "myFplManagerReview" && field.responseKey === "myFplManagerReview"
+		);
+	const usesMyFplManagerGameweek =
+		onlyReachableDefinitions &&
+		responseKeys.size === 1 &&
+		rootNames.length > 0 &&
+		rootNames.every(
+			(field) =>
+				field.name === "myFplManagerGameweek" && field.responseKey === "myFplManagerGameweek"
+		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
 		: usesMyFplCompetitionsDesk
@@ -1344,7 +1364,11 @@ export const validateGraphQLPayloadLimits = (
 						? CALC_LIVE_POINTS_MAX_AST_NODES
 						: usesEntryLiveCompetitionBoard
 							? ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES
-							: GRAPHQL_LIMITS.maxAstNodes;
+							: usesMyFplManagerReview
+								? MY_FPL_MANAGER_REVIEW_MAX_AST_NODES
+								: usesMyFplManagerGameweek
+									? MY_FPL_MANAGER_GAMEWEEK_MAX_AST_NODES
+									: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

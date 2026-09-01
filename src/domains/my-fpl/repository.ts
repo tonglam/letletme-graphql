@@ -10,7 +10,7 @@ import { isPlainRecord as isRecord } from "../../contracts/guards";
 import type { GraphQLContext } from "../../graphql/context";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreEventSnapshot } from "../../infra/data-snapshot";
+import { getCoreEventSnapshot, type CoreSelectionRules } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { entriesService } from "../entries/service";
 import {
@@ -566,6 +566,7 @@ const withDependencies = async <T>(
 
 type LoadedReviewContext = {
 	value: MyFplReviewContext;
+	selectionRules: CoreSelectionRules | null;
 	finalizedEventIds: Set<number>;
 	settledEventIds: Set<number>;
 	publications: Map<number, MyFplSnapshotPublication>;
@@ -598,22 +599,69 @@ export type MyFplEntryIdentity = {
 	pastSeasonsCount?: number | null;
 };
 
-export type MyFplTeamHistoryRow = {
+export type MyFplManagerPositionPoints = {
+	goalkeeper: number;
+	defender: number;
+	midfielder: number;
+	forward: number;
+	assistantManager: number;
+	total: number;
+};
+
+export type MyFplManagerCaptainReview = {
+	captainElement: number | null;
+	captainWebName: string | null;
+	captainTeamShortName: string | null;
+	captainBasePoints: number;
+	captainBlank: boolean;
+	captainContribution: number;
+	viceCaptainElement: number | null;
+	viceCaptainWebName: string | null;
+	viceCaptainBasePoints: number;
+	bestSquadElement: number | null;
+	bestSquadWebName: string | null;
+	bestSquadPoints: number;
+	regretPoints: number | null;
+};
+
+export type MyFplManagerAutomaticSubstitution = {
+	elementIn: number;
+	elementInWebName: string;
+	elementOut: number;
+	elementOutWebName: string;
+	pointsGained: number;
+};
+
+export type MyFplManagerGameweekReview = {
+	formation: string;
+	lineupBasePoints: number;
+	bestElevenPoints: number;
+	benchRegretPoints: number | null;
+	positionPoints: MyFplManagerPositionPoints;
+	captain: MyFplManagerCaptainReview;
+	automaticSubstitutions: MyFplManagerAutomaticSubstitution[];
+};
+
+export type MyFplManagerTimelineRow = {
 	eventId: number;
+	status: MyFplSnapshotKind;
 	eventPoints: number;
 	eventRank: number | null;
 	overallPoints: number;
-	overallRank: number;
+	overallRank: number | null;
+	overallRankDelta: number | null;
 	eventTransfers: number;
 	eventTransfersCost: number;
 	eventNetPoints: number;
 	eventBenchPoints: number;
+	eventAutoSubPoints: number;
 	eventChip: string;
 	eventCaptainPoints: number;
 	captainWebName: string | null;
 	captainTeamShortName: string | null;
 	teamValue: number | null;
 	bank: number | null;
+	review: MyFplManagerGameweekReview;
 };
 
 export type MyFplPastSeason = {
@@ -622,7 +670,7 @@ export type MyFplPastSeason = {
 	overallRank: number;
 };
 
-export type MyFplTeamPick = {
+export type MyFplManagerPick = {
 	element: number;
 	position: number;
 	webName: string;
@@ -657,54 +705,118 @@ export type MyFplTeamPick = {
 	expectedGoalsConceded: number | null;
 };
 
-export type MyFplTeamGameweekResult = {
+export type MyFplManagerGameweekResult = {
 	eventId: number;
 	eventPoints: number;
+	eventRank: number | null;
 	overallPoints: number;
-	overallRank: number;
+	overallRank: number | null;
 	eventTransfers: number;
 	eventTransfersCost: number;
 	eventNetPoints: number;
 	eventBenchPoints: number;
+	eventAutoSubPoints: number;
 	eventChip: string;
 	eventCaptainPoints: number;
 	playedCaptainWebName: string | null;
+	playedCaptainTeamShortName: string | null;
 	teamValue: number | null;
 	bank: number | null;
-	picks: MyFplTeamPick[];
+	picks: MyFplManagerPick[];
 };
 
-export type MyFplTeamGameweek = {
+export type MyFplManagerGameweek = {
 	state: MyFplReviewState;
 	context: MyFplReviewContext;
 	eventId: number;
 	entry: MyFplEntryIdentity | null;
-	result: MyFplTeamGameweekResult | null;
+	result: MyFplManagerGameweekResult | null;
+	review: MyFplManagerGameweekReview | null;
 	snapshotMeta?: MyFplSnapshotMeta | null;
 };
 
-export type MyFplTeamDesk = {
-	state: MyFplReviewState;
-	context: MyFplReviewContext;
-	entry: MyFplEntryIdentity | null;
-	history: MyFplTeamHistoryRow[];
-	pastSeasons: MyFplPastSeason[];
-	pastSeasonsState: MyFplReviewState;
-	selectedEventId: number | null;
-	gameweek: MyFplTeamGameweek | null;
-	snapshotMeta: MyFplSnapshotMeta | null;
+export type MyFplManagerFormationCount = {
+	formation: string;
+	gameweeks: number;
+};
+
+export type MyFplManagerChipReview = {
+	chip: string;
+	eventId: number;
+	status: MyFplSnapshotKind;
+	eventNetPoints: number;
+	otherGameweeksAverageNetPoints: number | null;
+	differenceFromOtherGameweeks: number | null;
+	overallRankDelta: number | null;
+};
+
+export type MyFplManagerSeasonSummary = {
+	gameweeksReviewed: number;
+	provisionalGameweeks: number;
+	totalNetPoints: number;
+	averageNetPoints: number;
+	medianNetPoints: number;
+	bestGameweekId: number | null;
+	bestNetPoints: number | null;
+	worstGameweekId: number | null;
+	worstNetPoints: number | null;
+	totalHitPoints: number;
+	hitGameweeks: number;
+	totalBenchPoints: number;
+	averageBenchPoints: number;
+	zeroBenchGameweeks: number;
+	highBenchGameweeks: number;
+	totalAutoSubPoints: number;
+	autoSubGameweeks: number;
+	totalCaptainPoints: number;
+	uniqueCaptains: number;
+	captainBlankGameweeks: number;
+	topCaptainWebName: string | null;
+	topCaptainGameweeks: number;
+	topCaptainRate: number;
+	bestOverallRank: number | null;
+	worstOverallRank: number | null;
+	overallRankChange: number | null;
+	currentImprovementStreak: number;
+	longestImprovementStreak: number;
+	formations: MyFplManagerFormationCount[];
+	positionPoints: MyFplManagerPositionPoints;
+	chips: MyFplManagerChipReview[];
+};
+
+export type MyFplManagerHoldingPeriod = {
+	element: number;
+	webName: string;
+	teamShortName: string;
+	elementTypeName: string;
+	startedEventId: number;
+	endedEventId: number | null;
+	gameweeksHeld: number;
+	starts: number;
+	captaincies: number;
+	pointsWhileOwned: number;
+	scoringContribution: number;
 };
 
 export type MyFplTransferMove = {
 	eventId: number;
+	elementIn: number | null;
 	elementInWebName: string;
 	elementInTypeName: string;
 	elementInTeamShortName: string;
 	elementInCost: number;
+	elementInPoints: number | null;
+	elementInPlayed: boolean | null;
+	elementOut: number | null;
 	elementOutWebName: string;
 	elementOutTypeName: string;
 	elementOutTeamShortName: string;
 	elementOutCost: number;
+	elementOutPoints: number | null;
+	sameGameweekGain: number | null;
+	threeGameweekGain: number | null;
+	fiveGameweekGain: number | null;
+	evaluatedThroughEventId: number | null;
 	time: string;
 };
 
@@ -715,10 +827,19 @@ export type MyFplTransferGameweek = {
 	transfers: MyFplTransferMove[];
 };
 
-export type MyFplTeamTransfers = {
+export type MyFplManagerReview = {
 	state: MyFplReviewState;
 	context: MyFplReviewContext;
-	gameweeks: MyFplTransferGameweek[];
+	entry: MyFplEntryIdentity | null;
+	throughEventId: number | null;
+	timeline: MyFplManagerTimelineRow[];
+	summary: MyFplManagerSeasonSummary | null;
+	holdings: MyFplManagerHoldingPeriod[];
+	transfers: MyFplTransferGameweek[];
+	pastSeasons: MyFplPastSeason[];
+	pastSeasonsState: MyFplReviewState;
+	currentGameweek: MyFplManagerGameweek | null;
+	rules: CoreSelectionRules | null;
 	snapshotMeta: MyFplSnapshotMeta | null;
 };
 
@@ -949,7 +1070,7 @@ type DbSetupStatusRow = QueryResultRow & {
 };
 
 // Snapshot revision is part of every snapshot-backed key below.
-const PROJECTION_VERSION = "v10";
+const PROJECTION_VERSION = "v11";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
 // 10,000-row window at the maximum page size.
@@ -1163,23 +1284,80 @@ const isEntryIdentityCache = (value: unknown): value is MyFplEntryIdentity => {
 	return true;
 };
 
-const isTeamHistoryRowCache = (value: unknown): value is MyFplTeamHistoryRow =>
+const isSnapshotKind = (value: unknown): value is MyFplSnapshotKind =>
+	value === "PROVISIONAL" || value === "FINAL";
+
+const isManagerPositionPoints = (value: unknown): value is MyFplManagerPositionPoints =>
+	isTypedRecord(value, {
+		goalkeeper: isSafeInteger,
+		defender: isSafeInteger,
+		midfielder: isSafeInteger,
+		forward: isSafeInteger,
+		assistantManager: isSafeInteger,
+		total: isSafeInteger,
+	});
+
+const isManagerCaptainReview = (value: unknown): value is MyFplManagerCaptainReview =>
+	isTypedRecord(value, {
+		captainElement: isNullableSafeInteger,
+		captainWebName: isNullableString,
+		captainTeamShortName: isNullableString,
+		captainBasePoints: isSafeInteger,
+		captainBlank: (candidate) => typeof candidate === "boolean",
+		captainContribution: isSafeInteger,
+		viceCaptainElement: isNullableSafeInteger,
+		viceCaptainWebName: isNullableString,
+		viceCaptainBasePoints: isSafeInteger,
+		bestSquadElement: isNullableSafeInteger,
+		bestSquadWebName: isNullableString,
+		bestSquadPoints: isSafeInteger,
+		regretPoints: isNullableSafeInteger,
+	});
+
+const isManagerAutomaticSubstitution = (
+	value: unknown
+): value is MyFplManagerAutomaticSubstitution =>
+	isTypedRecord(value, {
+		elementIn: isSafeInteger,
+		elementInWebName: (candidate) => typeof candidate === "string",
+		elementOut: isSafeInteger,
+		elementOutWebName: (candidate) => typeof candidate === "string",
+		pointsGained: isSafeInteger,
+	});
+
+const isManagerGameweekReview = (value: unknown): value is MyFplManagerGameweekReview =>
+	isTypedRecord(value, {
+		formation: (candidate) => typeof candidate === "string",
+		lineupBasePoints: isSafeInteger,
+		bestElevenPoints: isSafeInteger,
+		benchRegretPoints: isNullableSafeInteger,
+		positionPoints: isManagerPositionPoints,
+		captain: isManagerCaptainReview,
+		automaticSubstitutions: (candidate) =>
+			Array.isArray(candidate) && candidate.every(isManagerAutomaticSubstitution),
+	});
+
+const isManagerTimelineRow = (value: unknown): value is MyFplManagerTimelineRow =>
 	isTypedRecord(value, {
 		eventId: isSafeInteger,
+		status: isSnapshotKind,
 		eventPoints: isSafeInteger,
 		eventRank: isNullableSafeInteger,
 		overallPoints: isSafeInteger,
-		overallRank: isSafeInteger,
+		overallRank: isNullableSafeInteger,
+		overallRankDelta: isNullableSafeInteger,
 		eventTransfers: isSafeInteger,
 		eventTransfersCost: isSafeInteger,
 		eventNetPoints: isSafeInteger,
 		eventBenchPoints: isSafeInteger,
+		eventAutoSubPoints: isSafeInteger,
 		eventChip: isChip,
 		eventCaptainPoints: isSafeInteger,
 		captainWebName: isNullableString,
 		captainTeamShortName: isNullableString,
 		teamValue: isNullableSafeInteger,
 		bank: isNullableSafeInteger,
+		review: isManagerGameweekReview,
 	});
 
 const isPastSeasonCache = (value: unknown): value is MyFplPastSeason =>
@@ -1189,7 +1367,7 @@ const isPastSeasonCache = (value: unknown): value is MyFplPastSeason =>
 		overallRank: isSafeInteger,
 	});
 
-const isTeamPickCache = (value: unknown): value is MyFplTeamPick =>
+const isManagerPickCache = (value: unknown): value is MyFplManagerPick =>
 	isTypedRecord(value, {
 		element: isSafeInteger,
 		position: isSafeInteger,
@@ -1225,58 +1403,125 @@ const isTeamPickCache = (value: unknown): value is MyFplTeamPick =>
 		expectedGoalsConceded: isNullableFiniteNumber,
 	});
 
-const isTeamGameweekResultCache = (value: unknown): value is MyFplTeamGameweekResult =>
+const isManagerGameweekResultCache = (value: unknown): value is MyFplManagerGameweekResult =>
 	isTypedRecord(value, {
 		eventId: isSafeInteger,
 		eventPoints: isSafeInteger,
+		eventRank: isNullableSafeInteger,
 		overallPoints: isSafeInteger,
-		overallRank: isSafeInteger,
+		overallRank: isNullableSafeInteger,
 		eventTransfers: isSafeInteger,
 		eventTransfersCost: isSafeInteger,
 		eventNetPoints: isSafeInteger,
 		eventBenchPoints: isSafeInteger,
+		eventAutoSubPoints: isSafeInteger,
 		eventChip: isChip,
 		eventCaptainPoints: isSafeInteger,
 		playedCaptainWebName: isNullableString,
+		playedCaptainTeamShortName: isNullableString,
 		teamValue: isNullableSafeInteger,
 		bank: isNullableSafeInteger,
-		picks: (candidate) => Array.isArray(candidate) && candidate.every(isTeamPickCache),
+		picks: (candidate) => Array.isArray(candidate) && candidate.every(isManagerPickCache),
 	});
 
-const isTeamGameweekCache = (value: unknown): value is MyFplTeamGameweek =>
+const isManagerGameweekCache = (value: unknown): value is MyFplManagerGameweek =>
 	isTypedRecord(value, {
 		state: isReviewState,
 		context: isReviewContext,
 		eventId: isSafeInteger,
 		entry: (candidate) => candidate === null || isEntryIdentityCache(candidate),
-		result: (candidate) => candidate === null || isTeamGameweekResultCache(candidate),
+		result: (candidate) => candidate === null || isManagerGameweekResultCache(candidate),
+		review: (candidate) => candidate === null || isManagerGameweekReview(candidate),
 		snapshotMeta: (candidate) => candidate === null || isSnapshotMeta(candidate),
 	});
 
-const isTeamDeskCache = (value: unknown): value is MyFplTeamDesk =>
+const isManagerFormationCount = (value: unknown): value is MyFplManagerFormationCount =>
 	isTypedRecord(value, {
-		state: isReviewState,
-		context: isReviewContext,
-		entry: (candidate) => candidate === null || isEntryIdentityCache(candidate),
-		history: (candidate) => Array.isArray(candidate) && candidate.every(isTeamHistoryRowCache),
-		pastSeasons: (candidate) => Array.isArray(candidate) && candidate.every(isPastSeasonCache),
-		pastSeasonsState: isReviewState,
-		selectedEventId: isNullableSafeInteger,
-		gameweek: (candidate) => candidate === null || isTeamGameweekCache(candidate),
-		snapshotMeta: (candidate) => candidate === null || isSnapshotMeta(candidate),
+		formation: (candidate) => typeof candidate === "string",
+		gameweeks: isSafeInteger,
+	});
+
+const isManagerChipReview = (value: unknown): value is MyFplManagerChipReview =>
+	isTypedRecord(value, {
+		chip: isChip,
+		eventId: isSafeInteger,
+		status: isSnapshotKind,
+		eventNetPoints: isSafeInteger,
+		otherGameweeksAverageNetPoints: isNullableFiniteNumber,
+		differenceFromOtherGameweeks: isNullableFiniteNumber,
+		overallRankDelta: isNullableSafeInteger,
+	});
+
+const isManagerSeasonSummary = (value: unknown): value is MyFplManagerSeasonSummary =>
+	isTypedRecord(value, {
+		gameweeksReviewed: isSafeInteger,
+		provisionalGameweeks: isSafeInteger,
+		totalNetPoints: isSafeInteger,
+		averageNetPoints: isFiniteNumber,
+		medianNetPoints: isFiniteNumber,
+		bestGameweekId: isNullableSafeInteger,
+		bestNetPoints: isNullableSafeInteger,
+		worstGameweekId: isNullableSafeInteger,
+		worstNetPoints: isNullableSafeInteger,
+		totalHitPoints: isSafeInteger,
+		hitGameweeks: isSafeInteger,
+		totalBenchPoints: isSafeInteger,
+		averageBenchPoints: isFiniteNumber,
+		zeroBenchGameweeks: isSafeInteger,
+		highBenchGameweeks: isSafeInteger,
+		totalAutoSubPoints: isSafeInteger,
+		autoSubGameweeks: isSafeInteger,
+		totalCaptainPoints: isSafeInteger,
+		uniqueCaptains: isSafeInteger,
+		captainBlankGameweeks: isSafeInteger,
+		topCaptainWebName: isNullableString,
+		topCaptainGameweeks: isSafeInteger,
+		topCaptainRate: isFiniteNumber,
+		bestOverallRank: isNullableSafeInteger,
+		worstOverallRank: isNullableSafeInteger,
+		overallRankChange: isNullableSafeInteger,
+		currentImprovementStreak: isSafeInteger,
+		longestImprovementStreak: isSafeInteger,
+		formations: (candidate) => Array.isArray(candidate) && candidate.every(isManagerFormationCount),
+		positionPoints: isManagerPositionPoints,
+		chips: (candidate) => Array.isArray(candidate) && candidate.every(isManagerChipReview),
+	});
+
+const isManagerHoldingPeriod = (value: unknown): value is MyFplManagerHoldingPeriod =>
+	isTypedRecord(value, {
+		element: isSafeInteger,
+		webName: (candidate) => typeof candidate === "string",
+		teamShortName: (candidate) => typeof candidate === "string",
+		elementTypeName: (candidate) => typeof candidate === "string",
+		startedEventId: isSafeInteger,
+		endedEventId: isNullableSafeInteger,
+		gameweeksHeld: isSafeInteger,
+		starts: isSafeInteger,
+		captaincies: isSafeInteger,
+		pointsWhileOwned: isSafeInteger,
+		scoringContribution: isSafeInteger,
 	});
 
 const isTransferMoveCache = (value: unknown): value is MyFplTransferMove =>
 	isTypedRecord(value, {
 		eventId: isSafeInteger,
+		elementIn: isNullableSafeInteger,
 		elementInWebName: (candidate) => typeof candidate === "string",
 		elementInTypeName: (candidate) => typeof candidate === "string",
 		elementInTeamShortName: (candidate) => typeof candidate === "string",
 		elementInCost: isSafeInteger,
+		elementInPoints: isNullableSafeInteger,
+		elementInPlayed: (candidate) => candidate === null || typeof candidate === "boolean",
+		elementOut: isNullableSafeInteger,
 		elementOutWebName: (candidate) => typeof candidate === "string",
 		elementOutTypeName: (candidate) => typeof candidate === "string",
 		elementOutTeamShortName: (candidate) => typeof candidate === "string",
 		elementOutCost: isSafeInteger,
+		elementOutPoints: isNullableSafeInteger,
+		sameGameweekGain: isNullableSafeInteger,
+		threeGameweekGain: isNullableSafeInteger,
+		fiveGameweekGain: isNullableSafeInteger,
+		evaluatedThroughEventId: isNullableSafeInteger,
 		time: isIsoDateTime,
 	});
 
@@ -1692,6 +1937,7 @@ const loadReviewContext = async (context: GraphQLContext): Promise<LoadedReviewC
 			latestFinalizedEventId: eventIds[0] ?? null,
 			latestPublishedEventId,
 		},
+		selectionRules: snapshot.selectionRules ?? null,
 		finalizedEventIds,
 		settledEventIds,
 		publications,
@@ -1737,16 +1983,23 @@ const loadSnapshotPublicationByRevision = async (
 };
 
 type SnapshotEntryPayload = {
+	contractVersion: 2;
 	entry: MyFplEntryIdentity;
-	history: MyFplTeamHistoryRow[];
 	pastSeasons: MyFplPastSeason[];
-	gameweek: { state: MyFplReviewState; eventId: number; result: MyFplTeamGameweekResult | null };
-	transfers: MyFplTransferMove[];
+	gameweek: { state: MyFplReviewState; eventId: number; result: MyFplManagerGameweekResult | null };
+	review: {
+		throughEventId: number;
+		timeline: MyFplManagerTimelineRow[];
+		summary: MyFplManagerSeasonSummary;
+		holdings: MyFplManagerHoldingPeriod[];
+		transfers: MyFplTransferMove[];
+	};
 };
 
 export const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload | null => {
-	if (!isRecord(value) || !isEntryIdentityCache(value.entry)) return null;
-	if (!Array.isArray(value.history) || !value.history.every(isTeamHistoryRowCache)) return null;
+	if (!isRecord(value) || value.contractVersion !== 2 || !isEntryIdentityCache(value.entry)) {
+		return null;
+	}
 	if (!Array.isArray(value.pastSeasons) || !value.pastSeasons.every(isPastSeasonCache)) return null;
 	if (!isRecord(value.gameweek)) return null;
 	const gameweekState = value.gameweek.state;
@@ -1754,25 +2007,72 @@ export const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload 
 	if (
 		!isReviewState(gameweekState) ||
 		gameweekEventId === null ||
-		(value.gameweek.result !== null && !isTeamGameweekResultCache(value.gameweek.result))
+		(value.gameweek.result !== null && !isManagerGameweekResultCache(value.gameweek.result)) ||
+		(isRecord(value.gameweek.result) && value.gameweek.result.eventId !== gameweekEventId) ||
+		(gameweekState === "READY" && value.gameweek.result === null) ||
+		(gameweekState === "EMPTY" && value.gameweek.result !== null)
 	) {
 		return null;
 	}
-	if (!Array.isArray(value.transfers)) return null;
-	const transfers = value.transfers.filter((candidate): candidate is MyFplTransferMove =>
+	if (!isRecord(value.review)) return null;
+	const throughEventId = asInteger(value.review.throughEventId);
+	if (
+		throughEventId === null ||
+		throughEventId !== gameweekEventId ||
+		!Array.isArray(value.review.timeline) ||
+		!value.review.timeline.every(isManagerTimelineRow) ||
+		!isManagerSeasonSummary(value.review.summary) ||
+		!Array.isArray(value.review.holdings) ||
+		!value.review.holdings.every(isManagerHoldingPeriod) ||
+		!Array.isArray(value.review.transfers)
+	) {
+		return null;
+	}
+	const transfers = value.review.transfers.filter((candidate): candidate is MyFplTransferMove =>
 		isTransferMoveCache(candidate)
 	);
-	if (transfers.length !== value.transfers.length) return null;
+	if (transfers.length !== value.review.transfers.length) return null;
+	const timeline = value.review.timeline as MyFplManagerTimelineRow[];
+	const eventIds = timeline.map((row) => row.eventId);
+	if (
+		new Set(eventIds).size !== eventIds.length ||
+		eventIds.some((eventId) => eventId < 1 || eventId > throughEventId) ||
+		eventIds.some((eventId, index) => index > 0 && eventId <= eventIds[index - 1]!) ||
+		timeline.some(
+			(row) =>
+				row.status === "PROVISIONAL" &&
+				(row.eventId !== throughEventId ||
+					row.overallRankDelta !== null ||
+					row.review.benchRegretPoints !== null ||
+					row.review.captain.regretPoints !== null)
+		) ||
+		value.review.summary.gameweeksReviewed !== timeline.length ||
+		value.review.summary.provisionalGameweeks !==
+			timeline.filter((row) => row.status === "PROVISIONAL").length ||
+		value.review.summary.chips.some(
+			(chip) =>
+				chip.status === "PROVISIONAL" &&
+				(chip.differenceFromOtherGameweeks !== null || chip.overallRankDelta !== null)
+		)
+	) {
+		return null;
+	}
 	return {
+		contractVersion: 2,
 		entry: value.entry,
-		history: value.history,
 		pastSeasons: value.pastSeasons,
 		gameweek: {
 			state: gameweekState,
 			eventId: gameweekEventId,
-			result: value.gameweek.result as MyFplTeamGameweekResult | null,
+			result: value.gameweek.result as MyFplManagerGameweekResult | null,
 		},
-		transfers,
+		review: {
+			throughEventId,
+			timeline,
+			summary: value.review.summary,
+			holdings: value.review.holdings as MyFplManagerHoldingPeriod[],
+			transfers,
+		},
 	};
 };
 
@@ -1847,6 +2147,16 @@ const parseLoadedSnapshotEntryCache = (value: unknown): LoadedSnapshotEntry | nu
 	if (!isRecord(value) || !isSnapshotPublicationCache(value.publication)) return null;
 	const payload = parseSnapshotEntryPayload(value.payload);
 	if (!payload || typeof value.isEmpty !== "boolean") return null;
+	if (
+		value.isEmpty !== (payload.gameweek.state === "EMPTY") ||
+		payload.gameweek.eventId !== payload.review.throughEventId ||
+		payload.gameweek.eventId !== value.publication.eventId ||
+		(value.isEmpty
+			? payload.review.timeline.length !== 0
+			: (payload.review.timeline.at(-1)?.eventId ?? null) !== payload.review.throughEventId)
+	) {
+		return null;
+	}
 	return { publication: value.publication, payload, isEmpty: value.isEmpty };
 };
 
@@ -1899,8 +2209,8 @@ const loadSnapshotEntry = async (
 	const envelope = parseSnapshotEntryContractRow(row, publication, entryId, eventId);
 	if (!envelope) return null;
 	const { payload } = envelope;
-	const historyEventIds = payload.history.map((historyRow) => historyRow.eventId);
-	const uniqueHistoryEventIds = new Set(historyEventIds);
+	const timelineEventIds = payload.review.timeline.map((timelineRow) => timelineRow.eventId);
+	const uniqueTimelineEventIds = new Set(timelineEventIds);
 	const expectedHistoryEventIds = [...loadedContext.settledEventIds].filter(
 		(settledEventId) =>
 			settledEventId <= eventId &&
@@ -1909,10 +2219,13 @@ const loadSnapshotEntry = async (
 				settledEventId >= payload.entry.startedEvent)
 	);
 	if (
-		uniqueHistoryEventIds.size !== historyEventIds.length ||
-		historyEventIds.some((historyEventId) => historyEventId < 1 || historyEventId > eventId) ||
+		uniqueTimelineEventIds.size !== timelineEventIds.length ||
+		timelineEventIds.some((timelineEventId) => timelineEventId < 1 || timelineEventId > eventId) ||
+		(!row.is_empty && timelineEventIds.at(-1) !== eventId) ||
+		(!row.is_empty && payload.review.timeline.at(-1)?.status !== publication.kind) ||
+		(row.is_empty && timelineEventIds.length !== 0) ||
 		(!row.is_empty &&
-			expectedHistoryEventIds.some((settledEventId) => !uniqueHistoryEventIds.has(settledEventId)))
+			expectedHistoryEventIds.some((settledEventId) => !uniqueTimelineEventIds.has(settledEventId)))
 	) {
 		return null;
 	}
@@ -1930,13 +2243,19 @@ const loadSnapshotEntry = async (
 	return loaded;
 };
 
-const loadTeamGameweekPrepared = async (
+const gameweekReviewFor = (
+	snapshot: LoadedSnapshotEntry,
+	eventId: number
+): MyFplManagerGameweekReview | null =>
+	snapshot.payload.review.timeline.find((row) => row.eventId === eventId)?.review ?? null;
+
+const loadManagerGameweekPrepared = async (
 	context: GraphQLContext,
 	loadedContext: LoadedReviewContext,
 	entryId: number,
 	eventId: number,
 	snapshotRevision?: string | null
-): Promise<MyFplTeamGameweek> => {
+): Promise<MyFplManagerGameweek> => {
 	validateEventId(eventId);
 	const snapshot = await loadSnapshotEntry(
 		context,
@@ -1952,12 +2271,14 @@ const loadTeamGameweekPrepared = async (
 			entry: null,
 			state: "PENDING",
 			result: null,
+			review: null,
 			snapshotMeta: null,
 		};
 	}
 	const snapshotEntry = snapshot.payload.entry;
 	const snapshotGameweek = snapshot.payload.gameweek;
 	const result = snapshotGameweek.result;
+	const review = gameweekReviewFor(snapshot, eventId);
 	const base = {
 		context: loadedContext.value,
 		eventId,
@@ -1965,19 +2286,20 @@ const loadTeamGameweekPrepared = async (
 		snapshotMeta: snapshot.publication,
 	};
 	if (snapshot.isEmpty || snapshotGameweek.state === "EMPTY") {
-		return { ...base, state: "EMPTY", result: null };
+		return { ...base, state: "EMPTY" as const, result: null, review: null };
 	}
-	if (!result || result.eventId !== eventId || result.picks.length !== 15) {
-		return { ...base, state: "PENDING", result: null };
+	if (!result || result.eventId !== eventId || result.picks.length !== 15 || !review) {
+		return { ...base, state: "PENDING" as const, result: null, review: null };
 	}
 	const cacheKey = gqlCacheKey(
 		context,
-		`my-fpl:${PROJECTION_VERSION}:team-gameweek:${entryId}:${eventId}:rev:${snapshot.publication.revision}`
+		`my-fpl:${PROJECTION_VERSION}:manager-gameweek:${entryId}:${eventId}:rev:${snapshot.publication.revision}`
 	);
 	const cached = await readMyFplCache(
 		context,
 		cacheKey,
-		(value): value is MyFplTeamGameweek => isTeamGameweekCache(value) && value.eventId === eventId
+		(value): value is MyFplManagerGameweek =>
+			isManagerGameweekCache(value) && value.eventId === eventId
 	);
 	if (cached) {
 		return {
@@ -1986,12 +2308,11 @@ const loadTeamGameweekPrepared = async (
 			snapshotMeta: snapshot.publication,
 		};
 	}
-	const payload: MyFplTeamGameweek = {
+	const payload: MyFplManagerGameweek = {
 		...base,
 		state: "READY",
-		result: {
-			...result,
-		},
+		result,
+		review,
 	};
 	await writeQueryCache(
 		context,
@@ -2002,85 +2323,89 @@ const loadTeamGameweekPrepared = async (
 	return payload;
 };
 
-const loadTeamDesk = async (
+const groupManagerTransfers = (snapshot: LoadedSnapshotEntry): MyFplTransferGameweek[] | null => {
+	const timelineByEvent = new Map(
+		snapshot.payload.review.timeline.map((row) => [row.eventId, row] as const)
+	);
+	const transferCounts = new Map<number, number>();
+	for (const move of snapshot.payload.review.transfers) {
+		transferCounts.set(move.eventId, (transferCounts.get(move.eventId) ?? 0) + 1);
+	}
+	if (
+		snapshot.payload.review.timeline.some(
+			(row) =>
+				row.eventTransfers < 0 || (transferCounts.get(row.eventId) ?? 0) !== row.eventTransfers
+		) ||
+		snapshot.payload.review.transfers.some((move) => !timelineByEvent.has(move.eventId))
+	) {
+		return null;
+	}
+	const grouped = new Map<number, MyFplTransferGameweek>();
+	for (const move of snapshot.payload.review.transfers) {
+		const timeline = timelineByEvent.get(move.eventId)!;
+		const existing = grouped.get(move.eventId) ?? {
+			eventId: move.eventId,
+			eventTransfers: timeline.eventTransfers,
+			eventTransfersCost: timeline.eventTransfersCost,
+			transfers: [],
+		};
+		existing.transfers.push(move);
+		grouped.set(move.eventId, existing);
+	}
+	return [...grouped.values()].sort((left, right) => left.eventId - right.eventId);
+};
+
+const emptyManagerReview = (
+	state: MyFplReviewState,
+	loadedContext: LoadedReviewContext,
+	rules: CoreSelectionRules | null,
+	throughEventId: number | null = null
+): MyFplManagerReview => ({
+	state,
+	context: loadedContext.value,
+	entry: null,
+	throughEventId,
+	timeline: [],
+	summary: null,
+	holdings: [],
+	transfers: [],
+	pastSeasons: [],
+	pastSeasonsState: "PENDING",
+	currentGameweek: null,
+	rules,
+	snapshotMeta: null,
+});
+
+const loadManagerReview = async (
 	context: GraphQLContext,
-	eventId?: number | null,
 	snapshotRevision?: string | null
-): Promise<MyFplTeamDesk> => {
-	if (eventId !== undefined && eventId !== null) validateEventId(eventId);
+): Promise<MyFplManagerReview> => {
 	const entryId = requireViewerEntryId(context);
-	await dependenciesFor(context).getCoreEventSnapshot(context);
 	const loadedContext = await loadReviewContext(context);
+	// A historical My FPL publication does not carry a Core publication
+	// revision for its rule set. Returning the current Core rules alongside a
+	// pinned snapshot would make the replay non-reproducible after a rules
+	// correction. Until Data records a Core revision with each publication,
+	// omit rules for explicit historical pins and fail closed on that field.
+	const rules = snapshotRevision?.trim() ? null : loadedContext.selectionRules;
 	const pinnedPublication = snapshotRevision?.trim()
 		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
 		: null;
-	const selectedEventId =
-		eventId ?? pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
-	if (selectedEventId === null) {
-		return {
-			state: "PRESEASON",
-			context: loadedContext.value,
-			entry: null,
-			history: [],
-			pastSeasons: [],
-			pastSeasonsState: "PENDING",
-			selectedEventId,
-			gameweek: null,
-			snapshotMeta: null,
-		};
-	}
+	const throughEventId = pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
+	if (throughEventId === null) return emptyManagerReview("PRESEASON", loadedContext, rules);
 	const snapshot = await loadSnapshotEntry(
 		context,
 		loadedContext,
 		entryId,
-		selectedEventId,
+		throughEventId,
 		snapshotRevision
 	);
-	if (!snapshot) {
-		return {
-			state: "PENDING",
-			context: loadedContext.value,
-			entry: null,
-			history: [],
-			pastSeasons: [],
-			pastSeasonsState: "PENDING",
-			selectedEventId,
-			gameweek: null,
-			snapshotMeta: null,
-		};
-	}
-	const cacheKey = gqlCacheKey(
-		context,
-		`my-fpl:${PROJECTION_VERSION}:team-desk:${entryId}:${eventId ?? "season"}:rev:${snapshot.publication.revision}`
-	);
-	const cached = await readMyFplCache(context, cacheKey, isTeamDeskCache);
-	if (cached) {
-		const currentEntryName = snapshot.payload.entry.entryName;
-		return {
-			...cached,
-			entry: applyCurrentEntryName(cached.entry, currentEntryName),
-			snapshotMeta: snapshot.publication,
-			gameweek: cached.gameweek
-				? {
-						...cached.gameweek,
-						entry: applyCurrentEntryName(cached.gameweek.entry, currentEntryName),
-						snapshotMeta: snapshot.publication,
-					}
-				: null,
-		};
-	}
+	if (!snapshot) return emptyManagerReview("PENDING", loadedContext, rules, throughEventId);
+
+	const transfers = groupManagerTransfers(snapshot);
+	if (!transfers) return emptyManagerReview("PENDING", loadedContext, rules, throughEventId);
 	const entry = snapshot.payload.entry;
-	const history = snapshot.payload.history;
 	const pastSeasons = snapshot.payload.pastSeasons;
-	const snapshotGameweek = snapshot.payload.gameweek;
-	const gameweek: MyFplTeamGameweek = {
-		context: loadedContext.value,
-		eventId: selectedEventId,
-		entry,
-		state: snapshotGameweek.state,
-		result: snapshotGameweek.result,
-		snapshotMeta: snapshot.publication,
-	};
 	const pastSeasonsState: MyFplReviewState =
 		typeof entry.pastSeasonsCheckedAt === "string" &&
 		Number.isFinite(Date.parse(entry.pastSeasonsCheckedAt)) &&
@@ -2090,104 +2415,42 @@ const loadTeamDesk = async (
 		entry.pastSeasonsCount === pastSeasons.length
 			? "READY"
 			: "PENDING";
-
-	const payload: MyFplTeamDesk = {
-		state: gameweek.state,
+	const currentGameweek: MyFplManagerGameweek = {
+		state: snapshot.payload.gameweek.state,
 		context: loadedContext.value,
+		eventId: throughEventId,
 		entry,
-		history,
-		pastSeasons,
-		pastSeasonsState,
-		selectedEventId,
-		gameweek,
+		result: snapshot.payload.gameweek.result,
+		review: gameweekReviewFor(snapshot, throughEventId),
 		snapshotMeta: snapshot.publication,
 	};
-	const cacheState: MyFplReviewState =
-		gameweek.state === "PENDING" || pastSeasonsState === "PENDING" ? "PENDING" : gameweek.state;
-	if (cacheableState(gameweek.state)) {
-		await writeQueryCache(context, cacheKey, JSON.stringify(payload), stateTtl(cacheState));
-	}
-	return payload;
+	const state: MyFplReviewState = snapshot.isEmpty ? "EMPTY" : currentGameweek.state;
+	return {
+		state,
+		context: loadedContext.value,
+		entry,
+		throughEventId,
+		timeline: snapshot.payload.review.timeline,
+		summary: snapshot.payload.review.summary,
+		holdings: snapshot.payload.review.holdings,
+		transfers,
+		pastSeasons,
+		pastSeasonsState,
+		currentGameweek,
+		rules,
+		snapshotMeta: snapshot.publication,
+	};
 };
 
-const loadTeamGameweek = async (
+const loadManagerGameweek = async (
 	context: GraphQLContext,
 	eventId: number,
 	snapshotRevision?: string | null
-): Promise<MyFplTeamGameweek> => {
+): Promise<MyFplManagerGameweek> => {
 	validateEventId(eventId);
 	const entryId = requireViewerEntryId(context);
 	const loadedContext = await loadReviewContext(context);
-	return loadTeamGameweekPrepared(context, loadedContext, entryId, eventId, snapshotRevision);
-};
-
-const loadTeamTransfers = async (
-	context: GraphQLContext,
-	snapshotRevision?: string | null
-): Promise<MyFplTeamTransfers> => {
-	const entryId = requireViewerEntryId(context);
-	const loadedContext = await loadReviewContext(context);
-	const pinnedPublication = snapshotRevision?.trim()
-		? await loadSnapshotPublicationByRevision(context, loadedContext, snapshotRevision)
-		: null;
-	const selectedEventId = pinnedPublication?.eventId ?? defaultReviewEventId(loadedContext);
-	if (selectedEventId === null) {
-		return { state: "PRESEASON", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
-	}
-	const snapshot = await loadSnapshotEntry(
-		context,
-		loadedContext,
-		entryId,
-		selectedEventId,
-		snapshotRevision
-	);
-	if (!snapshot) {
-		return { state: "PENDING", context: loadedContext.value, gameweeks: [], snapshotMeta: null };
-	}
-	if (snapshot.isEmpty) {
-		return {
-			state: "EMPTY",
-			context: loadedContext.value,
-			gameweeks: [],
-			snapshotMeta: snapshot.publication,
-		};
-	}
-	const historyByEvent = new Map(snapshot.payload.history.map((row) => [row.eventId, row]));
-	const transferCounts = new Map<number, number>();
-	for (const move of snapshot.payload.transfers) {
-		transferCounts.set(move.eventId, (transferCounts.get(move.eventId) ?? 0) + 1);
-	}
-	if (
-		snapshot.payload.history.some(
-			(row) =>
-				row.eventTransfers < 0 || (transferCounts.get(row.eventId) ?? 0) !== row.eventTransfers
-		) ||
-		snapshot.payload.transfers.some((move) => !historyByEvent.has(move.eventId))
-	) {
-		return {
-			state: "PENDING",
-			context: loadedContext.value,
-			gameweeks: [],
-			snapshotMeta: snapshot.publication,
-		};
-	}
-	const grouped = new Map<number, MyFplTransferGameweek>();
-	for (const move of snapshot.payload.transfers) {
-		const existing = grouped.get(move.eventId) ?? {
-			eventId: move.eventId,
-			eventTransfers: historyByEvent.get(move.eventId)?.eventTransfers ?? 0,
-			eventTransfersCost: historyByEvent.get(move.eventId)?.eventTransfersCost ?? 0,
-			transfers: [],
-		};
-		existing.transfers.push(move);
-		grouped.set(move.eventId, existing);
-	}
-	return {
-		state: grouped.size > 0 ? "READY" : "EMPTY",
-		context: loadedContext.value,
-		gameweeks: [...grouped.values()].sort((left, right) => left.eventId - right.eventId),
-		snapshotMeta: snapshot.publication,
-	};
+	return loadManagerGameweekPrepared(context, loadedContext, entryId, eventId, snapshotRevision);
 };
 
 const assertTournamentMembership = async (
@@ -2847,9 +3110,8 @@ const loadCompetitionSetupStatus = async (
 };
 
 export type MyFplRepository = {
-	loadTeamDesk: typeof loadTeamDesk;
-	loadTeamGameweek: typeof loadTeamGameweek;
-	loadTeamTransfers: typeof loadTeamTransfers;
+	loadManagerReview: typeof loadManagerReview;
+	loadManagerGameweek: typeof loadManagerGameweek;
 	loadCompetitionsDesk: typeof loadCompetitionsDesk;
 	loadCompetitionBoard: typeof loadCompetitionBoard;
 	loadCompetitionSeasonPath: typeof loadCompetitionSeasonPath;
@@ -2861,16 +3123,12 @@ export const createMyFplRepository = (
 ): MyFplRepository => {
 	const dependencies: MyFplRepositoryDependencies = { ...defaultDependencies, ...overrides };
 	return {
-		loadTeamDesk: (context, eventId, snapshotRevision) =>
+		loadManagerReview: (context, snapshotRevision) =>
+			withDependencies(context, dependencies, () => loadManagerReview(context, snapshotRevision)),
+		loadManagerGameweek: (context, eventId, snapshotRevision) =>
 			withDependencies(context, dependencies, () =>
-				loadTeamDesk(context, eventId, snapshotRevision)
+				loadManagerGameweek(context, eventId, snapshotRevision)
 			),
-		loadTeamGameweek: (context, eventId, snapshotRevision) =>
-			withDependencies(context, dependencies, () =>
-				loadTeamGameweek(context, eventId, snapshotRevision)
-			),
-		loadTeamTransfers: (context, snapshotRevision) =>
-			withDependencies(context, dependencies, () => loadTeamTransfers(context, snapshotRevision)),
 		loadCompetitionsDesk: (context, tournamentId, eventId, snapshotRevision) =>
 			withDependencies(context, dependencies, () =>
 				loadCompetitionsDesk(context, tournamentId, eventId, snapshotRevision)
