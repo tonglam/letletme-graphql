@@ -460,6 +460,29 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		away: TournamentOfficialH2HLiveMatchSide!
 	}
 
+	"""
+	Bounded viewer-scoped official H2H history, loaded only on demand.
+	"""
+	type TournamentOfficialH2HHistory {
+		eventId: Int!
+		availability: LeagueLiveAvailability!
+		matches: [TournamentOfficialH2HHistoryMatch!]!
+	}
+
+	type TournamentOfficialH2HHistoryMatch {
+		officialMatchId: Int!
+		eventId: Int!
+		groupId: Int!
+		sourceOrder: Int!
+		phase: OfficialH2HMatchPhase!
+		knockoutName: String
+		tiebreak: String
+		isBye: Boolean!
+		availability: LeagueLiveAvailability!
+		home: TournamentOfficialH2HLiveMatchSide!
+		away: TournamentOfficialH2HLiveMatchSide!
+	}
+
 	extend type Query {
 		entryParticipatingTournaments(entryId: Int!): [TournamentInfo!]!
 		manageableTournaments(entryId: Int!): [TournamentInfo!]!
@@ -486,6 +509,11 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		tournamentBattleGroupResults(tournamentId: Int!, eventId: Int!): [TournamentBattleGroupResult!]!
 		entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
 		tournamentOfficialH2H(tournamentId: Int!, eventId: Int!): TournamentOfficialH2H!
+		tournamentOfficialH2HHistory(
+			tournamentId: Int!
+			eventId: Int!
+			limit: Int = 100
+		): TournamentOfficialH2HHistory!
 		tournamentDetailDesk(tournamentId: Int!, entryId: Int!, eventId: Int): TournamentDetailDesk
 		managedTournamentStatus(tournamentId: Int!, entryId: Int!): ManagedTournamentStatus
 	}

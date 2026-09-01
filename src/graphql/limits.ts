@@ -1176,6 +1176,7 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["tournamentParticipants", 30],
 	["tournamentSeasonSnapshot", 30],
 	["tournamentOfficialH2H", 5],
+	["tournamentOfficialH2HHistory", 5],
 	["tournamentDetailDesk", 30],
 	["managedTournamentStatus", 2],
 	["myFplManagerReview", 8],
@@ -1362,7 +1363,8 @@ export const validateGraphQLPayloadLimits = (
 		rootNames.length > 0 &&
 		rootNames.every(
 			(field) =>
-				field.name === "tournamentOfficialH2H" && field.responseKey === "tournamentOfficialH2H"
+				(field.name === "tournamentOfficialH2H" || field.name === "tournamentOfficialH2HHistory") &&
+				field.responseKey === field.name
 		);
 	const usesMyFplManagerReview =
 		onlyReachableDefinitions &&

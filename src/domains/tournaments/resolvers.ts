@@ -68,6 +68,7 @@ const getCaptainByIdMemoized = async (
 
 import type {
 	EntryH2HMatchResult,
+	TournamentOfficialH2HHistory,
 	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
@@ -163,6 +164,12 @@ type EntryH2HMatchResultsArgs = {
 type TournamentOfficialH2HArgs = {
 	tournamentId: number;
 	eventId: number;
+};
+
+type TournamentOfficialH2HHistoryArgs = {
+	tournamentId: number;
+	eventId: number;
+	limit?: number | null;
 };
 
 export const leagueTypeToEnum = (type: LeagueType): string => {
@@ -648,6 +655,24 @@ export const tournamentsResolvers = {
 			args: TournamentOfficialH2HArgs,
 			context: GraphQLContext
 		) => readTournamentOfficialH2HV2(context, args.tournamentId, args.eventId),
+
+		tournamentOfficialH2HHistory: async (
+			_parent: unknown,
+			args: TournamentOfficialH2HHistoryArgs,
+			context: GraphQLContext
+		): Promise<TournamentOfficialH2HHistory> => {
+			const viewerEntryId = context.principal
+				? (viewerEntryIdForPrincipal(context.principal) ?? 0)
+				: 0;
+			await assertLiveTournamentAccessV2(context, args.tournamentId, viewerEntryId, null);
+			return tournamentsService.getTournamentOfficialH2HHistory(
+				context,
+				args.tournamentId,
+				args.eventId,
+				viewerEntryId,
+				args.limit
+			);
+		},
 
 		tournamentDetailDesk: async (
 			_parent: unknown,

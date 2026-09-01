@@ -177,6 +177,7 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 		"tournamentBattleGroupResults",
 		"entryH2HMatchResults",
 		"tournamentOfficialH2H",
+		"tournamentOfficialH2HHistory",
 		"tournamentDetailDesk",
 		"managedTournamentStatus",
 	]),

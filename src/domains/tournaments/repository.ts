@@ -489,6 +489,58 @@ export type EntryH2HMatchResult = {
 	opponentChip: string | null;
 };
 
+export type TournamentOfficialH2HHistorySide = {
+	availability: "READY" | "PENDING";
+	entryId: number | null;
+	entryName: string;
+	playerName: string | null;
+	isAverage: boolean;
+	points: number | null;
+	netPoints: number | null;
+};
+
+export type TournamentOfficialH2HHistoryMatch = {
+	officialMatchId: number;
+	eventId: number;
+	groupId: number;
+	sourceOrder: number;
+	phase: "REGULAR" | "KNOCKOUT";
+	knockoutName: string | null;
+	tiebreak: string | null;
+	isBye: boolean;
+	availability: "READY" | "PENDING";
+	home: TournamentOfficialH2HHistorySide;
+	away: TournamentOfficialH2HHistorySide;
+};
+
+export type TournamentOfficialH2HHistory = {
+	eventId: number;
+	availability: "READY";
+	matches: TournamentOfficialH2HHistoryMatch[];
+};
+
+type DbOfficialH2HHistoryRow = {
+	season_id: number;
+	official_match_id: number;
+	event_id: number;
+	group_id: number;
+	source_order: number;
+	phase: "REGULAR" | "KNOCKOUT";
+	knockout_name: string | null;
+	tiebreak: string | null;
+	is_bye: boolean;
+	home_entry_id: number | null;
+	home_entry_name: string | null;
+	home_player_name: string | null;
+	home_is_average: boolean;
+	home_net_points: number | null;
+	away_entry_id: number | null;
+	away_entry_name: string | null;
+	away_player_name: string | null;
+	away_is_average: boolean;
+	away_net_points: number | null;
+};
+
 export type DbTournamentBattleGroupResultRow = {
 	id: number;
 	tournament_id: number;
@@ -1392,6 +1444,61 @@ export const mapEntryH2HMatchResult = (
 	};
 };
 
+const mapOfficialH2HHistorySide = (
+	entryId: number | null,
+	entryName: string | null,
+	playerName: string | null,
+	isAverage: boolean,
+	netPoints: number | null
+): TournamentOfficialH2HHistorySide => ({
+	availability: netPoints === null ? "PENDING" : "READY",
+	entryId,
+	entryName: isAverage
+		? "Average Team"
+		: entryId === null
+			? "Bye"
+			: (entryName ?? `Entry ${entryId}`),
+	playerName: isAverage ? null : playerName,
+	isAverage,
+	points: netPoints,
+	netPoints,
+});
+
+export const mapTournamentOfficialH2HHistoryMatch = (
+	row: DbOfficialH2HHistoryRow
+): TournamentOfficialH2HHistoryMatch => {
+	const home = mapOfficialH2HHistorySide(
+		row.home_entry_id,
+		row.home_entry_name,
+		row.home_player_name,
+		row.home_is_average,
+		row.home_net_points
+	);
+	const away = mapOfficialH2HHistorySide(
+		row.away_entry_id,
+		row.away_entry_name,
+		row.away_player_name,
+		row.away_is_average,
+		row.away_net_points
+	);
+	return {
+		officialMatchId: row.official_match_id,
+		eventId: row.event_id,
+		groupId: row.group_id,
+		sourceOrder: row.source_order,
+		phase: row.phase,
+		knockoutName: row.knockout_name,
+		tiebreak: row.tiebreak,
+		isBye: row.is_bye,
+		availability:
+			row.is_bye || (home.availability === "READY" && away.availability === "READY")
+				? "READY"
+				: "PENDING",
+		home,
+		away,
+	};
+};
+
 const getTournamentInfoUncached = async (
 	context: GraphQLContext,
 	tournamentId: number
@@ -1519,6 +1626,13 @@ interface TournamentsRepository {
 		eventId: number
 	): Promise<TournamentBattleGroupResult[]>;
 	getEntryH2HMatchResults(context: GraphQLContext, entryId: number): Promise<EntryH2HMatchResult[]>;
+	getTournamentOfficialH2HHistory(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number,
+		entryId: number,
+		limit?: number | null
+	): Promise<TournamentOfficialH2HHistory>;
 	getTournamentDetailDesk(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -2659,6 +2773,113 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 		}
 		return results;
+	},
+
+	async getTournamentOfficialH2HHistory(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number,
+		entryId: number,
+		limit: number | null = 100
+	): Promise<TournamentOfficialH2HHistory> {
+		if (
+			!Number.isSafeInteger(eventId) ||
+			eventId < 1 ||
+			eventId > 38 ||
+			!Number.isSafeInteger(entryId) ||
+			entryId < 1
+		) {
+			throw new GraphQLError("Requested H2H history scope is invalid", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
+		const requestedLimit = limit ?? 100;
+		if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100) {
+			throw new GraphQLError("H2H history limit must be between 1 and 100", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
+
+		try {
+			const result = await context.database.query<DbOfficialH2HHistoryRow>(
+				`WITH official_matches AS (
+					SELECT
+						battle.season_id,
+						battle.official_match_id,
+						battle.event_id,
+						battle.group_id,
+						battle.source_order,
+						'REGULAR'::text AS phase,
+						NULL::text AS knockout_name,
+						NULL::text AS tiebreak,
+						battle.is_bye,
+						battle.home_entry_id,
+						battle.home_is_average,
+						battle.home_net_points,
+						battle.away_entry_id,
+						battle.away_is_average,
+						battle.away_net_points
+					FROM competition.tournament_battle_group_results AS battle
+					WHERE battle.season_id = $1
+						AND battle.tournament_id = $2
+						AND battle.event_id <= $3
+						AND battle.official_match_id IS NOT NULL
+						AND battle.source_order IS NOT NULL
+						AND (battle.home_entry_id = $4 OR battle.away_entry_id = $4)
+					UNION ALL
+					SELECT
+						knockout.season_id,
+						knockout.official_match_id,
+						knockout.event_id,
+						0 AS group_id,
+						knockout.source_order,
+						'KNOCKOUT'::text AS phase,
+						knockout.knockout_name,
+						knockout.tiebreak,
+						(knockout.home_entry_id IS NULL OR knockout.away_entry_id IS NULL) AS is_bye,
+						knockout.home_entry_id,
+						false AS home_is_average,
+						knockout.home_net_points,
+						knockout.away_entry_id,
+						false AS away_is_average,
+						knockout.away_net_points
+					FROM competition.tournament_knockout_results AS knockout
+					WHERE knockout.season_id = $1
+						AND knockout.tournament_id = $2
+						AND knockout.event_id <= $3
+						AND knockout.official_match_id IS NOT NULL
+						AND knockout.source_order IS NOT NULL
+						AND (knockout.home_entry_id = $4 OR knockout.away_entry_id = $4)
+				)
+				SELECT
+					matches.*,
+					home_entry.entry_name AS home_entry_name,
+					home_entry.player_name AS home_player_name,
+					away_entry.entry_name AS away_entry_name,
+					away_entry.player_name AS away_player_name
+				FROM official_matches AS matches
+				LEFT JOIN competition.entries AS home_entry
+					ON home_entry.season_id = matches.season_id
+					AND home_entry.entry_id = matches.home_entry_id
+				LEFT JOIN competition.entries AS away_entry
+					ON away_entry.season_id = matches.season_id
+					AND away_entry.entry_id = matches.away_entry_id
+				ORDER BY matches.event_id ASC, matches.source_order ASC, matches.official_match_id ASC
+				LIMIT $5`,
+				[context.currentSeason.seasonId, tournamentId, eventId, entryId, requestedLimit]
+			);
+			return {
+				eventId,
+				availability: "READY",
+				matches: result.rows.map(mapTournamentOfficialH2HHistoryMatch),
+			};
+		} catch (error) {
+			context.logger.warn(
+				{ err: error, eventId, tournamentId },
+				"Official H2H history read unavailable"
+			);
+			throw new Error("Official H2H history is temporarily unavailable", { cause: error });
+		}
 	},
 
 	async getTournamentDetailDesk(
