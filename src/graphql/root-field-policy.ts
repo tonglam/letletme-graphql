@@ -293,6 +293,17 @@ export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 		.map(([fieldName]) => fieldName)
 );
 
+/**
+ * These roots do not need the Core payload, but their immutable review cache
+ * keys must still be fenced by the current Core publication revision.
+ */
+export const REVISIONED_QUERY_CACHE_FIELDS: ReadonlySet<string> = new Set([
+	"myTournamentReviewCatalog",
+	"myTournamentGameweekReview",
+	"myTournamentSeasonReview",
+	"myTournamentReviewStatus",
+]);
+
 export const getRootFieldPolicy = (fieldName: string): RootFieldPolicy | undefined =>
 	ROOT_FIELD_POLICIES.get(fieldName);
 

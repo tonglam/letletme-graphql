@@ -1511,3 +1511,16 @@ export const getCoreLiveIdentitySnapshot = (
 
 export const coreDatasetRevision = (snapshot: CoreDataSnapshot): string =>
 	`core-${snapshot.revision}`;
+
+/**
+ * Return the current Core publication revision without loading the complete
+ * Core payload. Lightweight roots still need this identity when they build a
+ * revisioned GraphQL query-cache key. If Redis has no valid manifest, reuse
+ * the normal coherent PostgreSQL fallback so the cache never gets an
+ * unversioned or synthetic authority.
+ */
+export const getCoreDatasetRevision = async (context: GraphQLContext): Promise<string> => {
+	const manifest = await reserveCorePublicationPin(context, "manifest").manifest;
+	if (manifest) return `core-${manifest.revision}`;
+	return coreDatasetRevision(await getCoreDataSnapshot(context));
+};
