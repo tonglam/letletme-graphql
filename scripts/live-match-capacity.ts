@@ -17,6 +17,7 @@ type Transport = "cold" | "warm";
 // of actual network bodies/streams active for almost all of the observed
 // stage. Parsing and decompression are intentionally outside this counter.
 const NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT = 0.95;
+const REQUIRED_CAPACITY_STAGE_SECONDS = 900;
 // JSON parsing, decompression, and semantic validation happen after the
 // network body closes. Keep a small pool of spare processors so those costs do
 // not reduce the number of live network streams below the requested stage.
@@ -31,15 +32,21 @@ type NetworkConcurrencyWindow = {
 	target: number;
 	startedAt: number;
 	lastAt: number;
+	loadWindowEndsAt: number;
 	active: number;
 	targetSatisfiedMs: number;
+	observedTargetSatisfiedMs: number;
 };
 
 type NetworkConcurrencyEvidence = {
 	target: number;
 	stageDurationMs: number;
+	loadWindowDurationMs: number;
+	loadWindowCompleted: boolean;
 	targetSatisfiedMs: number;
 	targetCoverageRatio: number;
+	observedTargetSatisfiedMs: number;
+	observedTargetCoverageRatio: number;
 	maxInFlight: number;
 };
 
@@ -220,40 +227,54 @@ const requestBody = JSON.stringify({
 	variables: { eventId: eventId ?? null },
 });
 
-const percentile = (values: readonly number[], rank: number): number | null => {
-	if (values.length === 0) return null;
-	const sorted = [...values].sort((left, right) => left - right);
-	const index = Math.min(sorted.length - 1, Math.ceil(rank * sorted.length) - 1);
-	return sorted[Math.max(0, index)] ?? null;
-};
-
-// A capacity run can produce millions of responses. Keep a bounded uniform
-// reservoir for quantiles while retaining exact counters and maxima. The
-// report therefore remains useful without retaining every request object.
-const MAX_QUANTILE_SAMPLES = 8192;
-
-class BoundedQuantile {
-	private readonly samples: number[] = [];
+// Keep exact integer-resolution buckets instead of a random sample reservoir.
+// Durations are reported in milliseconds and sizes in bytes, so ceil() makes
+// each reported quantile conservative while the number of buckets stays bound
+// by the observed integer range rather than the number of requests.
+class StreamingQuantile {
+	private readonly buckets = new Map<number, number>();
 	private count = 0;
 	private maximum: number | null = null;
 
 	add(value: number): void {
-		this.count += 1;
-		this.maximum = this.maximum === null ? value : Math.max(this.maximum, value);
-		if (this.samples.length < MAX_QUANTILE_SAMPLES) {
-			this.samples.push(value);
-			return;
+		if (!Number.isFinite(value) || value < 0) {
+			throw new Error("quantile values must be finite and non-negative");
 		}
-		const slot = Math.floor(Math.random() * this.count);
-		if (slot < MAX_QUANTILE_SAMPLES) this.samples[slot] = value;
+		const bucket = Math.ceil(value);
+		this.count += 1;
+		this.maximum = this.maximum === null ? bucket : Math.max(this.maximum, bucket);
+		this.buckets.set(bucket, (this.buckets.get(bucket) ?? 0) + 1);
 	}
 
 	summary(): MetricSummary {
+		if (this.count === 0) {
+			return { count: 0, p50: null, p95: null, p99: null, max: null };
+		}
+		const targets = new Map([
+			[0.5, Math.max(1, Math.ceil(this.count * 0.5))],
+			[0.95, Math.max(1, Math.ceil(this.count * 0.95))],
+			[0.99, Math.max(1, Math.ceil(this.count * 0.99))],
+		]);
+		const quantiles = new Map<number, number | null>([
+			[0.5, null],
+			[0.95, null],
+			[0.99, null],
+		]);
+		let cumulative = 0;
+		for (const [bucket, bucketCount] of [...this.buckets.entries()].sort(
+			([left], [right]) => left - right
+		)) {
+			cumulative += bucketCount;
+			for (const [rank, target] of targets) {
+				if (quantiles.get(rank) === null && cumulative >= target) quantiles.set(rank, bucket);
+			}
+			if ([...quantiles.values()].every((value) => value !== null)) break;
+		}
 		return {
 			count: this.count,
-			p50: percentile(this.samples, 0.5),
-			p95: percentile(this.samples, 0.95),
-			p99: percentile(this.samples, 0.99),
+			p50: quantiles.get(0.5) ?? null,
+			p95: quantiles.get(0.95) ?? null,
+			p99: quantiles.get(0.99) ?? null,
 			max: this.maximum,
 		};
 	}
@@ -1057,11 +1078,11 @@ class ResponseAccumulator {
 	private readonly statusCounts = new Map<number, number>();
 	private readonly errorCodes = new Map<string, number>();
 	private readonly rateLimitScopeCounts = new Map<string, number>();
-	private readonly durations = new BoundedQuantile();
-	private readonly ttfb = new BoundedQuantile();
-	private readonly bodyDownload = new BoundedQuantile();
-	private readonly encodedBytes = new BoundedQuantile();
-	private readonly decodedBytes = new BoundedQuantile();
+	private readonly durations = new StreamingQuantile();
+	private readonly ttfb = new StreamingQuantile();
+	private readonly bodyDownload = new StreamingQuantile();
+	private readonly encodedBytes = new StreamingQuantile();
+	private readonly decodedBytes = new StreamingQuantile();
 
 	record(sample: ResponseSample): void {
 		this.requests += 1;
@@ -1125,14 +1146,16 @@ const networkConcurrencyWindows = new Map<number, NetworkConcurrencyWindow>();
 const networkConcurrencyEvidence = new Map<number, NetworkConcurrencyEvidence>();
 let requestCount = 0;
 
-function beginNetworkConcurrencyStage(stage: number): void {
+function beginNetworkConcurrencyStage(stage: number, loadWindowDurationMs = 0): void {
 	const now = performance.now();
 	networkConcurrencyWindows.set(stage, {
 		target: stage,
 		startedAt: now,
 		lastAt: now,
+		loadWindowEndsAt: now + Math.max(0, loadWindowDurationMs),
 		active: 0,
 		targetSatisfiedMs: 0,
+		observedTargetSatisfiedMs: 0,
 	});
 	networkInFlightByStage.set(stage, 0);
 	maxNetworkInFlightByStage.set(stage, 0);
@@ -1141,8 +1164,14 @@ function beginNetworkConcurrencyStage(stage: number): void {
 function advanceNetworkConcurrency(stage: number, now = performance.now()): void {
 	const window = networkConcurrencyWindows.get(stage);
 	if (!window) return;
-	const elapsedMs = Math.max(0, now - window.lastAt);
-	if (window.active >= window.target) window.targetSatisfiedMs += elapsedMs;
+	const previousAt = window.lastAt;
+	const elapsedMs = Math.max(0, now - previousAt);
+	if (window.active >= window.target) {
+		window.observedTargetSatisfiedMs += elapsedMs;
+		const cappedNow = Math.min(now, window.loadWindowEndsAt);
+		const cappedPrevious = Math.min(previousAt, window.loadWindowEndsAt);
+		window.targetSatisfiedMs += Math.max(0, cappedNow - cappedPrevious);
+	}
 	window.lastAt = now;
 }
 
@@ -1174,8 +1203,12 @@ function finishNetworkConcurrencyStage(stage: number): NetworkConcurrencyEvidenc
 		const evidence: NetworkConcurrencyEvidence = {
 			target: stage,
 			stageDurationMs: 0,
+			loadWindowDurationMs: 0,
+			loadWindowCompleted: false,
 			targetSatisfiedMs: 0,
 			targetCoverageRatio: 0,
+			observedTargetSatisfiedMs: 0,
+			observedTargetCoverageRatio: 0,
 			maxInFlight: 0,
 		};
 		networkConcurrencyEvidence.set(stage, evidence);
@@ -1184,11 +1217,18 @@ function finishNetworkConcurrencyStage(stage: number): NetworkConcurrencyEvidenc
 	const now = performance.now();
 	advanceNetworkConcurrency(stage, now);
 	const stageDurationMs = Math.max(0, window.lastAt - window.startedAt);
+	const loadWindowDurationMs = Math.max(0, window.loadWindowEndsAt - window.startedAt);
 	const evidence: NetworkConcurrencyEvidence = {
 		target: window.target,
 		stageDurationMs,
+		loadWindowDurationMs,
+		loadWindowCompleted: now >= window.loadWindowEndsAt,
 		targetSatisfiedMs: window.targetSatisfiedMs,
-		targetCoverageRatio: stageDurationMs === 0 ? 0 : window.targetSatisfiedMs / stageDurationMs,
+		targetCoverageRatio:
+			loadWindowDurationMs === 0 ? 0 : window.targetSatisfiedMs / loadWindowDurationMs,
+		observedTargetSatisfiedMs: window.observedTargetSatisfiedMs,
+		observedTargetCoverageRatio:
+			stageDurationMs === 0 ? 0 : window.observedTargetSatisfiedMs / stageDurationMs,
 		maxInFlight: maxNetworkInFlightByStage.get(stage) ?? 0,
 	};
 	networkConcurrencyEvidence.set(stage, evidence);
@@ -1473,7 +1513,7 @@ for (const stage of stages) {
 		break;
 	}
 	const deadline = Date.now() + stageSeconds * 1000;
-	beginNetworkConcurrencyStage(stage);
+	beginNetworkConcurrencyStage(stage, stageSeconds * 1000);
 	try {
 		await Promise.all(
 			Array.from({ length: workerCountForStage(stage) }, () => runWorker(stage, deadline))
@@ -1508,8 +1548,12 @@ const stageReports = stages.map((stage) => ({
 	networkConcurrency: networkConcurrencyEvidence.get(stage) ?? {
 		target: stage,
 		stageDurationMs: 0,
+		loadWindowDurationMs: 0,
+		loadWindowCompleted: false,
 		targetSatisfiedMs: 0,
 		targetCoverageRatio: 0,
+		observedTargetSatisfiedMs: 0,
+		observedTargetCoverageRatio: 0,
 		maxInFlight: 0,
 	},
 	...accumulatorsByStage.get(stage)!.report(),
@@ -1586,7 +1630,14 @@ const capacityGate = {
 	requiredStageHealth,
 	stage300DurationSeconds: capacityStage?.durationSeconds ?? 0,
 	stage300ObservedDurationSeconds: capacityStage?.observedDurationSeconds ?? 0,
-	stage300DurationRequirementMet: (capacityStage?.observedDurationSeconds ?? 0) >= 900,
+	stage300LoadWindowSeconds: (capacityStage?.networkConcurrency.loadWindowDurationMs ?? 0) / 1_000,
+	stage300LoadWindowCompleted: capacityStage?.networkConcurrency.loadWindowCompleted ?? false,
+	stage300DurationRequirementMet:
+		(capacityStage?.networkConcurrency.loadWindowCompleted ?? false) &&
+		(capacityStage?.networkConcurrency.loadWindowDurationMs ?? 0) >=
+			REQUIRED_CAPACITY_STAGE_SECONDS * 1_000 &&
+		(capacityStage?.networkConcurrency.targetCoverageRatio ?? 0) >=
+			NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT,
 	stage300P95Under800Ms: (capacityStage?.e2eMs.p95 ?? Number.POSITIVE_INFINITY) < 800,
 	stage300P99Under2s: (capacityStage?.e2eMs.p99 ?? Number.POSITIVE_INFINITY) < 2_000,
 	non429ErrorRateUnderPoint1Percent: (capacityStage?.non429ErrorRate ?? 1) < 0.001,
@@ -1699,7 +1750,8 @@ const report = {
 		"When metrics are configured, the metrics origin is independently pinned to the same deploy SHA before and around every required stage.",
 		"Pool waiting is gated by both the sampled waiting gauge and the monotonic postgres_pool_wait_events_total counter; transient queue waits cannot disappear between scrapes.",
 		"Any semantic, non-429, or client/workload 429 failure in a required stage fails the stepped capacity gate even if a later stage recovers.",
-		"Quantiles use a bounded uniform reservoir; request counters, status counts, semantic failures, and maxima remain exact.",
+		"Quantiles use exact integer-resolution streaming histograms with conservative ceil buckets; request counters, status counts, semantic failures, and maxima remain exact.",
+		"The sustained-concurrency gate measures only the configured request-admission window; observed duration may be longer while in-flight responses drain and cannot satisfy the duration requirement.",
 	],
 };
 
