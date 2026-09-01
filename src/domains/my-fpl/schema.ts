@@ -67,6 +67,7 @@ export const myFplTypeDefs = /* GraphQL */ `
 		defender: Int!
 		midfielder: Int!
 		forward: Int!
+		assistantManager: Int!
 		total: Int!
 	}
 

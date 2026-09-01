@@ -604,6 +604,7 @@ export type MyFplManagerPositionPoints = {
 	defender: number;
 	midfielder: number;
 	forward: number;
+	assistantManager: number;
 	total: number;
 };
 
@@ -1292,6 +1293,7 @@ const isManagerPositionPoints = (value: unknown): value is MyFplManagerPositionP
 		defender: isSafeInteger,
 		midfielder: isSafeInteger,
 		forward: isSafeInteger,
+		assistantManager: isSafeInteger,
 		total: isSafeInteger,
 	});
 

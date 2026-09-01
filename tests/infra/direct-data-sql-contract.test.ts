@@ -98,6 +98,7 @@ const mockSnapshotEntryPayload = {
 				defender: 0,
 				midfielder: 0,
 				forward: 0,
+				assistantManager: 0,
 				total: 0,
 			},
 			chips: [],

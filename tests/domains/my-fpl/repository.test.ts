@@ -629,6 +629,7 @@ const snapshotPayload = () => ({
 						defender: 20,
 						midfielder: 15,
 						forward: 5,
+						assistantManager: 0,
 						total: 50,
 					},
 					captain: {
@@ -685,6 +686,7 @@ const snapshotPayload = () => ({
 				defender: 20,
 				midfielder: 15,
 				forward: 5,
+				assistantManager: 0,
 				total: 50,
 			},
 			chips: [],
