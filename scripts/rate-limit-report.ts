@@ -4,6 +4,7 @@ import {
 	rateLimitAggregateMinute,
 	rateLimitDeniedRankingKey,
 	rateLimitRecentAggregateKey,
+	rateLimitTelemetryOverflowKey,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
 	summarizeRateLimitTotals,
@@ -11,6 +12,7 @@ import {
 } from "../src/infra/rate-limit-observability";
 import { env } from "../src/infra/env";
 import { closeRedis, connectRedis, getRateLimitRedis } from "../src/infra/redis";
+import type Redis from "ioredis";
 
 type ReportOptions = {
 	days: number;
@@ -84,9 +86,14 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 	};
 };
 
-const readLiveRateLimitMetrics = async (): Promise<{
+const readLiveRateLimitMetrics = async (
+	redis: Redis,
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	dates: readonly string[]
+): Promise<{
 	rateLimitStorageFailures: number;
 	rateLimitTelemetryOverflows: number;
+	persistedTelemetryOverflowDates: readonly string[];
 }> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
@@ -97,9 +104,21 @@ const readLiveRateLimitMetrics = async (): Promise<{
 		throw new Error(`Live metrics request failed with HTTP ${response.status}`);
 	}
 	const metricsText = await response.text();
+	const persistedTelemetryOverflowDates = (
+		await Promise.all(
+			dates.map(async (date) =>
+				(await redis.exists(rateLimitTelemetryOverflowKey(date, policyVersion))) > 0 ? date : null
+			)
+		)
+	).filter((date): date is string => date !== null);
+	const liveTelemetryOverflows = parseRateLimitTelemetryOverflowTotal(metricsText);
 	return {
 		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
-		rateLimitTelemetryOverflows: parseRateLimitTelemetryOverflowTotal(metricsText),
+		rateLimitTelemetryOverflows: Math.max(
+			liveTelemetryOverflows,
+			persistedTelemetryOverflowDates.length
+		),
+		persistedTelemetryOverflowDates,
 	};
 };
 
@@ -198,7 +217,9 @@ try {
 					),
 					buckets: recentBuckets,
 				};
-	const live = options.includeLiveStorageFailures ? await readLiveRateLimitMetrics() : null;
+	const live = options.includeLiveStorageFailures
+		? await readLiveRateLimitMetrics(redis, policyVersion, dates)
+		: null;
 	const report = {
 		policy: policyVersion,
 		mode: env.GRAPHQL_RATE_LIMIT_MODE,

@@ -64,6 +64,12 @@ export const rateLimitRecentAggregateKey = (
 	policyVersion: GraphQLRateLimitPolicyVersion = "graphql-v3"
 ): string => `llm:gql:rate-limit:${policyNamespace(policyVersion)}:recent:${minute}`;
 
+/** Durable marker for telemetry dropped by a full in-process queue. */
+export const rateLimitTelemetryOverflowKey = (
+	date: string,
+	policyVersion: GraphQLRateLimitPolicyVersion = "graphql-v3"
+): string => `llm:gql:rate-limit:${policyNamespace(policyVersion)}:overflow:${date}`;
+
 export type RateLimitReportSummary = {
 	totalDecisions: number;
 	v3Decisions: number;
@@ -344,6 +350,8 @@ export const recordRateLimitAggregate = async (input: {
 const pendingTelemetry: RateLimitAggregateRecord[] = [];
 let telemetryFlushTimer: ReturnType<typeof setTimeout> | null = null;
 let telemetryFlushPromise: Promise<void> | null = null;
+const persistedOverflowMarkers = new Set<string>();
+const overflowMarkerFlights = new Map<string, Promise<void>>();
 
 const clearTelemetryFlushTimer = (): void => {
 	if (telemetryFlushTimer === null) return;
@@ -379,10 +387,50 @@ const scheduleTelemetryFlush = (): void => {
 	}, RATE_LIMIT_TELEMETRY_FLUSH_INTERVAL_MS);
 };
 
+const persistOverflowMarker = (record: RateLimitAggregateRecord): void => {
+	const key = rateLimitTelemetryOverflowKey(
+		rateLimitAggregateDate(record.date),
+		record.policyVersion
+	);
+	if (persistedOverflowMarkers.has(key) || overflowMarkerFlights.has(key)) return;
+	let markerWrite: Promise<unknown>;
+	try {
+		markerWrite = record.redis.set(key, "1", "EX", RATE_LIMIT_AGGREGATE_RETENTION_SECONDS, "NX");
+	} catch (error: unknown) {
+		metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-overflow`, "open").inc();
+		record.logger.warn(
+			{ err: error, policyVersion: record.policyVersion },
+			"Rate-limit telemetry overflow marker unavailable"
+		);
+		return;
+	}
+	const flight = markerWrite
+		.then(() => {
+			if (persistedOverflowMarkers.size >= 32) {
+				const oldest = persistedOverflowMarkers.values().next().value;
+				if (oldest !== undefined) persistedOverflowMarkers.delete(oldest);
+			}
+			persistedOverflowMarkers.add(key);
+		})
+		.catch((error: unknown) => {
+			metrics.rateLimitStorageFailures.labels(`${record.policyVersion}-overflow`, "open").inc();
+			record.logger.warn(
+				{ err: error, policyVersion: record.policyVersion },
+				"Rate-limit telemetry overflow marker unavailable"
+			);
+		})
+		.finally(() => {
+			overflowMarkerFlights.delete(key);
+		});
+	overflowMarkerFlights.set(key, flight);
+	void flight;
+};
+
 /**
- * Enqueue aggregate telemetry without putting a Redis write on the request
- * path. Admission decisions and Prometheus counters remain synchronous; a
- * full queue drops only observability data and records that loss.
+ * Enqueue aggregate telemetry without awaiting a Redis write on the normal
+ * request path. Admission decisions and Prometheus counters remain
+ * synchronous; a full queue drops the aggregate and starts one bounded,
+ * fire-and-forget durable overflow marker for the report window.
  */
 export const enqueueRateLimitAggregate = (input: {
 	redis: Redis;
@@ -401,6 +449,7 @@ export const enqueueRateLimitAggregate = (input: {
 		.inc();
 	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE) {
 		metrics.rateLimitTelemetryOverflows.labels(record.policyVersion).inc();
+		persistOverflowMarker(record);
 		return;
 	}
 	pendingTelemetry.push(record);

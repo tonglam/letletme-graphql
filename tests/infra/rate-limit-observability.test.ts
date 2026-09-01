@@ -6,6 +6,7 @@ import {
 	rateLimitRecentAggregateKey,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
+	rateLimitTelemetryOverflowKey,
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
@@ -31,6 +32,9 @@ describe("rate-limit observability privacy", () => {
 		);
 		expect(rateLimitRecentAggregateKey(minute, "graphql-v4")).toBe(
 			"llm:gql:rate-limit:v4:recent:2026-08-20T12:34"
+		);
+		expect(rateLimitTelemetryOverflowKey("2026-08-20", "graphql-v4")).toBe(
+			"llm:gql:rate-limit:v4:overflow:2026-08-20"
 		);
 	});
 

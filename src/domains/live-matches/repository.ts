@@ -145,6 +145,7 @@ type MatchDetailCandidate = Readonly<{
 export type LiveMatchdayRead = Readonly<{
 	season: string;
 	eventId: number | null;
+	invalidEventId?: boolean;
 	readMode?: LiveMatchReadMode;
 	desk: MatchDeskCandidate | null;
 	detail: MatchDetailCandidate | null;
@@ -398,13 +399,13 @@ local function desk_candidate(pointer)
   if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
     return { publication = publication, payload = null_value(), metadata = null_value() }
   end
-  -- HEAD observes the publication and its immutable item metadata only.  Do
-  -- not read the desk payload until a caller has selected DESK or FULL; this
-  -- keeps heartbeat probes independent of the fixture JSON size.
+  -- HEAD does not return the desk payload to the application response, but it
+  -- reads it here so the immutable SHA and revision are verified before the
+  -- metadata candidate can be reported as READY.
   if mode == "HEAD" then
     return {
       publication = publication,
-      payload = null_value(),
+      payload = read_string(item.key) or null_value(),
       metadata = expected_metadata
     }
   end
@@ -1009,14 +1010,10 @@ const decodeDeskMetadataCandidate = (
 	eventId: number,
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
 ): MatchDeskCandidate | null => {
-	const publication = parseDeskPublication(raw.publication, season, eventId);
-	if (
-		!publication ||
-		raw.metadata !==
-			`${publication.desk.count}|${publication.desk.bytes}|${publication.desk.sha256}`
-	)
-		return null;
-	return { publication, fixtures: [], payloadLoaded: false, servedFrom };
+	const candidate = decodeDeskCandidate(raw, season, eventId, servedFrom);
+	return candidate === null
+		? null
+		: { ...candidate, fixtures: [], payloadLoaded: false, servedFrom };
 };
 
 const sameDetailMetadata = (
@@ -1765,6 +1762,7 @@ export const readLiveMatchday = async (
 		return {
 			season,
 			eventId: null,
+			invalidEventId: true,
 			readMode: mode,
 			desk: null,
 			detail: null,

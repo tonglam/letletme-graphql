@@ -434,7 +434,7 @@ describe("Live Matches V3 read path", () => {
 		expect(modes).toEqual(["HEAD", "DESK", "FULL"]);
 	});
 
-	it("keeps HEAD metadata-only and does not cold-read detail or desk payloads", async () => {
+	it("keeps the HEAD response metadata-only and does not cold-read detail payloads", async () => {
 		const redis = new TestRedis();
 		attachBundle(redis, buildBundle().bundle);
 		let databaseReads = 0;
@@ -454,6 +454,43 @@ describe("Live Matches V3 read path", () => {
 		expect(result.desk?.fixtures).toEqual([]);
 		expect(result.detail?.payloadLoaded).toBe(false);
 		expect(result.detail?.fixtures).toEqual([]);
+		expect(databaseReads).toBe(0);
+	});
+
+	it("rejects a corrupt desk item before accepting a HEAD metadata candidate", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle({ corruptDesk: true }).bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
+	it("labels an invalid explicit event id instead of reporting an empty active window", async () => {
+		const redis = new TestRedis();
+		let databaseReads = 0;
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseReads += 1;
+					throw new Error("invalid event ids must not read PostgreSQL");
+				},
+			}),
+			source: `query { liveMatchday(eventId: 0) { availability delivery { state servedFrom reasonCodes } snapshot { eventId } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toEqual({
+			availability: "UNAVAILABLE",
+			delivery: {
+				state: "UNAVAILABLE",
+				servedFrom: null,
+				reasonCodes: ["INVALID_EVENT_ID"],
+			},
+			snapshot: null,
+		});
 		expect(databaseReads).toBe(0);
 	});
 

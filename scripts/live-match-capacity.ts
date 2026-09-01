@@ -112,6 +112,9 @@ if (eventId !== undefined && (!Number.isSafeInteger(eventId) || eventId <= 0)) {
 const mode = parseMode(option("--mode"));
 const transport = parseTransport(option("--transport"));
 validateCapacityEndpoint(endpoint, transport);
+const metricsEndpointValue = process.env.LIVE_MATCH_LOAD_METRICS_URL?.trim();
+const metricsEndpoint = metricsEndpointValue ? new URL(metricsEndpointValue) : null;
+if (metricsEndpoint !== null) validateCapacityEndpoint(metricsEndpoint, "cold");
 const stages = [
 	...new Set(
 		(process.env.LIVE_MATCH_LOAD_STAGES ?? "50,100,200,300")
@@ -787,11 +790,10 @@ function metricSum(text: string, metric: string, requiredLabel: string): number 
 }
 
 async function collectMetrics(): Promise<MetricObservation | null> {
-	const metricsUrl = process.env.LIVE_MATCH_LOAD_METRICS_URL?.trim();
-	if (!metricsUrl) return null;
+	if (metricsEndpoint === null) return null;
 	let observation: MetricObservation;
 	try {
-		const response = await fetch(metricsUrl, {
+		const response = await fetch(metricsEndpoint, {
 			headers: {
 				...(process.env.LIVE_MATCH_LOAD_METRICS_TOKEN
 					? { "x-metrics-token": process.env.LIVE_MATCH_LOAD_METRICS_TOKEN }
