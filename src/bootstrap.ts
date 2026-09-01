@@ -11,7 +11,11 @@ import { env } from "./infra/env";
 import { logger } from "./infra/logger";
 import { classifyGraphQLIngress, type GraphQLIngress } from "./infra/ingress-context";
 import { metrics, metricsResponse, registerDatabasePoolMetrics } from "./infra/metrics";
-import { rateLimitFingerprint } from "./infra/rate-limit-observability";
+import {
+	flushRateLimitAggregateTelemetry,
+	rateLimitFingerprint,
+	registerRateLimitTelemetryServingProcess,
+} from "./infra/rate-limit-observability";
 import { closeRedis, connectRedis } from "./infra/redis";
 import { CurrentSeasonProvider } from "./infra/season";
 import { PayloadTooLargeError, readRequestBody } from "./http/security";
@@ -40,10 +44,10 @@ import {
 	requiresLivePointsV2Contract,
 } from "./http/live-points-contract";
 import {
-	hasLiveMatchesV2Contract,
+	hasLiveMatchesV3Contract,
 	LIVE_MATCHES_CONTRACT_HEADER,
 	LIVE_MATCHES_CONTRACT_VALUE,
-	requiresLiveMatchesV2Contract,
+	requiresLiveMatchesV3Contract,
 	isLiveMatchesHotPathOperation,
 } from "./http/live-matches-contract";
 import { GraphQLAdmissionOrder } from "./http/graphql-admission-order";
@@ -104,6 +108,7 @@ export const startServer = async (): Promise<void> => {
 	const apollo = createGraphQLApolloServer();
 
 	await apollo.start();
+	registerRateLimitTelemetryServingProcess();
 
 	const server = Bun.serve({
 		port: env.PORT,
@@ -215,7 +220,7 @@ export const startServer = async (): Promise<void> => {
 						fallbackDecision
 					);
 					v3AggregateRecorded = true;
-					await recordRequestRateLimitOutcome({
+					recordRequestRateLimitOutcome({
 						ingress,
 						scope:
 							terminalDecision.deniedScope ?? terminalDecision.details.at(-1)?.scope ?? "client",
@@ -419,7 +424,7 @@ export const startServer = async (): Promise<void> => {
 					const livePointsHotPath = isLivePointsHotPathOperation(rootFields);
 					const liveMatchesHotPath = isLiveMatchesHotPathOperation(rootFields);
 					const requiresLivePointsContract = requiresLivePointsV2Contract(rootFields);
-					const requiresLiveMatchesContract = requiresLiveMatchesV2Contract(rootFields);
+					const requiresLiveMatchesContract = requiresLiveMatchesV3Contract(rootFields);
 					if (requiresLivePointsContract && requiresLiveMatchesContract) {
 						const response = jsonError(
 							400,
@@ -439,11 +444,11 @@ export const startServer = async (): Promise<void> => {
 						);
 						return finalizePostPreAuthResponse(response, "live_points_contract_rejected");
 					}
-					if (requiresLiveMatchesContract && !hasLiveMatchesV2Contract(request.headers)) {
+					if (requiresLiveMatchesContract && !hasLiveMatchesV3Contract(request.headers)) {
 						const response = jsonError(
 							426,
 							"CLIENT_UPGRADE_REQUIRED",
-							"Live Matches requires the live-matches-v2 client contract",
+							"Live Matches requires the live-matches-v3 client contract",
 							corsHeaders,
 							{ [LIVE_MATCHES_CONTRACT_HEADER]: LIVE_MATCHES_CONTRACT_VALUE }
 						);
@@ -611,6 +616,7 @@ export const startServer = async (): Promise<void> => {
 	const shutdown = createShutdownHandler({
 		server,
 		stopApollo: () => apollo.stop(),
+		flushTelemetry: () => flushRateLimitAggregateTelemetry(),
 		closeRedis,
 		closeDbPool,
 		setExitCode: (code) => {

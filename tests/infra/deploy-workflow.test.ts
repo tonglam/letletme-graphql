@@ -68,6 +68,12 @@ describe("production deployment workflow", () => {
 
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(dockerfile).toContain("COPY --chown=bun:bun scripts/lib ./scripts/lib");
+		expect(dockerfile).toContain(
+			"ENV RATE_LIMIT_TELEMETRY_SPOOL_DIR=/var/lib/letletme-graphql/rate-limit-telemetry"
+		);
+		expect(dockerfile).toContain('chown -R bun:bun "$RATE_LIMIT_TELEMETRY_SPOOL_DIR"');
+		expect(compose).toContain("rate_limit_telemetry_state");
+		expect(compose).toContain("GRAPHQL_RATE_LIMIT_TELEMETRY_VOLUME");
 		expect(deployScript).toContain("/health/ready");
 		expect(deployScript).toContain('.status == "ok" and .deploySha == $deploySha');
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
@@ -316,6 +322,14 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain("candidate_port=4000");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_blue");
 		expect(monitorWorkflow).toContain("project=letletme_graphql_green");
+		expect(monitorWorkflow).toContain("rate-limit:serving-process-check");
+		expect(monitorWorkflow).toContain("RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS");
+	});
+
+	test("gives each blue/green slot its own telemetry identity", () => {
+		expect(compose).toContain("RATE_LIMIT_TELEMETRY_SLOT: ${RATE_LIMIT_TELEMETRY_SLOT:-default}");
+		expect(deployScript).toContain('RATE_LIMIT_TELEMETRY_SLOT="$inactive_slot"');
+		expect(dockerfile).toContain("scripts/rate-limit-serving-process-check.ts");
 	});
 
 	test("attaches both slots to the shared primary Redis network", () => {

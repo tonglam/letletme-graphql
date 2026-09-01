@@ -6,8 +6,8 @@ import { DateTimeResolver } from "graphql-scalars";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 
-export const LIVE_MATCHES_CONTRACT_VERSION = "live-matches-v2" as const;
-export const LIVE_MATCHES_REDIS_PREFIX = "llm:data:v2:fpl:live-match";
+export const LIVE_MATCHES_CONTRACT_VERSION = "live-matches-v3" as const;
+export const LIVE_MATCHES_REDIS_PREFIX = "llm:data:v3:fpl:live-match";
 export const LIVE_MATCHES_POSTGRES_TIMEOUT_MS = 400;
 export const LIVE_MATCHES_PROCESS_LKG_LIMIT = 8;
 export const LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS = 30_000;
@@ -60,8 +60,7 @@ export type MatchDeskFixture = Readonly<{
 export type MatchDetailStat = Readonly<{
 	identifier: string;
 	value: number;
-	points: number;
-	pointsModification: number | null;
+	awardedPoints: number;
 }>;
 
 export type MatchDetailPlayer = Readonly<{
@@ -108,6 +107,13 @@ type FixtureDetailItem = Readonly<{
 	sha256: string;
 }>;
 
+type MatchDeskFixtureCoverage = Readonly<{
+	fixtureIds: readonly number[];
+	startedFixtureIds: readonly number[];
+}>;
+
+type FixtureTeamIds = readonly [homeTeamId: number, awayTeamId: number];
+
 type MatchDetailPublication = Readonly<{
 	contractVersion: typeof LIVE_MATCHES_CONTRACT_VERSION;
 	publicationId: string;
@@ -130,22 +136,64 @@ type MatchDetailPublication = Readonly<{
 type MatchDeskCandidate = Readonly<{
 	publication: MatchDeskPublication;
 	fixtures: readonly MatchDeskFixture[];
+	/** False for HEAD metadata reads; omitted means a full desk payload. */
+	payloadLoaded?: boolean;
+	/** Compact identity/start coverage retained by metadata-only reads. */
+	fixtureCoverage?: MatchDeskFixtureCoverage;
+	/** Compact fixture team identity retained by metadata-only reads. */
+	fixtureTeamIds?: ReadonlyMap<number, FixtureTeamIds>;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
 
 type MatchDetailCandidate = Readonly<{
 	publication: MatchDetailPublication;
 	fixtures: readonly MatchFixtureDetail[];
+	/** Same descriptor-only token exposed by HEAD for refresh comparison. */
+	observationRevision: string;
+	/** A complete detail candidate whose immutable bodies have been verified. */
+	payloadLoaded: true;
+	/** Player team IDs retained by metadata reads for desk compatibility checks. */
+	fixturePlayerTeamIds?: ReadonlyMap<number, readonly number[]>;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
+
+/**
+ * A publication/manifest observation whose immutable fixture bodies have not
+ * been read. It is deliberately a different type from MatchDetailCandidate so
+ * metadata cannot accidentally enter the FULL selector or complete LKG.
+ */
+type MatchDetailObservation = Readonly<{
+	publication: MatchDetailPublication;
+	/**
+	 * A descriptor-only change token. It is useful to decide whether a FULL
+	 * refresh is worth attempting, but it is not the verified `playerDetail`
+	 * revision and must never be used as a detail payload authority.
+	 */
+	observationRevision: string;
+	fixtures: readonly [];
+	payloadLoaded: false;
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
+}>;
+
+type MatchDetailReadCandidate = MatchDetailCandidate | MatchDetailObservation;
 
 export type LiveMatchdayRead = Readonly<{
 	season: string;
 	eventId: number | null;
+	invalidEventId?: boolean;
+	readMode?: LiveMatchReadMode;
 	desk: MatchDeskCandidate | null;
+	/**
+	 * HEAD/DESK may observe a validated publication and item manifest without
+	 * reading immutable detail bodies. This is revision metadata only: it is
+	 * never a complete detail candidate and is never written to the complete
+	 * process LKG (the separate metadata cache may retain this observation).
+	 */
+	detailObservation?: MatchDetailObservation | null;
 	detail: MatchDetailCandidate | null;
 	redisReadFailed: boolean;
 	postgresReadFailed: boolean;
+	redisRoundtrips: number;
 }>;
 
 type RedisDeskRaw = Readonly<{
@@ -169,13 +217,21 @@ type RedisDetailRaw = Readonly<{
 
 type RedisReadBundle = Readonly<{
 	eventId: number | null;
+	pointer: "active" | "previous";
 	desk: { active: RedisDeskRaw; previous: RedisDeskRaw };
 	detail: { active: RedisDetailRaw; previous: RedisDetailRaw };
 }>;
 
+export type LiveMatchReadMode = "HEAD" | "DESK" | "FULL";
+
 type SelectedLkg = Readonly<{
 	desk: MatchDeskCandidate;
 	detail: MatchDetailCandidate | null;
+}>;
+
+type MetadataLkg = Readonly<{
+	desk: MatchDeskCandidate;
+	detail: MatchDetailObservation | null;
 }>;
 
 type CheckpointRow = QueryResultRow & {
@@ -201,8 +257,8 @@ type ScopedEventCheckpointBudget = Readonly<{
 }>;
 
 const processLkg = new Map<string, SelectedLkg>();
+const processMetadataLkg = new Map<string, MetadataLkg>();
 const processActiveEvent = new Map<string, number>();
-const processActiveEventCheckedAt = new Map<string, number>();
 const processEventCheckedAt = new Map<string, ScopedEventCheckpointCheck>();
 const processEventCheckpointBudget = new Map<string, ScopedEventCheckpointBudget>();
 const postgresDetailMissUntil = new Map<string, number>();
@@ -232,7 +288,107 @@ const finiteNumber = (value: unknown): value is number =>
 const nonEmptyString = (value: unknown): value is string =>
 	typeof value === "string" && value.length > 0;
 
-// Data's V2 checkpoint contract reserves a fixed-width publication identity.
+const statIdentifierKey = (value: unknown): string | null =>
+	typeof value === "string" && value.trim().length > 0 ? value.trim().toLowerCase() : null;
+
+const LIVE_MATCH_DETAIL_STAT_KEYS = ["identifier", "value", "awardedPoints"] as const;
+const LIVE_MATCH_DESK_FIXTURE_KEYS = [
+	"fixtureId",
+	"eventId",
+	"homeTeamId",
+	"homeTeamName",
+	"homeTeamShortName",
+	"awayTeamId",
+	"awayTeamName",
+	"awayTeamShortName",
+	"homeScore",
+	"awayScore",
+	"kickoffTime",
+	"minutes",
+	"started",
+	"finished",
+	"finishedProvisional",
+] as const;
+const LIVE_MATCH_DETAIL_PLAYER_KEYS = [
+	"id",
+	"webName",
+	"position",
+	"teamId",
+	"price",
+	"totalPoints",
+	"stats",
+] as const;
+const LIVE_MATCH_DETAIL_FIXTURE_KEYS = ["fixtureId", "players"] as const;
+
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
+	const actualKeys = Object.keys(value);
+	return (
+		actualKeys.length === keys.length &&
+		keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+	);
+};
+
+const LIVE_MATCH_REVISION_KEYS = ["revision", "contentUpdatedAt"] as const;
+const LIVE_MATCH_PUBLICATION_ITEM_KEYS = [
+	"name",
+	"key",
+	"type",
+	"count",
+	"bytes",
+	"sha256",
+] as const;
+const LIVE_MATCH_DESK_REVISION_KEYS = ["lifecycle", "fixtureIdentity", "scoreState"] as const;
+const LIVE_MATCH_DESK_PUBLICATION_KEYS = [
+	"contractVersion",
+	"publicationId",
+	"generation",
+	"season",
+	"eventId",
+	"state",
+	"sourceCheckedAt",
+	"publishedAt",
+	"checkpointedAt",
+	"expectedNextCheckAt",
+	"staleAt",
+	"revisions",
+	"desk",
+] as const;
+const LIVE_MATCH_DETAIL_ITEM_KEYS = [
+	"fixtureId",
+	"key",
+	"type",
+	"count",
+	"bytes",
+	"sha256",
+] as const;
+const LIVE_MATCH_DETAIL_PUBLICATION_KEYS = [
+	"contractVersion",
+	"publicationId",
+	"generation",
+	"season",
+	"eventId",
+	"finalized",
+	"observedDeskGeneration",
+	"fixtureIdentityRevision",
+	"sourceCheckedAt",
+	"publishedAt",
+	"checkpointedAt",
+	"expectedNextCheckAt",
+	"staleAt",
+	"detail",
+	"fixtures",
+] as const;
+
+const validDetailStat = (value: unknown): value is MatchDetailStat => {
+	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DETAIL_STAT_KEYS)) return false;
+	return (
+		nonEmptyString(value.identifier) &&
+		finiteNumber(value.value) &&
+		finiteNumber(value.awardedPoints)
+	);
+};
+
+// Data's V3 checkpoint contract reserves a fixed-width publication identity.
 // Keep the reader boundary equally strict so an arbitrary non-empty value
 // cannot become a trusted publication reference after Redis/PG recovery.
 const validPublicationId = (value: unknown): value is string =>
@@ -250,6 +406,34 @@ const stableJson = (value: unknown): string => {
 
 const sha256 = (value: unknown): string =>
 	createHash("sha256").update(stableJson(value), "utf8").digest("hex");
+
+/**
+ * Build a safe HEAD change token from the publication descriptor and
+ * content-addressed item descriptors. The aggregate detail revision is
+ * intentionally excluded: without reading the immutable bodies, HEAD cannot
+ * prove that aggregate hash. FULL remains the only path that exposes the
+ * verified aggregate revision or serves player rows.
+ */
+const detailManifestObservationRevision = (publication: MatchDetailPublication): string =>
+	sha256({
+		contractVersion: publication.contractVersion,
+		publicationId: publication.publicationId,
+		generation: publication.generation,
+		season: publication.season,
+		eventId: publication.eventId,
+		finalized: publication.finalized,
+		observedDeskGeneration: publication.observedDeskGeneration,
+		fixtureIdentityRevision: publication.fixtureIdentityRevision,
+		contentUpdatedAt: publication.detail.contentUpdatedAt,
+		fixtures: publication.fixtures.map((item) => ({
+			fixtureId: item.fixtureId,
+			key: item.key,
+			type: item.type,
+			count: item.count,
+			bytes: item.bytes,
+			sha256: item.sha256,
+		})),
+	});
 
 const sha256Raw = (value: string): string =>
 	createHash("sha256").update(value, "utf8").digest("hex");
@@ -326,9 +510,11 @@ const detailItemKeyMatches = (
  * through a sequence of independently changing MGETs. The script returns raw
  * JSON; all contract validation remains in TypeScript where it is testable.
  */
-export const LIVE_MATCHES_READ_BUNDLE_LUA = `
+export const LIVE_MATCHES_READ_POINTER_LUA = `
 local season = ARGV[1]
 local requested_event = ARGV[2]
+local pointer = ARGV[3] or "active"
+local mode = ARGV[4] or "FULL"
 
 local function null_value()
   return cjson.null
@@ -373,7 +559,7 @@ local function desk_candidate(pointer)
   end
   local decoded = nil
   local ok = pcall(function() decoded = cjson.decode(publication) end)
-  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v2" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) then
+  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v3" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) then
     return { publication = publication, payload = null_value(), metadata = null_value() }
   end
   local item = decoded.desk
@@ -384,6 +570,16 @@ local function desk_candidate(pointer)
   local expected_metadata = tostring(item.count) .. "|" .. tostring(item.bytes) .. "|" .. item.sha256
   if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
     return { publication = publication, payload = null_value(), metadata = null_value() }
+  end
+  -- HEAD does not return the desk payload to the application response, but it
+  -- reads it here so the immutable SHA and revision are verified before the
+  -- metadata candidate can be reported as READY.
+  if mode == "HEAD" then
+    return {
+      publication = publication,
+      payload = read_string(item.key) or null_value(),
+      metadata = expected_metadata
+    }
   end
   return {
     publication = publication,
@@ -402,7 +598,7 @@ local function detail_candidate(pointer)
   end
   local decoded = nil
   local ok = pcall(function() decoded = cjson.decode(publication) end)
-  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v2" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) or type(decoded.fixtures) ~= "table" or #decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES} then
+  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v3" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) or type(decoded.fixtures) ~= "table" or #decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES} then
     return { publication = publication, manifest = null_value(), items = {} }
   end
   local manifest_key = "${LIVE_MATCHES_REDIS_PREFIX}:detail:" .. season .. ":" .. event_id .. ":" .. tostring(decoded.generation) .. ":manifest"
@@ -442,22 +638,108 @@ local function detail_candidate(pointer)
     table.insert(items, {
       fixtureId = item.fixtureId,
       key = item.key,
-      payload = read_string(item.key) or null_value(),
+      payload = null_value(),
       metadata = expected_metadata
     })
+  end
+  if mode ~= "FULL" then
+    -- HEAD and DESK do not need player-detail bodies. The producer-bound
+    -- item metadata above still has to be present, so a missing key cannot
+    -- make an intact publication look current and block the previous pointer.
+    -- The body SHA remains unverified until FULL; the TypeScript candidate is
+    -- therefore metadata-only and cannot become a complete process LKG.
+    return { publication = publication, manifest = manifest, items = items }
+  end
+
+  -- FULL reads the immutable item bytes so the TypeScript reader can verify
+  -- SHA256/length/count before constructing player projections.
+  for index, item in ipairs(decoded.fixtures) do
+    local payload = read_string(item.key)
+    if not payload then return { publication = publication, manifest = manifest, items = {} } end
+    items[index].payload = payload
   end
   return { publication = publication, manifest = manifest or null_value(), items = items }
 end
 
 return cjson.encode({
   eventId = event_id == "" and null_value() or tonumber(event_id),
-  desk = { active = desk_candidate("active"), previous = desk_candidate("previous") },
-  detail = { active = detail_candidate("active"), previous = detail_candidate("previous") }
+  desk = { active = desk_candidate(pointer), previous = { publication = null_value(), payload = null_value(), metadata = null_value() } },
+  detail = { active = detail_candidate(pointer), previous = { publication = null_value(), manifest = null_value(), items = {} } }
 })
 `;
 
-/** PostgreSQL is a cold fallback only; it is never part of the warm Redis path. */
-export const LIVE_MATCH_CHECKPOINT_SQL = `
+/**
+ * PostgreSQL is a cold fallback only; it is never part of the warm Redis path.
+ * Keep the projection aligned with the selected read mode: HEAD needs only
+ * publication metadata, DESK needs the desk payload, and FULL is the only
+ * mode allowed to deserialize fixture-player detail from PostgreSQL.
+ */
+const liveMatchCheckpointSql = (
+	includeDeskPayload: boolean,
+	includeDetailPayload: boolean
+): string => {
+	const metadataProjection = (
+		alias: string,
+		includeDetailColumns: boolean,
+		includePayload: boolean
+	): string => {
+		const detailColumns = includeDetailColumns
+			? `
+    'observed_desk_generation', ${alias}.observed_desk_generation,
+    'fixture_identity_revision', ${alias}.fixture_identity_revision,`
+			: "";
+		const payloadColumn = includePayload
+			? `
+    'payload', ${alias}.payload,`
+			: "";
+		const deskCoverage = includeDetailColumns
+			? ""
+			: `
+    'fixture_coverage', CASE
+      WHEN jsonb_typeof(${alias}.payload) = 'array' THEN jsonb_build_object(
+        'fixture_ids', COALESCE((
+          SELECT jsonb_agg(elements.fixture_item->'fixtureId' ORDER BY elements.fixture_ordinality)
+          FROM jsonb_array_elements(${alias}.payload) WITH ORDINALITY
+            AS elements(fixture_item, fixture_ordinality)
+        ), '[]'::jsonb),
+        'started_fixture_ids', COALESCE((
+          SELECT jsonb_agg(elements.fixture_item->'fixtureId' ORDER BY elements.fixture_ordinality)
+          FROM jsonb_array_elements(${alias}.payload) WITH ORDINALITY
+            AS elements(fixture_item, fixture_ordinality)
+          WHERE elements.fixture_item->>'started' = 'true'
+             OR elements.fixture_item->>'finished' = 'true'
+             OR elements.fixture_item->>'finishedProvisional' = 'true'
+             OR (elements.fixture_item->>'minutes') ~ '^[1-9][0-9]*$'
+        ), '[]'::jsonb)
+      )
+      ELSE NULL
+    END,`;
+		return `jsonb_build_object(
+    'contract_version', ${alias}.contract_version,
+    'publication_id', ${alias}.publication_id,
+    'generation', ${alias}.generation,
+    'state', ${alias}.state,${detailColumns}
+    ${deskCoverage}
+    ${payloadColumn}
+    'manifest', ${alias}.manifest,
+    'revisions', ${alias}.revisions,
+    'row_count', ${alias}.row_count,
+    'payload_bytes', ${alias}.payload_bytes,
+    'payload_sha256', ${alias}.payload_sha256,
+    'source_checked_at', ${alias}.source_checked_at,
+    'published_at', ${alias}.published_at,
+    'checkpointed_at', ${alias}.checkpointed_at,
+    'expected_next_check_at', ${alias}.expected_next_check_at,
+    'stale_at', ${alias}.stale_at
+  )`;
+	};
+	const deskProjection = includeDeskPayload
+		? "to_jsonb(checkpoint)"
+		: metadataProjection("checkpoint", false, true);
+	const detailProjection = includeDetailPayload
+		? "to_jsonb(checkpoint)"
+		: metadataProjection("checkpoint", true, false);
+	return `
 WITH target_event AS (
   SELECT COALESCE(
     $2::integer,
@@ -465,6 +747,7 @@ WITH target_event AS (
       SELECT checkpoint.event_id
       FROM fpl.live_match_desk_checkpoints checkpoint
       WHERE checkpoint.season_id = $1
+        AND checkpoint.contract_version = 'live-matches-v3'
       ORDER BY checkpoint.event_id DESC
       LIMIT 1
     )
@@ -473,32 +756,50 @@ WITH target_event AS (
 SELECT
   target_event.event_id,
   (
-    SELECT to_jsonb(checkpoint)
+    SELECT ${deskProjection}
     FROM fpl.live_match_desk_checkpoints checkpoint
     WHERE checkpoint.season_id = $1
       AND checkpoint.event_id = target_event.event_id
+      AND checkpoint.contract_version = 'live-matches-v3'
     LIMIT 1
   ) AS desk,
   (
-    SELECT to_jsonb(checkpoint)
+    SELECT ${detailProjection}
     FROM fpl.live_match_detail_checkpoints checkpoint
     WHERE checkpoint.season_id = $1
       AND checkpoint.event_id = target_event.event_id
+      AND checkpoint.contract_version = 'live-matches-v3'
     LIMIT 1
   ) AS detail
 FROM target_event
 `;
+};
+
+export const LIVE_MATCH_CHECKPOINT_HEAD_SQL = liveMatchCheckpointSql(false, false);
+export const LIVE_MATCH_CHECKPOINT_DESK_SQL = liveMatchCheckpointSql(true, false);
+export const LIVE_MATCH_CHECKPOINT_SQL = liveMatchCheckpointSql(true, true);
 
 /** Planner, decoded-column, and reader-role gate for the cold fallback. */
 export const LIVE_MATCHES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
-		name: "live-matches-v2.checkpoint-fallback",
+		name: "live-matches-v3.checkpoint-head-metadata",
+		sql: LIVE_MATCH_CHECKPOINT_HEAD_SQL,
+		values: [2026, 1],
+	},
+	{
+		name: "live-matches-v3.checkpoint-desk",
+		sql: LIVE_MATCH_CHECKPOINT_DESK_SQL,
+		values: [2026, 1],
+	},
+	{
+		name: "live-matches-v3.checkpoint-fallback",
 		sql: LIVE_MATCH_CHECKPOINT_SQL,
 		values: [2026, 1],
 		runtime: "must-return-row",
 		resultTypes: [
 			{ relation: "fpl.live_match_desk_checkpoints", column: "season_id", pgType: "smallint" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "contract_version", pgType: "text" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "publication_id", pgType: "text" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "generation", pgType: "bigint" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "state", pgType: "text" },
@@ -550,6 +851,7 @@ export const LIVE_MATCHES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			},
 			{ relation: "fpl.live_match_detail_checkpoints", column: "season_id", pgType: "smallint" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "contract_version", pgType: "text" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "publication_id", pgType: "text" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "generation", pgType: "bigint" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "state", pgType: "text" },
@@ -625,7 +927,10 @@ const validState = (value: unknown): value is MatchLifecycleState =>
 	]).has(value as MatchLifecycleState);
 
 const validRevision = (value: unknown): value is StreamRevision =>
-	isRecord(value) && /^[0-9a-f]{64}$/.test(String(value.revision)) && isIso(value.contentUpdatedAt);
+	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_REVISION_KEYS) &&
+	/^[0-9a-f]{64}$/.test(String(value.revision)) &&
+	isIso(value.contentUpdatedAt);
 
 const validPublicationItem = (
 	value: unknown,
@@ -633,6 +938,7 @@ const validPublicationItem = (
 	name: "desk"
 ): value is PublicationItem =>
 	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_PUBLICATION_ITEM_KEYS) &&
 	value.name === name &&
 	value.key === expectedKey &&
 	value.type === "string" &&
@@ -654,6 +960,7 @@ const validBasePublication = (
 	desk?: unknown;
 } =>
 	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_DESK_PUBLICATION_KEYS) &&
 	value.contractVersion === LIVE_MATCHES_CONTRACT_VERSION &&
 	validPublicationId(value.publicationId) &&
 	safeInteger(value.generation) !== null &&
@@ -667,6 +974,7 @@ const validBasePublication = (
 	(value.expectedNextCheckAt === null || isIso(value.expectedNextCheckAt)) &&
 	(value.staleAt === null || isIso(value.staleAt)) &&
 	isRecord(value.revisions) &&
+	hasExactKeys(value.revisions, LIVE_MATCH_DESK_REVISION_KEYS) &&
 	validRevision(value.revisions.lifecycle) &&
 	validRevision(value.revisions.fixtureIdentity) &&
 	validRevision(value.revisions.scoreState);
@@ -691,7 +999,7 @@ const validDetailItem = (
 	season: string,
 	eventId: number
 ): value is FixtureDetailItem => {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DETAIL_ITEM_KEYS)) return false;
 	const fixtureId = safeInteger(value.fixtureId);
 	return (
 		fixtureId !== null &&
@@ -719,6 +1027,7 @@ const parseDetailPublication = (
 	const value = parsedJson(raw);
 	if (
 		!isRecord(value) ||
+		!hasExactKeys(value, LIVE_MATCH_DETAIL_PUBLICATION_KEYS) ||
 		value.contractVersion !== LIVE_MATCHES_CONTRACT_VERSION ||
 		!validPublicationId(value.publicationId) ||
 		safeInteger(value.generation) === null ||
@@ -772,7 +1081,7 @@ const parsePayload = <T>(
 };
 
 const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFixture => {
-	if (!isRecord(value)) return false;
+	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DESK_FIXTURE_KEYS)) return false;
 	const fixtureId = safeInteger(value.fixtureId);
 	const event = safeInteger(value.eventId);
 	const homeTeamId = safeInteger(value.homeTeamId);
@@ -806,12 +1115,13 @@ const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFi
 
 const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 	if (!isRecord(value)) return false;
+	if (!hasExactKeys(value, LIVE_MATCH_DETAIL_PLAYER_KEYS)) return false;
 	const id = safeInteger(value.id);
 	const position = safeInteger(value.position);
 	const teamId = safeInteger(value.teamId);
 	const price = safeInteger(value.price);
 	const totalPoints = safeInteger(value.totalPoints);
-	return (
+	if (!(
 		id !== null &&
 		id > 0 &&
 		nonEmptyString(value.webName) &&
@@ -825,18 +1135,18 @@ const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 		totalPoints !== null &&
 		Array.isArray(value.stats) &&
 		value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&
-		new Set(value.stats.map((stat) => (isRecord(stat) ? stat.identifier : null))).size ===
-			value.stats.length &&
-		value.stats.every((stat) => {
-			if (!isRecord(stat)) return false;
-			return (
-				nonEmptyString(stat.identifier) &&
-				finiteNumber(stat.value) &&
-				finiteNumber(stat.points) &&
-				(stat.pointsModification === null || finiteNumber(stat.pointsModification))
-			);
-		})
+		new Set(value.stats.map((stat) => statIdentifierKey(isRecord(stat) ? stat.identifier : null)))
+			.size === value.stats.length &&
+		value.stats.every(validDetailStat)
+	))
+		return false;
+	const stats = value.stats as readonly unknown[];
+	const awardedPoints = stats.reduce<number>(
+		(sum, stat) =>
+			sum + (isRecord(stat) && finiteNumber(stat.awardedPoints) ? stat.awardedPoints : 0),
+		0
 	);
+	return awardedPoints === totalPoints;
 };
 
 const validDeskPayload = (value: unknown, eventId: number): value is readonly MatchDeskFixture[] =>
@@ -849,6 +1159,7 @@ const validDeskPayload = (value: unknown, eventId: number): value is readonly Ma
 
 const validFixtureDetail = (value: unknown): value is MatchFixtureDetail =>
 	isRecord(value) &&
+	hasExactKeys(value, LIVE_MATCH_DETAIL_FIXTURE_KEYS) &&
 	safeInteger(value.fixtureId) !== null &&
 	(safeInteger(value.fixtureId) as number) > 0 &&
 	Array.isArray(value.players) &&
@@ -887,6 +1198,32 @@ const validDetailForDesk = (
 	});
 };
 
+const deskFixtureCoverage = (fixtures: readonly MatchDeskFixture[]): MatchDeskFixtureCoverage => ({
+	fixtureIds: fixtures.map((fixture) => fixture.fixtureId),
+	startedFixtureIds: fixtures
+		.filter(
+			(fixture) =>
+				fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
+		)
+		.map((fixture) => fixture.fixtureId),
+});
+
+const deskFixtureTeamIds = (
+	fixtures: readonly MatchDeskFixture[]
+): ReadonlyMap<number, FixtureTeamIds> =>
+	new Map(
+		fixtures.map(
+			(fixture) => [fixture.fixtureId, [fixture.homeTeamId, fixture.awayTeamId] as const] as const
+		)
+	);
+
+const detailFixturePlayerTeamIds = (
+	fixtures: readonly MatchFixtureDetail[]
+): ReadonlyMap<number, readonly number[]> =>
+	new Map(
+		fixtures.map((fixture) => [fixture.fixtureId, fixture.players.map((player) => player.teamId)])
+	);
+
 const decodeDeskCandidate = (
 	raw: RedisDeskRaw,
 	season: string,
@@ -908,8 +1245,34 @@ const decodeDeskCandidate = (
 	return fixtures &&
 		fixtures.length === publication.desk.count &&
 		deskRevisionsMatchPayload(publication, fixtures)
-		? { publication, fixtures, servedFrom }
+		? {
+				publication,
+				fixtures,
+				fixtureCoverage: deskFixtureCoverage(fixtures),
+				fixtureTeamIds: deskFixtureTeamIds(fixtures),
+				payloadLoaded: true,
+				servedFrom,
+			}
 		: null;
+};
+
+const decodeDeskMetadataCandidate = (
+	raw: RedisDeskRaw,
+	season: string,
+	eventId: number,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): MatchDeskCandidate | null => {
+	const candidate = decodeDeskCandidate(raw, season, eventId, servedFrom);
+	return candidate === null
+		? null
+		: {
+				...candidate,
+				fixtures: [],
+				payloadLoaded: false,
+				fixtureCoverage: deskFixtureCoverage(candidate.fixtures),
+				fixtureTeamIds: deskFixtureTeamIds(candidate.fixtures),
+				servedFrom,
+			};
 };
 
 const sameDetailMetadata = (
@@ -982,6 +1345,50 @@ const decodeDetailCandidate = (
 	return {
 		publication,
 		fixtures,
+		observationRevision: detailManifestObservationRevision(publication),
+		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
+		payloadLoaded: true,
+		servedFrom,
+	};
+};
+
+const decodeDetailObservation = (
+	raw: RedisDetailRaw,
+	season: string,
+	eventId: number,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): MatchDetailObservation | null => {
+	const publication = parseDetailPublication(raw.publication, season, eventId);
+	const manifest = parseDetailPublication(raw.manifest, season, eventId);
+	if (
+		!publication ||
+		!manifest ||
+		!sameDetailMetadata(publication, manifest) ||
+		publication.fixtures.length > LIVE_MATCH_MAX_FIXTURES ||
+		raw.items.length !== publication.fixtures.length
+	)
+		return null;
+	const seen = new Set<string>();
+	for (const rawItem of raw.items) {
+		if (rawItem.fixtureId === null || rawItem.key === null) return null;
+		const publicationItem = publication.fixtures.find(
+			(item) => item.fixtureId === rawItem.fixtureId && item.key === rawItem.key
+		);
+		if (
+			!publicationItem ||
+			seen.has(`${rawItem.fixtureId}:${rawItem.key}`) ||
+			rawItem.metadata !==
+				`${publicationItem.count}|${publicationItem.bytes}|${publicationItem.sha256}`
+		)
+			return null;
+		seen.add(`${rawItem.fixtureId}:${rawItem.key}`);
+	}
+	if (seen.size !== publication.fixtures.length) return null;
+	return {
+		publication,
+		observationRevision: detailManifestObservationRevision(publication),
+		fixtures: [],
+		payloadLoaded: false,
 		servedFrom,
 	};
 };
@@ -989,14 +1396,18 @@ const decodeDetailCandidate = (
 const readRedisBundle = async (
 	redis: Redis,
 	season: string,
-	eventId?: number
+	eventId: number | undefined,
+	mode: LiveMatchReadMode = "FULL",
+	pointer: "active" | "previous" = "active"
 ): Promise<RedisReadBundle | null> => {
 	try {
 		const raw = await redis.eval(
-			LIVE_MATCHES_READ_BUNDLE_LUA,
+			LIVE_MATCHES_READ_POINTER_LUA,
 			0,
 			season,
-			eventId === undefined ? "" : String(eventId)
+			eventId === undefined ? "" : String(eventId),
+			pointer,
+			mode
 		);
 		if (typeof raw !== "string") return null;
 		if (Buffer.byteLength(raw, "utf8") > LIVE_MATCH_MAX_REDIS_BUNDLE_BYTES) return null;
@@ -1033,6 +1444,7 @@ const readRedisBundle = async (
 		};
 		return {
 			eventId: safeInteger(value.eventId),
+			pointer,
 			desk: {
 				active: candidate(value.desk.active),
 				previous: candidate(value.desk.previous),
@@ -1049,6 +1461,13 @@ const readRedisBundle = async (
 
 const lkgKey = (season: string, eventId: number): string => `${season}:${eventId}`;
 
+const rememberActiveEvent = (season: string, eventId: number): void => {
+	const current = processActiveEvent.get(season);
+	// Callers must invoke this only for an eventless pointer/checkpoint read;
+	// explicit event reads are intentionally excluded from this authority.
+	if (current === undefined || eventId >= current) processActiveEvent.set(season, eventId);
+};
+
 const isActiveLkgKey = (key: string): boolean => {
 	for (const [season, eventId] of processActiveEvent) {
 		if (lkgKey(season, eventId) === key) return true;
@@ -1058,6 +1477,7 @@ const isActiveLkgKey = (key: string): boolean => {
 
 const rememberLkg = (season: string, eventId: number, value: SelectedLkg): void => {
 	const key = lkgKey(season, eventId);
+	processMetadataLkg.delete(key);
 	if (processLkg.has(key)) processLkg.delete(key);
 	processLkg.set(key, value);
 	while (processLkg.size > LIVE_MATCHES_PROCESS_LKG_LIMIT) {
@@ -1070,7 +1490,48 @@ const rememberLkg = (season: string, eventId: number, value: SelectedLkg): void 
 	}
 };
 
+const asDetailObservation = (
+	candidate: MatchDetailReadCandidate | null
+): MatchDetailObservation | null =>
+	candidate === null
+		? null
+		: {
+				publication: candidate.publication,
+				observationRevision: candidate.observationRevision,
+				fixtures: [],
+				payloadLoaded: false,
+				servedFrom: candidate.servedFrom,
+			};
+
+const asMetadataLkg = (value: {
+	desk: MatchDeskCandidate;
+	detail: MatchDetailReadCandidate | null;
+}): MetadataLkg => ({
+	desk: { ...value.desk, fixtures: [], payloadLoaded: false },
+	detail: asDetailObservation(value.detail),
+});
+
+const rememberMetadataLkg = (season: string, eventId: number, value: MetadataLkg): void => {
+	const key = lkgKey(season, eventId);
+	// This is a separate metadata observation cache. A complete LKG remains the
+	// stronger recovery source; metadata must never replace it or cause an
+	// unverified detail payload to be retained for a heartbeat.
+	if (processLkg.has(key)) return;
+	if (processMetadataLkg.has(key)) processMetadataLkg.delete(key);
+	processMetadataLkg.set(key, asMetadataLkg(value));
+	while (processMetadataLkg.size > LIVE_MATCHES_PROCESS_LKG_LIMIT) {
+		const oldest = [...processMetadataLkg.keys()].find((candidate) => !isActiveLkgKey(candidate));
+		if (oldest === undefined) break;
+		processMetadataLkg.delete(oldest);
+	}
+};
+
 const asProcessLkg = (value: SelectedLkg): SelectedLkg => ({
+	desk: { ...value.desk, servedFrom: "PROCESS_LKG" },
+	detail: value.detail ? { ...value.detail, servedFrom: "PROCESS_LKG" } : null,
+});
+
+const asProcessMetadataLkg = (value: MetadataLkg): MetadataLkg => ({
 	desk: { ...value.desk, servedFrom: "PROCESS_LKG" },
 	detail: value.detail ? { ...value.detail, servedFrom: "PROCESS_LKG" } : null,
 });
@@ -1137,17 +1598,68 @@ const chooseDetail = (
 	return selected;
 };
 
-const selectNewestDesk = (
-	candidates: readonly (MatchDeskCandidate | null)[]
-): MatchDeskCandidate | null => {
-	let selected: MatchDeskCandidate | null = null;
-	for (const candidate of candidates) {
-		if (!candidate) continue;
-		if (!selected) {
-			selected = candidate;
-			continue;
+const compatibleDetailMetadata = (
+	desk: MatchDeskCandidate,
+	detail: MatchDetailReadCandidate | null
+): detail is MatchDetailReadCandidate => {
+	if (!detail) return false;
+	if (desk.servedFrom === "REDIS_PREVIOUS" && detail.servedFrom === "REDIS_CURRENT") return false;
+	const coverage =
+		desk.fixtureCoverage ??
+		(desk.fixtures.length === desk.publication.desk.count
+			? deskFixtureCoverage(desk.fixtures)
+			: null);
+	if (!coverage) return false;
+	const deskFixtureIds = new Set(coverage.fixtureIds);
+	const detailFixtureIds = detail.publication.fixtures.map((item) => item.fixtureId);
+	const detailFixtureIdSet = new Set(detailFixtureIds);
+	// A manifest is useful for revision observation only after its fixture set is
+	// proven to describe this exact desk. Do not let metadata-only reads hide a
+	// missing started fixture or introduce a foreign fixture.
+	if (
+		detailFixtureIdSet.size !== detailFixtureIds.length ||
+		detailFixtureIds.some((fixtureId) => !deskFixtureIds.has(fixtureId)) ||
+		coverage.startedFixtureIds.some((fixtureId) => {
+			const descriptor = detail.publication.fixtures.find((item) => item.fixtureId === fixtureId);
+			return (
+				!detailFixtureIdSet.has(fixtureId) || descriptor === undefined || descriptor.count <= 0
+			);
+		})
+	)
+		return false;
+	for (const fixtureId of detailFixtureIds) {
+		const deskFixture = desk.fixtures.find((fixture) => fixture.fixtureId === fixtureId);
+		const deskTeamIds =
+			desk.fixtureTeamIds?.get(fixtureId) ??
+			(deskFixture ? ([deskFixture.homeTeamId, deskFixture.awayTeamId] as const) : undefined);
+		const playerTeamIds =
+			("fixturePlayerTeamIds" in detail
+				? detail.fixturePlayerTeamIds?.get(fixtureId)
+				: undefined) ??
+			detail.fixtures
+				.find((fixture) => fixture.fixtureId === fixtureId)
+				?.players.map((player) => player.teamId);
+		if (playerTeamIds !== undefined) {
+			if (!deskTeamIds) return false;
+			const allowedTeamIds = new Set(deskTeamIds);
+			if (playerTeamIds.some((teamId) => !allowedTeamIds.has(teamId))) return false;
 		}
-		if (candidate.publication.generation > selected.publication.generation) {
+	}
+	return (
+		detail.publication.observedDeskGeneration <= desk.publication.generation &&
+		detail.publication.fixtureIdentityRevision ===
+			desk.publication.revisions.fixtureIdentity.revision
+	);
+};
+
+const chooseDetailMetadata = (
+	desk: MatchDeskCandidate,
+	candidates: readonly (MatchDetailReadCandidate | null)[]
+): MatchDetailReadCandidate | null => {
+	let selected: MatchDetailReadCandidate | null = null;
+	for (const candidate of candidates) {
+		if (!compatibleDetailMetadata(desk, candidate)) continue;
+		if (!selected || candidate.publication.generation > selected.publication.generation) {
 			selected = candidate;
 			continue;
 		}
@@ -1180,11 +1692,44 @@ const checkpointManifest = (value: unknown): string | null => {
 	return Buffer.byteLength(raw, "utf8") <= LIVE_MATCH_MAX_PUBLICATION_BYTES ? raw : null;
 };
 
-const buildPostgresDesk = (
+type PostgresDeskMetadata = Readonly<{
+	publication: MatchDeskPublication;
+	fixtureCoverage: MatchDeskFixtureCoverage;
+	rowCount: number;
+	bytes: number;
+	checksum: string;
+}>;
+
+const parseDeskFixtureCoverage = (value: unknown): MatchDeskFixtureCoverage | null => {
+	if (
+		!isRecord(value) ||
+		!Array.isArray(value.fixture_ids) ||
+		!Array.isArray(value.started_fixture_ids)
+	)
+		return null;
+	const fixtureIds = value.fixture_ids.map(safeInteger);
+	const startedFixtureIds = value.started_fixture_ids.map(safeInteger);
+	if (
+		fixtureIds.some((fixtureId) => fixtureId === null || fixtureId <= 0) ||
+		startedFixtureIds.some((fixtureId) => fixtureId === null || fixtureId <= 0)
+	)
+		return null;
+	const normalizedFixtureIds = fixtureIds as number[];
+	const normalizedStartedFixtureIds = startedFixtureIds as number[];
+	if (
+		new Set(normalizedFixtureIds).size !== normalizedFixtureIds.length ||
+		new Set(normalizedStartedFixtureIds).size !== normalizedStartedFixtureIds.length ||
+		normalizedStartedFixtureIds.some((fixtureId) => !normalizedFixtureIds.includes(fixtureId))
+	)
+		return null;
+	return { fixtureIds: normalizedFixtureIds, startedFixtureIds: normalizedStartedFixtureIds };
+};
+
+const parsePostgresDeskMetadata = (
 	row: unknown,
 	season: string,
 	eventId: number
-): MatchDeskCandidate | null => {
+): PostgresDeskMetadata | null => {
 	if (!isRecord(row)) return null;
 	const manifest = checkpointManifest(row.manifest);
 	const publication = parseDeskPublication(manifest, season, eventId);
@@ -1196,6 +1741,7 @@ const buildPostgresDesk = (
 		!publication ||
 		generation === null ||
 		generation <= 0 ||
+		row.contract_version !== LIVE_MATCHES_CONTRACT_VERSION ||
 		row.publication_id !== publication.publicationId ||
 		generation !== publication.generation ||
 		row.state !== publication.state ||
@@ -1219,23 +1765,80 @@ const buildPostgresDesk = (
 		publication.desk.sha256 !== checksum
 	)
 		return null;
-	const payload = checkpointPayload(row.payload);
-	if (
-		!validDeskPayload(payload, eventId) ||
-		(payload as readonly unknown[]).length !== rowCount ||
-		canonicalBytes(payload) !== bytes ||
-		sha256(payload) !== checksum
-	)
-		return null;
-	if (!deskRevisionsMatchPayload(publication, payload)) return null;
-	return { publication, fixtures: payload, servedFrom: "POSTGRES_CHECKPOINT" };
+	const fixtureCoverage = parseDeskFixtureCoverage(row.fixture_coverage);
+	if (!fixtureCoverage || fixtureCoverage.fixtureIds.length !== rowCount) return null;
+	return { publication, fixtureCoverage, rowCount, bytes, checksum };
 };
 
-const buildPostgresDetail = (
+const buildPostgresDeskMetadata = (
 	row: unknown,
 	season: string,
 	eventId: number
-): MatchDetailCandidate | null => {
+): MatchDeskCandidate | null => {
+	if (!isRecord(row)) return null;
+	const metadata = parsePostgresDeskMetadata(row, season, eventId);
+	if (!metadata) return null;
+	const payload = checkpointPayload(row.payload);
+	const deskPayload = validDeskPayload(payload, eventId) ? payload : null;
+	const fixtureCoverage = deskPayload === null ? null : deskFixtureCoverage(deskPayload);
+	if (
+		deskPayload === null ||
+		deskPayload.length !== metadata.rowCount ||
+		canonicalBytes(deskPayload) !== metadata.bytes ||
+		sha256(deskPayload) !== metadata.checksum ||
+		!deskRevisionsMatchPayload(metadata.publication, deskPayload) ||
+		fixtureCoverage === null ||
+		stableJson(fixtureCoverage) !== stableJson(metadata.fixtureCoverage)
+	)
+		return null;
+	return {
+		publication: metadata.publication,
+		fixtures: [],
+		fixtureCoverage,
+		fixtureTeamIds: deskFixtureTeamIds(deskPayload),
+		payloadLoaded: false,
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
+};
+
+const buildPostgresDesk = (
+	row: unknown,
+	season: string,
+	eventId: number
+): MatchDeskCandidate | null => {
+	if (!isRecord(row)) return null;
+	const metadata = parsePostgresDeskMetadata(row, season, eventId);
+	if (!metadata) return null;
+	const payload = checkpointPayload(row.payload);
+	if (
+		!validDeskPayload(payload, eventId) ||
+		(payload as readonly unknown[]).length !== metadata.rowCount ||
+		canonicalBytes(payload) !== metadata.bytes ||
+		sha256(payload) !== metadata.checksum
+	)
+		return null;
+	if (!deskRevisionsMatchPayload(metadata.publication, payload)) return null;
+	return {
+		publication: metadata.publication,
+		fixtures: payload,
+		fixtureCoverage: deskFixtureCoverage(payload),
+		fixtureTeamIds: deskFixtureTeamIds(payload),
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
+};
+
+type PostgresDetailMetadata = Readonly<{
+	publication: MatchDetailPublication;
+	rowCount: number;
+	bytes: number;
+	checksum: string;
+}>;
+
+const parsePostgresDetailMetadata = (
+	row: unknown,
+	season: string,
+	eventId: number
+): PostgresDetailMetadata | null => {
 	if (!isRecord(row)) return null;
 	const manifest = checkpointManifest(row.manifest);
 	const publication = parseDetailPublication(manifest, season, eventId);
@@ -1250,6 +1853,7 @@ const buildPostgresDetail = (
 		!publication ||
 		generation === null ||
 		generation <= 0 ||
+		row.contract_version !== LIVE_MATCHES_CONTRACT_VERSION ||
 		row.publication_id !== publication.publicationId ||
 		generation !== publication.generation ||
 		row.state !== (publication.finalized ? "FINALIZED" : "PROVISIONAL") ||
@@ -1277,17 +1881,28 @@ const buildPostgresDetail = (
 		publication.fixtures.length !== rowCount
 	)
 		return null;
+	return { publication, rowCount, bytes, checksum };
+};
+
+const buildPostgresDetail = (
+	row: unknown,
+	season: string,
+	eventId: number
+): MatchDetailCandidate | null => {
+	if (!isRecord(row)) return null;
+	const metadata = parsePostgresDetailMetadata(row, season, eventId);
+	if (!metadata) return null;
 	const payload = checkpointPayload(row.payload);
 	if (
 		!validDetailPayload(payload) ||
-		(payload as readonly unknown[]).length !== rowCount ||
-		canonicalBytes(payload) !== bytes ||
-		sha256(payload) !== checksum
+		(payload as readonly unknown[]).length !== metadata.rowCount ||
+		canonicalBytes(payload) !== metadata.bytes ||
+		sha256(payload) !== metadata.checksum
 	)
 		return null;
 	const fixtures = payload as readonly MatchFixtureDetail[];
 	for (const [index, fixture] of fixtures.entries()) {
-		const item = publication.fixtures[index];
+		const item = metadata.publication.fixtures[index];
 		if (
 			!item ||
 			item.fixtureId !== fixture.fixtureId ||
@@ -1297,7 +1912,14 @@ const buildPostgresDetail = (
 		)
 			return null;
 	}
-	return { publication, fixtures, servedFrom: "POSTGRES_CHECKPOINT" };
+	return {
+		publication: metadata.publication,
+		fixtures,
+		observationRevision: detailManifestObservationRevision(metadata.publication),
+		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
+		payloadLoaded: true,
+		servedFrom: "POSTGRES_CHECKPOINT",
+	};
 };
 
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number): Promise<T> => {
@@ -1331,27 +1953,46 @@ const readPostgresCheckpoint = async (
 	context: GraphQLContext,
 	seasonId: number,
 	season: string,
-	eventId: number | null
+	eventId: number | null,
+	mode: LiveMatchReadMode
 ): Promise<PostgresCheckpointRead | null> => {
 	if (!postgresCircuitAllowsRead()) return null;
-	const scope = eventId === null ? `${season}:active` : lkgKey(season, eventId);
+	const scope = `${mode}:${eventId === null ? `${season}:active` : lkgKey(season, eventId)}`;
 	const existing = postgresReadFlights.get(scope);
 	if (existing) return existing;
+	const checkpointSql =
+		mode === "HEAD"
+			? LIVE_MATCH_CHECKPOINT_HEAD_SQL
+			: mode === "DESK"
+				? LIVE_MATCH_CHECKPOINT_DESK_SQL
+				: LIVE_MATCH_CHECKPOINT_SQL;
 	const flight = withTimeout(
-		context.database.query<CheckpointRow>(LIVE_MATCH_CHECKPOINT_SQL, [seasonId, eventId]),
+		context.database.query<CheckpointRow>(checkpointSql, [seasonId, eventId]),
 		LIVE_MATCHES_POSTGRES_TIMEOUT_MS
 	)
 		.then((result) => {
 			const row = result.rows[0];
 			resetPostgresCircuit();
 			const selectedEventId = row ? safeInteger(row.event_id) : null;
-			return row && selectedEventId !== null && selectedEventId > 0
-				? {
-						eventId: selectedEventId,
-						desk: buildPostgresDesk(row.desk, season, selectedEventId),
-						detail: buildPostgresDetail(row.detail, season, selectedEventId),
-					}
-				: { eventId: null, desk: null, detail: null };
+			if (!row || selectedEventId === null || selectedEventId <= 0) {
+				return { eventId: null, desk: null, detail: null };
+			}
+			const desk =
+				mode === "HEAD"
+					? buildPostgresDeskMetadata(row.desk, season, selectedEventId)
+					: buildPostgresDesk(row.desk, season, selectedEventId);
+			if (!desk) {
+				context.logger.warn(
+					{ eventId: selectedEventId },
+					"Live Match PostgreSQL checkpoint invalid"
+				);
+				return null;
+			}
+			return {
+				eventId: selectedEventId,
+				desk,
+				detail: mode === "FULL" ? buildPostgresDetail(row.detail, season, selectedEventId) : null,
+			};
 		})
 		.catch((error) => {
 			openPostgresCircuit();
@@ -1368,11 +2009,14 @@ const readPostgresCheckpoint = async (
 	return flight;
 };
 
-const allFixturesStarted = (desk: MatchDeskCandidate): boolean =>
-	desk.fixtures.some(
+const allFixturesStarted = (desk: MatchDeskCandidate): boolean => {
+	if (desk.payloadLoaded === false)
+		return (desk.fixtureCoverage?.startedFixtureIds.length ?? 0) > 0;
+	return desk.fixtures.some(
 		(fixture) =>
 			fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
 	);
+};
 
 const detailFallbackKey = (season: string, eventId: number, desk: MatchDeskCandidate): string =>
 	`${season}:${eventId}:${desk.publication.publicationId}:${desk.publication.generation}`;
@@ -1428,7 +2072,13 @@ const rememberScopedEventCheckpointCheck = (
 	processEventCheckedAt.set(key, { checkedAt, failed });
 };
 
-const reserveScopedEventCheckpointBudget = (season: string, now = Date.now()): boolean => {
+const checkpointCheckKey = (season: string, eventId: number, mode: LiveMatchReadMode): string =>
+	`${mode}:${lkgKey(season, eventId)}`;
+
+const unscopedCheckpointCheckKey = (season: string, mode: LiveMatchReadMode): string =>
+	`UNSCOPED:${mode}:${season}`;
+
+const reserveExplicitEventCheckpointBudget = (season: string, now = Date.now()): boolean => {
 	const budget = processEventCheckpointBudget.get(season);
 	if (!budget) {
 		processEventCheckpointBudget.set(season, { windowStartedAt: now, attempts: 1 });
@@ -1449,9 +2099,60 @@ const reserveScopedEventCheckpointBudget = (season: string, now = Date.now()): b
 const requestedEventId = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : Number.isSafeInteger(value) && value > 0 ? value : undefined;
 
+const decodeRedisCandidates = (
+	bundle: RedisReadBundle,
+	season: string,
+	eventId: number,
+	mode: LiveMatchReadMode,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): { desk: MatchDeskCandidate | null; detail: MatchDetailReadCandidate | null } => {
+	// The production Lua reader returns the selected pointer in `active` and
+	// leaves the sibling slot empty. Test doubles and future read scripts may
+	// return both slots, so prefer the explicitly selected slot when it exists
+	// without making the normal current path inspect previous payloads.
+	const deskRaw =
+		servedFrom === "REDIS_PREVIOUS" && bundle.desk.previous.publication !== null
+			? bundle.desk.previous
+			: bundle.desk.active;
+	const detailRaw =
+		servedFrom === "REDIS_PREVIOUS" && bundle.detail.previous.publication !== null
+			? bundle.detail.previous
+			: bundle.detail.active;
+	return {
+		desk:
+			mode === "HEAD"
+				? decodeDeskMetadataCandidate(deskRaw, season, eventId, servedFrom)
+				: decodeDeskCandidate(deskRaw, season, eventId, servedFrom),
+		detail:
+			mode === "FULL"
+				? decodeDetailCandidate(detailRaw, season, eventId, servedFrom)
+				: decodeDetailObservation(detailRaw, season, eventId, servedFrom),
+	};
+};
+
+const chooseDetailObservation = (
+	desk: MatchDeskCandidate,
+	candidates: readonly (MatchDetailReadCandidate | null)[]
+): MatchDetailObservation | null => asDetailObservation(chooseDetailMetadata(desk, candidates));
+
+const isCompleteDetailCandidate = (
+	candidate: MatchDetailReadCandidate | null
+): candidate is MatchDetailCandidate => candidate !== null && candidate.payloadLoaded === true;
+
+const chooseCompleteDetail = (
+	desk: MatchDeskCandidate,
+	candidates: readonly (MatchDetailReadCandidate | null)[]
+): MatchDetailCandidate | null => chooseDetail(desk, candidates.filter(isCompleteDetailCandidate));
+
+/**
+ * Read one publication mode without paying the full detail cost on every
+ * heartbeat. The active pointer is the normal path; previous is queried only
+ * after the selected active candidate fails validation or compatibility.
+ */
 export const readLiveMatchday = async (
 	context: GraphQLContext,
-	eventId?: number
+	eventId?: number,
+	mode: LiveMatchReadMode = "FULL"
 ): Promise<LiveMatchdayRead> => {
 	const season = context.currentSeason.seasonCode;
 	const requested = requestedEventId(eventId);
@@ -1459,184 +2160,278 @@ export const readLiveMatchday = async (
 		return {
 			season,
 			eventId: null,
+			invalidEventId: true,
+			readMode: mode,
 			desk: null,
 			detail: null,
 			redisReadFailed: false,
 			postgresReadFailed: false,
+			redisRoundtrips: 0,
 		};
 
-	const redisBundle = await readRedisBundle(context.redis, season, requested);
-	const redisReadFailed = redisBundle === null;
 	const cachedActiveEvent = processActiveEvent.get(season);
+	const cachedActiveEventKey =
+		cachedActiveEvent === undefined ? null : lkgKey(season, cachedActiveEvent);
+	let redisRoundtrips = 0;
+	const readRedis = async (
+		requestedEvent: number | undefined,
+		pointer: "active" | "previous"
+	): Promise<RedisReadBundle | null> => {
+		redisRoundtrips += 1;
+		return readRedisBundle(context.redis, season, requestedEvent, mode, pointer);
+	};
+	const activeBundle = await readRedis(requested, "active");
+	let redisReadFailed = activeBundle === null;
+
+	let postgresReadFailed = false;
 	let unscopedPostgres: PostgresCheckpointRead | null | undefined;
-	const shouldRevalidateActiveEvent =
+	const redisPointerMissing =
+		requested === undefined && activeBundle !== null && activeBundle.eventId === null;
+	const recentActiveEventCheck =
+		redisPointerMissing && cachedActiveEventKey !== null
+			? recentScopedEventCheckpointCheck(checkpointCheckKey(season, cachedActiveEvent!, mode))
+			: null;
+	let selectedEventId =
+		requested ??
+		activeBundle?.eventId ??
+		(redisPointerMissing
+			? recentActiveEventCheck !== null
+				? cachedActiveEvent
+				: null
+			: cachedActiveEvent) ??
+		null;
+	if (recentActiveEventCheck !== null) postgresReadFailed = recentActiveEventCheck.failed;
+	if (
 		requested === undefined &&
-		(redisBundle === null || redisBundle.eventId === null) &&
-		(cachedActiveEvent === undefined ||
-			Date.now() - (processActiveEventCheckedAt.get(season) ?? 0) >=
-				LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS);
-	if (shouldRevalidateActiveEvent) {
+		activeBundle?.eventId !== null &&
+		activeBundle?.eventId !== undefined
+	) {
+		processActiveEvent.set(season, activeBundle.eventId);
+	}
+
+	const recentUnscopedCheckpointCheck =
+		selectedEventId === null && cachedActiveEvent === undefined
+			? recentScopedEventCheckpointCheck(unscopedCheckpointCheckKey(season, mode))
+			: null;
+	if (recentUnscopedCheckpointCheck !== null)
+		postgresReadFailed = recentUnscopedCheckpointCheck.failed;
+	if (selectedEventId === null && recentUnscopedCheckpointCheck === null) {
 		unscopedPostgres = await readPostgresCheckpoint(
 			context,
 			context.currentSeason.seasonId,
 			season,
-			null
+			null,
+			mode
 		);
-		processActiveEventCheckedAt.set(season, Date.now());
+		postgresReadFailed = unscopedPostgres === null;
+		rememberScopedEventCheckpointCheck(
+			unscopedCheckpointCheckKey(season, mode),
+			postgresReadFailed
+		);
+		selectedEventId = unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
+		if (selectedEventId !== null) {
+			rememberActiveEvent(season, selectedEventId);
+			rememberScopedEventCheckpointCheck(
+				checkpointCheckKey(season, selectedEventId, mode),
+				postgresReadFailed
+			);
+		}
 	}
-	const selectedEventId =
-		requested ?? redisBundle?.eventId ?? unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
-	if (
-		requested === undefined &&
-		redisBundle?.eventId !== null &&
-		redisBundle?.eventId !== undefined
-	)
-		processActiveEvent.set(season, redisBundle.eventId);
-	if (
-		requested === undefined &&
-		selectedEventId !== null &&
-		unscopedPostgres?.eventId === selectedEventId
-	)
-		processActiveEvent.set(season, selectedEventId);
+
 	if (selectedEventId === null) {
-		const postgres =
-			unscopedPostgres !== undefined
-				? unscopedPostgres
-				: await readPostgresCheckpoint(context, context.currentSeason.seasonId, season, null);
-		const fallbackEventId = postgres?.eventId ?? null;
-		const fallbackDesk = postgres?.desk ?? null;
-		const fallbackDetail = fallbackDesk
-			? chooseDetail(fallbackDesk, [postgres?.detail ?? null])
-			: null;
-		if (fallbackEventId !== null && fallbackDesk) {
-			processActiveEvent.set(season, fallbackEventId);
-			rememberLkg(season, fallbackEventId, { desk: fallbackDesk, detail: fallbackDetail });
-		}
 		return {
 			season,
-			eventId: fallbackEventId,
-			desk: fallbackDesk,
-			detail: fallbackDetail,
-			redisReadFailed,
-			postgresReadFailed: postgres === null,
-		};
-	}
-
-	const redisDesk = redisBundle
-		? [
-				decodeDeskCandidate(redisBundle.desk.active, season, selectedEventId, "REDIS_CURRENT"),
-				decodeDeskCandidate(redisBundle.desk.previous, season, selectedEventId, "REDIS_PREVIOUS"),
-			].filter((value): value is MatchDeskCandidate => value !== null)
-		: [];
-	const redisDetail = redisBundle
-		? [
-				decodeDetailCandidate(redisBundle.detail.active, season, selectedEventId, "REDIS_CURRENT"),
-				decodeDetailCandidate(
-					redisBundle.detail.previous,
-					season,
-					selectedEventId,
-					"REDIS_PREVIOUS"
-				),
-			].filter((value): value is MatchDetailCandidate => value !== null)
-		: [];
-	const stored = processLkg.get(lkgKey(season, selectedEventId));
-	const processLkgValue = stored ? asProcessLkg(stored) : null;
-	const processDesk = processLkgValue?.desk ?? null;
-	const redisDeskCandidate = redisDesk[0] ?? null;
-	const initialDesk = redisDeskCandidate ?? processDesk;
-
-	let postgresReadFailed = unscopedPostgres === null;
-	let postgres: PostgresCheckpointRead | null =
-		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
-	const scopedEventKey = lkgKey(season, selectedEventId);
-	const scopedEventNeedsCheckpoint =
-		requested !== undefined && (redisBundle === null || redisDeskCandidate === null);
-	const recentScopedCheck = scopedEventNeedsCheckpoint
-		? recentScopedEventCheckpointCheck(scopedEventKey)
-		: null;
-	let scopedPostgresAttempted = recentScopedCheck !== null;
-	if (scopedEventNeedsCheckpoint && recentScopedCheck === null) {
-		if (reserveScopedEventCheckpointBudget(season)) {
-			postgres = await readPostgresCheckpoint(
-				context,
-				context.currentSeason.seasonId,
-				season,
-				selectedEventId
-			);
-			postgresReadFailed = postgres === null;
-			rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
-			scopedPostgresAttempted = true;
-		} else {
-			// A rotating set of explicit misses must not turn the bounded per-event
-			// cache into one cold PostgreSQL read per request. Reserve the budget
-			// before awaiting the query so concurrent misses cannot all pass the
-			// admission check; Redis/process LKG candidates remain eligible and the
-			// next window can retry PostgreSQL.
-			scopedPostgresAttempted = true;
-		}
-	} else if (recentScopedCheck !== null) postgresReadFailed = recentScopedCheck.failed;
-	const retainedDetail = initialDesk
-		? chooseDetail(initialDesk, [
-				...redisDetail,
-				processLkgValue?.detail ?? null,
-				postgres?.detail ?? null,
-			])
-		: null;
-	if (
-		!initialDesk ||
-		(allFixturesStarted(initialDesk) &&
-			retainedDetail === null &&
-			detailCheckpointMayBeRetried(season, selectedEventId, initialDesk))
-	) {
-		if (unscopedPostgres === undefined && !scopedPostgresAttempted) {
-			postgres = await readPostgresCheckpoint(
-				context,
-				context.currentSeason.seasonId,
-				season,
-				selectedEventId
-			);
-			postgresReadFailed = postgres === null;
-			if (initialDesk && postgres !== null && chooseDetail(initialDesk, [postgres.detail]) === null)
-				rememberMissingDetailCheckpoint(season, selectedEventId, initialDesk);
-		}
-	}
-	const effectiveDesk =
-		redisDeskCandidate ?? selectNewestDesk([processDesk, postgres?.desk ?? null]);
-	if (!effectiveDesk)
-		return {
-			season,
-			eventId: selectedEventId,
+			eventId: null,
+			readMode: mode,
 			desk: null,
 			detail: null,
 			redisReadFailed,
 			postgresReadFailed,
+			redisRoundtrips,
 		};
+	}
 
-	const detail = chooseDetail(
-		effectiveDesk,
-		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT"
-			? [...redisDetail, postgres?.detail ?? null, processLkgValue?.detail ?? null]
-			: [retainedDetail, postgres?.detail ?? null]
-	);
+	const active = activeBundle
+		? decodeRedisCandidates(activeBundle, season, selectedEventId, mode, "REDIS_CURRENT")
+		: { desk: null, detail: null };
+	let previous: { desk: MatchDeskCandidate | null; detail: MatchDetailReadCandidate | null } = {
+		desk: null,
+		detail: null,
+	};
+	const activeDetailNeedsFallback =
+		activeBundle !== null &&
+		active.desk !== null &&
+		(mode === "FULL" ? chooseCompleteDetail(active.desk, [active.detail]) : active.detail) ===
+			null &&
+		(activeBundle.detail.active.publication !== null || allFixturesStarted(active.desk));
+	const previousAttempted =
+		activeBundle !== null && (active.desk === null || activeDetailNeedsFallback);
+	if (previousAttempted) {
+		const previousBundle = await readRedis(selectedEventId, "previous");
+		if (previousBundle === null) {
+			redisReadFailed = true;
+		} else {
+			previous = decodeRedisCandidates(
+				previousBundle,
+				season,
+				selectedEventId,
+				mode,
+				"REDIS_PREVIOUS"
+			);
+		}
+	}
+
+	const scopedEventKey = lkgKey(season, selectedEventId);
+	const scopedCheckpointCheckKey = checkpointCheckKey(season, selectedEventId, mode);
+	const processLkgValue = processLkg.get(scopedEventKey);
+	const processMetadataLkgValue =
+		mode === "HEAD" ? processMetadataLkg.get(scopedEventKey) : undefined;
+	const processLkgCandidate = processLkgValue ? asProcessLkg(processLkgValue) : null;
+	const processMetadataCandidate = processMetadataLkgValue
+		? asProcessMetadataLkg(processMetadataLkgValue)
+		: null;
+	let effectiveDesk =
+		active.desk ??
+		previous.desk ??
+		processLkgCandidate?.desk ??
+		processMetadataCandidate?.desk ??
+		null;
+	let postgres: PostgresCheckpointRead | null =
+		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
+	const redisDeskAvailable = active.desk !== null || previous.desk !== null;
+	const detailNeedsPostgres =
+		mode === "FULL" &&
+		effectiveDesk !== null &&
+		allFixturesStarted(effectiveDesk) &&
+		chooseCompleteDetail(effectiveDesk, [
+			active.detail,
+			previous.detail,
+			processLkgCandidate?.detail ?? null,
+		]) === null;
+	const needsPostgres =
+		effectiveDesk === null ||
+		(detailNeedsPostgres && detailCheckpointMayBeRetried(season, selectedEventId, effectiveDesk));
+	let scopedPostgresAttempted = unscopedPostgres !== undefined;
+	const recentScopedCheck = !redisDeskAvailable
+		? requested !== undefined
+			? recentScopedEventCheckpointCheck(scopedCheckpointCheckKey)
+			: selectedEventId === cachedActiveEvent
+				? (recentActiveEventCheck ?? recentScopedEventCheckpointCheck(scopedCheckpointCheckKey))
+				: null
+		: null;
+	if (recentScopedCheck !== null) {
+		scopedPostgresAttempted = true;
+		postgresReadFailed = recentScopedCheck.failed;
+	}
+	const explicitEventMiss = requested !== undefined && effectiveDesk === null;
+	const shouldAttemptScopedPostgres =
+		needsPostgres &&
+		!scopedPostgresAttempted &&
+		recentScopedCheck === null &&
+		(!explicitEventMiss || reserveExplicitEventCheckpointBudget(season));
+	if (shouldAttemptScopedPostgres) {
+		postgres = await readPostgresCheckpoint(
+			context,
+			context.currentSeason.seasonId,
+			season,
+			selectedEventId,
+			mode
+		);
+		postgresReadFailed = postgres === null;
+		if (
+			detailNeedsPostgres &&
+			effectiveDesk !== null &&
+			(postgres === null || postgres.detail === null)
+		) {
+			rememberMissingDetailCheckpoint(season, selectedEventId, effectiveDesk);
+		}
+		rememberScopedEventCheckpointCheck(scopedCheckpointCheckKey, postgresReadFailed);
+	}
+
+	if (effectiveDesk === null) effectiveDesk = postgres?.desk ?? null;
+	if (effectiveDesk === null) {
+		return {
+			season,
+			eventId: selectedEventId,
+			readMode: mode,
+			desk: null,
+			detail: null,
+			redisReadFailed,
+			postgresReadFailed,
+			redisRoundtrips,
+		};
+	}
+
+	const detailObservation =
+		mode === "FULL"
+			? null
+			: chooseDetailObservation(effectiveDesk, [
+					active.detail,
+					previous.detail,
+					processLkgCandidate?.detail ?? null,
+					processMetadataCandidate?.detail ?? null,
+					postgres?.detail ?? null,
+				]);
+	const detail =
+		mode === "FULL"
+			? chooseCompleteDetail(effectiveDesk, [
+					active.detail,
+					previous.detail,
+					processLkgCandidate?.detail ?? null,
+					postgres?.detail ?? null,
+				])
+			: null;
 	const result = {
 		season,
 		eventId: selectedEventId,
+		readMode: mode,
 		desk: effectiveDesk,
+		detailObservation,
 		detail,
 		redisReadFailed,
 		postgresReadFailed,
+		redisRoundtrips,
 	};
-	rememberLkg(season, selectedEventId, {
-		desk: effectiveDesk,
-		detail,
-	});
+	// An explicit event read is scoped to the caller's requested event. It may
+	// populate that event's LKG, but it must not redefine the process-global
+	// active-event authority used by later eventless outage fallbacks.
+	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
+	if (mode === "HEAD" && !processLkg.has(scopedEventKey)) {
+		rememberMetadataLkg(season, selectedEventId, {
+			desk: effectiveDesk,
+			detail: detailObservation,
+		});
+	}
+	const completeDetailForLkg =
+		mode === "FULL"
+			? detail
+			: chooseCompleteDetail(effectiveDesk, [processLkgCandidate?.detail ?? null]);
+	// A metadata-only observation must never replace a complete process LKG
+	// with an object whose detail payload was deliberately not read. When a
+	// complete PostgreSQL desk is the selected fallback, retain only a complete
+	// detail sibling (if one is available) rather than caching its manifest-only
+	// metadata as the future player-detail LKG.
+	const completePostgresDesk =
+		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT" && effectiveDesk.payloadLoaded !== false;
+	const completeDeskForLkg = effectiveDesk.payloadLoaded === false ? null : effectiveDesk;
+	if (
+		completeDeskForLkg !== null &&
+		(mode === "DESK" ||
+			(mode === "FULL" && (detail === null || detail.payloadLoaded === true)) ||
+			completePostgresDesk)
+	) {
+		rememberLkg(season, selectedEventId, {
+			desk: completeDeskForLkg,
+			detail: completeDetailForLkg,
+		});
+	}
 	return result;
 };
 
 export const resetLiveMatchProcessStateForTests = (): void => {
 	processLkg.clear();
+	processMetadataLkg.clear();
 	processActiveEvent.clear();
-	processActiveEventCheckedAt.clear();
 	processEventCheckedAt.clear();
 	processEventCheckpointBudget.clear();
 	postgresDetailMissUntil.clear();
@@ -1648,6 +2443,7 @@ export const resetLiveMatchProcessStateForTests = (): void => {
 export type {
 	MatchDeskCandidate,
 	MatchDetailCandidate,
+	MatchDetailObservation,
 	MatchDetailPublication,
 	MatchDeskPublication,
 };

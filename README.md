@@ -117,7 +117,8 @@ only through its process environment. It executes the exact 180 Mini / 60 RSC /
 10-second burst, the one-device abuse isolation check, and
 five-minute higher-throughput probes that stop at the first failed level. The
 report gates GraphQL 429 and non-429 errors, p95/p99, readiness, PostgreSQL pool
-waiting, CPU, memory, NAT-peer isolation, and the required 40% headroom. It
+waiting and the monotonic PostgreSQL pool wait-event counter, CPU, memory,
+NAT-peer isolation, and the required 40% headroom. It
 derives `S` from the highest passing probe; profile generation has no manual
 `S` override. `LOAD_SESSION_COOKIES_JSON` must contain 45 distinct temporary
 test sessions; neither sessions nor signing credentials are written to the
@@ -128,6 +129,12 @@ anonymous/session mix required by v4 observation.
 ```bash
 bun run rate-limit:load --output load-test/run-123.json
 ```
+
+For Live Matches V3, run `bun run live-match:capacity` separately for each
+`HEAD` and `FULL` mode. The harness requires `LIVE_MATCH_LOAD_DEPLOY_SHA` to
+be the exact deployed Git SHA and verifies `/health/deploy` before and after
+every stage; a missing or changing identity fails the run. Short stage
+overrides remain smoke diagnostics and are not capacity evidence.
 
 Required environment names are `LOAD_WEB_ORIGIN`, `LOAD_GRAPHQL_ORIGIN`,
 `BACKEND_PROXY_SECRET`, `GRAPHQL_SERVICE_TOKEN`, `LOAD_METRICS_TOKEN`,

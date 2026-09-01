@@ -8,6 +8,9 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain(
 			"rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json"
 		);
+		expect(workflow).toContain(".live.rateLimitTelemetryOverflows == 0");
+		expect(workflow).toContain(".live.rateLimitTelemetryPersistenceFailures == 0");
+		expect(workflow).toContain(".live.rateLimitTelemetryDirtyWindows == 0");
 		expect(workflow).toContain(".recent.summary.totalDecisions > 0");
 		expect(workflow).toContain(".live.rateLimitStorageFailures == 0");
 		expect(workflow).toContain('.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0');
@@ -22,6 +25,18 @@ describe("rate-limit monitor workflow", () => {
 		expect(workflow).toContain(".recent.summary.shadowInteractiveDeniedRate <= 0.01");
 		expect(workflow).toContain(".recent.summary.globalDenied == 0");
 		expect(workflow).toContain(".recent.summary.globalWouldDenied == 0");
+		expect(workflow).toContain("remote_slot_proof()");
+		expect(workflow).toContain("sleep 20");
+		expect(workflow).toContain("\\${first%|*}");
+		expect(workflow).toContain("\\${second%|*}");
+		expect(workflow).toContain("inactive_owner");
+		expect(workflow).toContain("after_inactive_proof");
+		expect(workflow).toContain("\\${after_inactive_proof%|*}");
+		expect(workflow).toContain("active_after");
+		expect(workflow).toContain("after_active_proof");
+		expect(workflow).toContain("\\${after_active_proof%|*}");
+		expect(workflow).toContain("active slot changed during report");
+		expect(workflow).toContain("active slot liveness changed during report");
 		expect(workflow).not.toContain("GRAPHQL_ENV");
 	});
 

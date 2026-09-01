@@ -707,12 +707,12 @@ describe("direct Data SQL contract", () => {
 		expect(names.some((name) => name.startsWith("trends."))).toBe(true);
 		expect(names.some((name) => name.startsWith("data-snapshot."))).toBe(true);
 		expect(names.some((name) => name.startsWith("price-change."))).toBe(true);
-		expect(names).toContain("live-matches-v2.checkpoint-fallback");
+		expect(names).toContain("live-matches-v3.checkpoint-fallback");
 	});
 
 	test("gates Live Matches checkpoint shape with the runtime reader role", () => {
 		const probe = DIRECT_DATA_SQL_CONTRACT.find(
-			(candidate) => candidate.name === "live-matches-v2.checkpoint-fallback"
+			(candidate) => candidate.name === "live-matches-v3.checkpoint-fallback"
 		);
 		expect(probe?.sql).toContain("fpl.live_match_desk_checkpoints");
 		expect(probe?.sql).toContain("fpl.live_match_detail_checkpoints");

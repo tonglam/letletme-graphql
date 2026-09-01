@@ -61,13 +61,16 @@ jobs:
             -o IdentitiesOnly=yes \
             -o UserKnownHostsFile="$SSH_DIR/known_hosts" \
             "$VPS_USER@$VPS_HOST" \
-            "set -euo pipefail; active=\$(tr -d '[:space:]' < $remote_active_slot_file); case \"\$active\" in blue) project=letletme_graphql_blue; port=4000;; green) project=letletme_graphql_green; port=4002;; *) echo 'invalid active slot' >&2; exit 1;; esac; cd $remote_workdir; APP_ENV_FILE=.env.deploy.\$active GRAPHQL_PORT=\$port docker compose -p \"\$project\" exec -T graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json" \
+            "set -euo pipefail; active=\$(tr -d '[:space:]' < $remote_active_slot_file); case \"\$active\" in blue) project=letletme_graphql_blue; port=4000;; green) project=letletme_graphql_green; port=4002;; *) echo 'invalid active slot' >&2; exit 1;; esac; cd $remote_workdir; other=green; if [ \"\$active\" = green ]; then other=blue; fi; slot_proof() { local slot=\"\$1\" slot_project slot_port; case \"\$slot\" in blue) slot_project=letletme_graphql_blue; slot_port=4000;; green) slot_project=letletme_graphql_green; slot_port=4002;; *) return 1;; esac; APP_ENV_FILE=.env.deploy.\$slot GRAPHQL_PORT=\$slot_port RATE_LIMIT_TELEMETRY_SLOT=\$slot docker compose -p \"\$slot_project\" exec -T graphql bun run rate-limit:serving-process-check; }; remote_slot_proof() { local slot=\"\$1\" first second; first=\$(slot_proof \"\$slot\") || return 1; sleep 20; second=\$(slot_proof \"\$slot\") || return 1; test \"\${first%|*}\" = \"\${second%|*}\"; printf '%s' \"\$second\"; }; sleep 20; active_proof=\$(slot_proof \"\$active\"); test -n \"\$active_proof\"; owner_proofs=\"\$active_proof\"; inactive_owner=\"\"; if inactive_proof=\$(remote_slot_proof \"\$other\"); then owner_proofs=\"\$owner_proofs,\$inactive_proof\"; inactive_owner=\"\${inactive_proof%|*}\"; fi; APP_ENV_FILE=.env.deploy.\$active GRAPHQL_PORT=\$port RATE_LIMIT_TELEMETRY_SLOT=\$active docker compose -p \"\$project\" exec -T -e RATE_LIMIT_TELEMETRY_LIVE_OWNER_PROOFS=\"\$owner_proofs\" graphql bun run rate-limit:report --days 2 --recent-minutes 10 --include-live-storage-failures --json; active_after=\$(tr -d '[:space:]' < $remote_active_slot_file); test \"\$active_after\" = \"\$active\" || { echo 'active slot changed during report' >&2; exit 1; }; after_active_proof=\$(slot_proof \"\$active_after\") || { echo 'active slot proof failed after report' >&2; exit 1; }; test \"\${after_active_proof%|*}\" = \"\${active_proof%|*}\" || { echo 'active slot liveness changed during report' >&2; exit 1; }; if [ -n \"\$inactive_owner\" ]; then after_inactive_proof=\$(slot_proof \"\$other\") || { echo 'inactive slot liveness changed during report' >&2; exit 1; }; test \"\${after_inactive_proof%|*}\" = \"\$inactive_owner\"; fi" \
             > "$RUNNER_TEMP/rate-limit-report.json"
           jq -e '
             (.policy == "graphql-v3" or .policy == "graphql-v4") and
             .days == 2 and
             .recent.minutes == 10 and
             .live.rateLimitStorageFailures == 0 and
+            .live.rateLimitTelemetryOverflows == 0 and
+            .live.rateLimitTelemetryPersistenceFailures == 0 and
+            .live.rateLimitTelemetryDirtyWindows == 0 and
             .recent.summary.totalDecisions > 0 and
             (
               (.mode == "shadow-v3" and .recent.summary.shadowDecisions > 0) or

@@ -59,4 +59,28 @@ describe("shutdown coordinator", () => {
 		expect(await shutdown("SIGTERM")).toEqual({ forced: false, failed: true });
 		expect(calls).toEqual(["server", "apollo", "redis", "db", "exit:1", "process.exit:1"]);
 	});
+
+	it("flushes bounded telemetry after draining and before closing Redis", async () => {
+		const calls: string[] = [];
+		const shutdown = createShutdownHandler({
+			server: { stop: async () => void calls.push("server") },
+			stopApollo: async () => void calls.push("apollo"),
+			flushTelemetry: async () => void calls.push("telemetry"),
+			closeRedis: async () => void calls.push("redis"),
+			closeDbPool: async () => void calls.push("db"),
+			setExitCode: (code) => calls.push(`exit:${code}`),
+			exitProcess: (code) => calls.push(`process.exit:${code}`),
+		});
+
+		expect(await shutdown("SIGTERM")).toEqual({ forced: false, failed: false });
+		expect(calls).toEqual([
+			"server",
+			"telemetry",
+			"apollo",
+			"redis",
+			"db",
+			"exit:0",
+			"process.exit:0",
+		]);
+	});
 });

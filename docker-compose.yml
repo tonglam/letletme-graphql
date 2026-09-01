@@ -16,8 +16,11 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       TZ: Asia/Shanghai
+      RATE_LIMIT_TELEMETRY_SLOT: ${RATE_LIMIT_TELEMETRY_SLOT:-default}
     networks:
       - graphql_shared
+    volumes:
+      - rate_limit_telemetry_state:/var/lib/letletme-graphql/rate-limit-telemetry
     logging: *default-logging
     ports:
       - "127.0.0.1:${GRAPHQL_PORT:-4000}:4000"
@@ -39,3 +42,7 @@ networks:
   graphql_shared:
     external: true
     name: ${GRAPHQL_SHARED_NETWORK:-letletme_graphql_default}
+
+volumes:
+  rate_limit_telemetry_state:
+    name: ${GRAPHQL_RATE_LIMIT_TELEMETRY_VOLUME:-letletme_graphql_rate_limit_telemetry}

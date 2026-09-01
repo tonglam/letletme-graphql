@@ -129,6 +129,73 @@ const livePointsProjectionFailures = new Counter({
 	labelNames: ["reason"] as const,
 });
 
+const liveMatchReadDurationSeconds = new Histogram({
+	name: "live_match_read_duration_seconds",
+	help: "Live Matches V3 resolver read duration by view and serving source",
+	labelNames: ["view", "source"] as const,
+	buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.8, 1, 2],
+});
+
+const liveMatchPayloadBytes = new Histogram({
+	name: "live_match_payload_bytes",
+	help: "Live Matches V3 payload bytes by view and read stage",
+	labelNames: ["view", "stage"] as const,
+	buckets: [
+		1024,
+		4 * 1024,
+		16 * 1024,
+		30 * 1024,
+		64 * 1024,
+		90 * 1024,
+		128 * 1024,
+		256 * 1024,
+		1024 * 1024,
+	],
+});
+
+const liveMatchRedisRoundtripsTotal = new Counter({
+	name: "live_match_redis_roundtrips_total",
+	help: "Live Matches V3 Redis read round trips by view and outcome",
+	labelNames: ["view", "outcome"] as const,
+});
+
+const liveMatchFallbackTotal = new Counter({
+	name: "live_match_fallback_total",
+	help: "Live Matches V3 fallback selections by component and source",
+	labelNames: ["component", "source"] as const,
+});
+
+const liveMatchDeliveryTotal = new Counter({
+	name: "live_match_delivery_total",
+	help: "Live Matches V3 deliveries by view, state, and serving source",
+	labelNames: ["view", "state", "served_from"] as const,
+});
+
+// Keep zero-valued fallback/roundtrip series visible before the first
+// request. Ops treats these metric families as required, and an absent
+// series must mean an instrumentation failure rather than a healthy zero.
+const liveMatchViews = ["HEAD", "DESK", "FULL"] as const;
+const liveMatchRedisOutcomes = ["none", "single", "fallback"] as const;
+for (const view of liveMatchViews) {
+	for (const outcome of liveMatchRedisOutcomes) {
+		liveMatchRedisRoundtripsTotal.labels(view, outcome).inc(0);
+	}
+}
+
+const liveMatchFallbackComponents = ["desk", "detail"] as const;
+const liveMatchFallbackSources = ["REDIS_PREVIOUS", "PROCESS_LKG", "POSTGRES_CHECKPOINT"] as const;
+for (const component of liveMatchFallbackComponents) {
+	for (const source of liveMatchFallbackSources) {
+		liveMatchFallbackTotal.labels(component, source).inc(0);
+	}
+}
+
+const rateLimitTelemetryOverflows = new Counter({
+	name: "rate_limit_telemetry_overflows_total",
+	help: "Rate-limit aggregate telemetry records dropped because the bounded queue was full",
+	labelNames: ["policy"] as const,
+});
+
 type DatabasePoolMetrics = {
 	total: number;
 	idle: number;
@@ -153,6 +220,11 @@ const postgresPoolClients = new Gauge({
 	},
 });
 
+export const postgresPoolWaitEvents = new Counter({
+	name: "postgres_pool_wait_events_total",
+	help: "PostgreSQL pool checkout requests that waited for a client",
+});
+
 registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
@@ -172,7 +244,14 @@ registry.registerMetric(playerStateProviderStale);
 registry.registerMetric(playerStatsDeskFields);
 registry.registerMetric(livePointsDeliveryTotal);
 registry.registerMetric(livePointsProjectionFailures);
+registry.registerMetric(liveMatchReadDurationSeconds);
+registry.registerMetric(liveMatchPayloadBytes);
+registry.registerMetric(liveMatchRedisRoundtripsTotal);
+registry.registerMetric(liveMatchFallbackTotal);
+registry.registerMetric(liveMatchDeliveryTotal);
+registry.registerMetric(rateLimitTelemetryOverflows);
 registry.registerMetric(postgresPoolClients);
+registry.registerMetric(postgresPoolWaitEvents);
 
 export const registerDatabasePoolMetrics = (provider: () => DatabasePoolMetrics): void => {
 	readDatabasePoolMetrics = provider;
@@ -200,7 +279,14 @@ export const metrics = {
 	playerStatsDeskFields,
 	livePointsDeliveryTotal,
 	livePointsProjectionFailures,
+	liveMatchReadDurationSeconds,
+	liveMatchPayloadBytes,
+	liveMatchRedisRoundtripsTotal,
+	liveMatchFallbackTotal,
+	liveMatchDeliveryTotal,
+	rateLimitTelemetryOverflows,
 	postgresPoolClients,
+	postgresPoolWaitEvents,
 };
 
 export const metricsResponse = async (): Promise<Response> => {

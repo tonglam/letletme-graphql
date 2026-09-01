@@ -3,7 +3,7 @@ import { env } from "../infra/env";
 import { logger } from "../infra/logger";
 import {
 	rateLimitFingerprint,
-	recordRateLimitAggregate,
+	enqueueRateLimitAggregate,
 	type RateLimitAggregateOutcome,
 } from "../infra/rate-limit-observability";
 import type { Principal } from "../infra/principal";
@@ -256,7 +256,7 @@ export const logV3RateLimitDecision = ({
 	);
 };
 
-export const recordRequestRateLimitOutcome = async ({
+export const recordRequestRateLimitOutcome = ({
 	ingress,
 	scope,
 	outcome,
@@ -264,19 +264,19 @@ export const recordRequestRateLimitOutcome = async ({
 	ingress: GraphQLIngress;
 	scope: GraphQLRateLimitHeaderScope;
 	outcome: RateLimitAggregateOutcome;
-}): Promise<void> =>
-	ingress.trafficClass === "untrusted"
-		? Promise.resolve()
-		: recordRateLimitAggregate({
-				redis: getRateLimitRedis(),
-				trafficClass: ingress.trafficClass,
-				workload: ingress.workload,
-				scope,
-				outcome,
-				fingerprint: rateLimitFingerprint(ingress.subject),
-				policyVersion: activeGraphQLRateLimitPolicy.policyVersion,
-				logger,
-			});
+}): void => {
+	if (ingress.trafficClass === "untrusted") return;
+	enqueueRateLimitAggregate({
+		redis: getRateLimitRedis(),
+		trafficClass: ingress.trafficClass,
+		workload: ingress.workload,
+		scope,
+		outcome,
+		fingerprint: rateLimitFingerprint(ingress.subject),
+		policyVersion: activeGraphQLRateLimitPolicy.policyVersion,
+		logger,
+	});
+};
 
 export const terminalV3Outcome = (decision: TokenBucketStageResultV3): RateLimitAggregateOutcome =>
 	isShadowOnlyRateLimitDecision(decision)

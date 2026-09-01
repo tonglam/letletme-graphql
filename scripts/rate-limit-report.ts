@@ -4,12 +4,21 @@ import {
 	rateLimitAggregateMinute,
 	rateLimitDeniedRankingKey,
 	rateLimitRecentAggregateKey,
+	rateLimitTelemetryOverflowKey,
+	rateLimitTelemetryPersistenceFailureKey,
+	readRateLimitTelemetryDirtyWindowSpool,
+	retryRateLimitTelemetryOverflowMarkers,
+	retryRateLimitTelemetryPersistenceFailureMarkers,
 	parseRateLimitStorageFailureTotal,
+	parseRateLimitTelemetryOverflowTotal,
+	parseRateLimitTelemetryServingProcessProofs,
+	RATE_LIMIT_TELEMETRY_REPORT_LEASE_SETTLE_MS,
 	summarizeRateLimitTotals,
 	type GraphQLRateLimitPolicyVersion,
 } from "../src/infra/rate-limit-observability";
 import { env } from "../src/infra/env";
 import { closeRedis, connectRedis, getRateLimitRedis } from "../src/infra/redis";
+import type Redis from "ioredis";
 
 type ReportOptions = {
 	days: number;
@@ -83,8 +92,50 @@ const parseOptions = (argv: readonly string[]): ReportOptions => {
 	};
 };
 
-const readLiveRateLimitStorageFailures = async (): Promise<number> => {
+const readLiveRateLimitMetrics = async (
+	redis: Redis,
+	policyVersion: GraphQLRateLimitPolicyVersion,
+	dates: readonly string[]
+): Promise<{
+	rateLimitStorageFailures: number;
+	rateLimitTelemetryOverflows: number;
+	persistedTelemetryOverflowDates: readonly string[];
+	rateLimitTelemetryPersistenceFailures: number;
+	persistedTelemetryPersistenceFailureDates: readonly string[];
+	rateLimitTelemetryDirtyWindows: number;
+	persistedTelemetryDirtyWindowDates: readonly string[];
+}> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
+	// This command runs in a separate report process. Normally wait through the
+	// full serving-process lease plus clock-skew allowance before accepting a
+	// dirty window as orphaned. The blue/green monitor supplies fresh proofs from
+	// each slot's own PID namespace after that settle window; when such a proof
+	// is present, avoid adding another 20 seconds to the monitor run.
+	if (parseRateLimitTelemetryServingProcessProofs().size === 0) {
+		await new Promise((resolve) =>
+			setTimeout(resolve, RATE_LIMIT_TELEMETRY_REPORT_LEASE_SETTLE_MS)
+		);
+	}
+	// A previous process may have persisted a marker obligation locally after
+	// Redis was unavailable. The report process is also a safe recovery worker:
+	// retry those obligations before deciding whether the window is healthy.
+	const [
+		localOverflowSpoolRemainingDates,
+		localPersistenceFailureSpoolRemainingDates,
+		localDirtyWindowDates,
+	] = await Promise.all([
+		retryRateLimitTelemetryOverflowMarkers({
+			redis,
+			policyVersion,
+			dates,
+		}),
+		retryRateLimitTelemetryPersistenceFailureMarkers({
+			redis,
+			policyVersion,
+			dates,
+		}),
+		readRateLimitTelemetryDirtyWindowSpool(policyVersion, dates),
+	]);
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
 		headers: { "X-Metrics-Token": env.METRICS_TOKEN },
 		signal: AbortSignal.timeout(5_000),
@@ -92,7 +143,42 @@ const readLiveRateLimitStorageFailures = async (): Promise<number> => {
 	if (!response.ok) {
 		throw new Error(`Live metrics request failed with HTTP ${response.status}`);
 	}
-	return parseRateLimitStorageFailureTotal(await response.text());
+	const metricsText = await response.text();
+	const persistedMarkers = await Promise.all(
+		dates.map(async (date) => {
+			const [overflow, persistenceFailure] = await Promise.all([
+				redis.exists(rateLimitTelemetryOverflowKey(date, policyVersion)),
+				redis.exists(rateLimitTelemetryPersistenceFailureKey(date, policyVersion)),
+			]);
+			return { date, overflow: overflow > 0, persistenceFailure: persistenceFailure > 0 };
+		})
+	);
+	const persistedTelemetryOverflowDates = persistedMarkers
+		.filter((marker) => marker.overflow)
+		.map((marker) => marker.date);
+	const persistedTelemetryPersistenceFailureDates = persistedMarkers
+		.filter((marker) => marker.persistenceFailure)
+		.map((marker) => marker.date);
+	const allTelemetryOverflowDates = [
+		...new Set([...persistedTelemetryOverflowDates, ...localOverflowSpoolRemainingDates]),
+	].sort();
+	const allTelemetryPersistenceFailureDates = [
+		...new Set([
+			...persistedTelemetryPersistenceFailureDates,
+			...localPersistenceFailureSpoolRemainingDates,
+		]),
+	].sort();
+	const allTelemetryDirtyWindowDates = [...new Set(localDirtyWindowDates)].sort();
+	const liveTelemetryOverflows = parseRateLimitTelemetryOverflowTotal(metricsText);
+	return {
+		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
+		rateLimitTelemetryOverflows: Math.max(liveTelemetryOverflows, allTelemetryOverflowDates.length),
+		persistedTelemetryOverflowDates: allTelemetryOverflowDates,
+		rateLimitTelemetryPersistenceFailures: allTelemetryPersistenceFailureDates.length,
+		persistedTelemetryPersistenceFailureDates: allTelemetryPersistenceFailureDates,
+		rateLimitTelemetryDirtyWindows: allTelemetryDirtyWindowDates.length,
+		persistedTelemetryDirtyWindowDates: allTelemetryDirtyWindowDates,
+	};
 };
 
 const reportDates = (days: number, now = new Date()): string[] =>
@@ -191,7 +277,7 @@ try {
 					buckets: recentBuckets,
 				};
 	const live = options.includeLiveStorageFailures
-		? { rateLimitStorageFailures: await readLiveRateLimitStorageFailures() }
+		? await readLiveRateLimitMetrics(redis, policyVersion, dates)
 		: null;
 	const report = {
 		policy: policyVersion,
@@ -216,7 +302,12 @@ try {
 		(options.failInteractiveRate !== null &&
 			Math.max(gateSummary.interactiveDeniedRate, gateSummary.shadowInteractiveDeniedRate) >
 				options.failInteractiveRate) ||
-		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0))
+		(options.failOnGlobal && (gateSummary.globalDenied > 0 || gateSummary.globalWouldDenied > 0)) ||
+		(options.includeLiveStorageFailures &&
+			live !== null &&
+			(live.rateLimitTelemetryOverflows > 0 ||
+				live.rateLimitTelemetryPersistenceFailures > 0 ||
+				live.rateLimitTelemetryDirtyWindows > 0))
 	) {
 		process.exitCode = 1;
 	}

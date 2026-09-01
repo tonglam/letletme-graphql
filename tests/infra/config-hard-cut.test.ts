@@ -40,6 +40,7 @@ const canonicalTestEnvironment = (): NodeJS.ProcessEnv => ({
 	BACKEND_PROXY_SECRET: "a".repeat(32),
 	GRAPHQL_SERVICE_TOKEN: "b".repeat(32),
 	CORS_ORIGIN: "*",
+	RATE_LIMIT_TELEMETRY_SLOT: "blue",
 });
 
 const importEnvInChild = (overrides: Record<string, string | undefined>) => {
