@@ -612,7 +612,7 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
-	it("seeds the active-event process fallback from a valid explicit event read", async () => {
+	it("does not let an explicit event read replace the active-event authority", async () => {
 		const redis = new TestRedis();
 		const bundle = { ...buildBundle({ eventId: 2 }).bundle, eventId: 2 };
 		let available = true;
@@ -626,9 +626,9 @@ describe("Live Matches V3 read path", () => {
 		available = false;
 
 		const fallback = await readLiveMatchday(context);
-		expect(fallback.eventId).toBe(2);
-		expect(fallback.desk?.servedFrom).toBe("PROCESS_LKG");
-		expect(fallback.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(fallback.eventId).toBeNull();
+		expect(fallback.desk).toBeNull();
+		expect(fallback.detail).toBeNull();
 	});
 
 	it("requires detail coverage for every started fixture", async () => {
@@ -1085,7 +1085,7 @@ describe("Live Matches V3 read path", () => {
 		expect(LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS).toBeGreaterThan(0);
 	});
 
-	it("serves the cached active event when Redis returns no pointer", async () => {
+	it("revalidates PostgreSQL when Redis returns no active-event pointer", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
 		let databaseReads = 0;
@@ -1108,9 +1108,78 @@ describe("Live Matches V3 read path", () => {
 
 		const recovered = await readLiveMatchday(context);
 
-		expect(recovered.eventId).toBe(1);
-		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
-		expect(databaseReads).toBe(0);
+		expect(recovered.eventId).toBeNull();
+		expect(recovered.desk).toBeNull();
+		expect(databaseReads).toBe(1);
+	});
+
+	it("discovers the newer active event from PostgreSQL after its Redis pointer disappears", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
+		const newer = buildCheckpointRow({ eventId: 2 });
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [newer] }),
+		});
+
+		await readLiveMatchday(context);
+		const missingPointer = structuredClone(buildBundle({ eventId: 1 }).bundle);
+		missingPointer.eventId = null;
+		missingPointer.desk.active = emptyDesk;
+		missingPointer.desk.previous = emptyDesk;
+		missingPointer.detail.active = emptyDetail;
+		missingPointer.detail.previous = emptyDetail;
+		control.set(missingPointer);
+
+		const recovered = await readLiveMatchday(context);
+
+		expect(recovered.eventId).toBe(2);
+		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+	});
+
+	it("retains a complete PostgreSQL candidate in process LKG for HEAD reads", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [buildCheckpointRow()] };
+			},
+		});
+
+		const first = await readLiveMatchday(context, 1, "HEAD");
+		const second = await readLiveMatchday(context, 1, "HEAD");
+
+		expect(first.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(second.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(second.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(1);
+	});
+
+	it("does not pair current detail metadata with a previous desk", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.desk.previous = structuredClone(bundle.desk.active);
+		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
+		const activePublication = JSON.parse(bundle.desk.active.publication) as {
+			desk: { count: number };
+		};
+		activePublication.desk.count = LIVE_MATCH_MAX_FIXTURES + 1;
+		bundle.desk.active.publication = JSON.stringify(activePublication);
+		const previousBundle = structuredClone(bundle);
+		previousBundle.desk.active = structuredClone(previousBundle.desk.previous);
+		previousBundle.detail.active = emptyDetail;
+		previousBundle.detail.previous = emptyDetail;
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async (
+			...args
+		) => JSON.stringify(args.at(-2) === "previous" ? previousBundle : bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detail).toBeNull();
 	});
 
 	it("keeps process LKG ahead of PostgreSQL on a Redis outage", async () => {

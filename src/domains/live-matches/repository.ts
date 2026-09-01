@@ -1221,6 +1221,7 @@ const compatibleDetailMetadata = (
 	detail: MatchDetailCandidate | null
 ): detail is MatchDetailCandidate => {
 	if (!detail) return false;
+	if (desk.servedFrom === "REDIS_PREVIOUS" && detail.servedFrom === "REDIS_CURRENT") return false;
 	return (
 		detail.publication.observedDeskGeneration <= desk.publication.generation &&
 		detail.publication.fixtureIdentityRevision ===
@@ -1622,7 +1623,10 @@ export const readLiveMatchday = async (
 
 	let postgresReadFailed = false;
 	let unscopedPostgres: PostgresCheckpointRead | null | undefined;
-	let selectedEventId = requested ?? activeBundle?.eventId ?? cachedActiveEvent ?? null;
+	const redisPointerMissing =
+		requested === undefined && activeBundle !== null && activeBundle.eventId === null;
+	let selectedEventId =
+		requested ?? activeBundle?.eventId ?? (redisPointerMissing ? null : cachedActiveEvent) ?? null;
 	if (
 		requested === undefined &&
 		activeBundle?.eventId !== null &&
@@ -1759,10 +1763,17 @@ export const readLiveMatchday = async (
 		postgresReadFailed,
 		redisRoundtrips,
 	};
-	rememberActiveEvent(season, selectedEventId);
+	if (requested === undefined) rememberActiveEvent(season, selectedEventId);
 	// A metadata-only observation must never replace a complete process LKG
-	// with an object whose detail payload was deliberately not read.
-	if (mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) {
+	// with an object whose detail payload was deliberately not read. A complete
+	// PostgreSQL checkpoint is the one exception for HEAD/DESK: it is already a
+	// full candidate and can seed the process fallback after Redis recovers.
+	const completePostgresDesk =
+		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT" && effectiveDesk.payloadLoaded !== false;
+	if (
+		(mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) ||
+		completePostgresDesk
+	) {
 		rememberLkg(season, selectedEventId, { desk: effectiveDesk, detail });
 	}
 	return result;

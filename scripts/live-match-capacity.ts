@@ -167,7 +167,7 @@ const query =
 							players { id webName position teamId totalPoints stats { identifier value awardedPoints } }
 						}
 					}
-				}`;
+				}}`;
 
 const requestBody = JSON.stringify({
 	query,
@@ -510,7 +510,12 @@ function semanticError(body: unknown): string | null {
 		if (!isRecord(fixtureValue)) return "invalid_fixture";
 		const players = Array.isArray(fixtureValue.players) ? fixtureValue.players : null;
 		if (!players) return "missing_players";
-		if (fixtureValue.started === true && players.length === 0)
+		const detailRequired =
+			fixtureValue.started === true ||
+			fixtureValue.finished === true ||
+			fixtureValue.finishedProvisional === true ||
+			(typeof fixtureValue.minutes === "number" && fixtureValue.minutes > 0);
+		if (detailRequired && players.length === 0)
 			return "started_fixture_without_players";
 		const playerIds = new Set<number>();
 		for (const playerValue of players) {
@@ -628,7 +633,7 @@ async function collectMetrics(): Promise<void> {
 			globalDenied: metricValue(
 				text,
 				"graphql_rate_limit_v3_decisions_total",
-				'scope="global",outcome="deny"'
+				'scope="global",outcome="denied"'
 			),
 		});
 	} catch {
@@ -736,6 +741,18 @@ const capacityGate = {
 		"requires the versioned rate-limit capacity profile; this harness does not invent headroom",
 };
 
+const capacityGatePassed = [
+	capacityGate.allRequiredStagesPresent,
+	capacityGate.stage300DurationRequirementMet,
+	capacityGate.stage300P95Under800Ms,
+	capacityGate.stage300P99Under2s,
+	capacityGate.non429ErrorRateUnderPoint1Percent,
+	capacityGate.global429IsZero,
+	capacityGate.unknown429IsZero,
+	capacityGate.dbPoolWaitingIsZero,
+	capacityGate.metricsObserved,
+].every(Boolean);
+
 const report = {
 	schemaVersion: 2,
 	contract: contractHeader,
@@ -768,3 +785,4 @@ const report = {
 const serialized = JSON.stringify(report, null, 2);
 if (outputPath) await writeFile(outputPath, `${serialized}\n`, "utf8");
 console.log(serialized);
+if (!capacityGatePassed) process.exitCode = 1;
