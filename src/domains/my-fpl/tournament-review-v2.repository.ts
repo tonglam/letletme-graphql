@@ -74,6 +74,14 @@ export type MyTournamentSeasonSection = {
 	h2h: MyTournamentReviewH2H | null;
 	knockout: MyTournamentReviewKnockout | null;
 	pageInfo: { hasNextPage: boolean; endCursor: string | null };
+	/** Internal Redis witness. GraphQL ignores unknown object properties, while
+	 * the cache decoder uses the immutable chunk hashes to authenticate the
+	 * materialized page before returning it. */
+	__sectionWitness?: {
+		sourceRows: unknown[];
+		canonicalRows: unknown[];
+		chunkHashes: string[];
+	};
 };
 
 export type MyTournamentReviewFreshness = {
@@ -291,6 +299,8 @@ export type MyTournamentSeasonReview = {
 		expectedSubjectCount?: number | null;
 		readySubjectCount?: number | null;
 		notApplicableSubjectCount?: number | null;
+		/** Internal-only manifest witness; never exposed as a GraphQL field. */
+		sectionChunkHashes?: Partial<Record<MyTournamentReviewSeasonSection, string[]>>;
 	}>;
 	/** Internal publication identity used by the V2.1 resolver adapter. */
 	semanticSha256?: string | null;
@@ -679,8 +689,8 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND ${eventAlias}.finished = true
 	AND ${eventAlias}.data_checked = true
 	AND ${eventAlias}.data_checked_at IS NOT NULL
-	AND ${publicationAlias}.source_min_checked_at <= ${publicationAlias}.event_data_checked_at
-	AND ${publicationAlias}.event_data_checked_at <= ${publicationAlias}.source_max_checked_at
+		AND ${publicationAlias}.event_data_checked_at <= ${publicationAlias}.source_min_checked_at
+		AND ${publicationAlias}.source_min_checked_at <= ${publicationAlias}.source_max_checked_at
 	AND ${publicationAlias}.source_max_checked_at <= ${publicationAlias}.published_at
 	AND date_trunc('milliseconds', ${publicationAlias}.event_data_checked_at) =
       date_trunc('milliseconds', ${eventAlias}.data_checked_at)
@@ -1105,6 +1115,7 @@ type SeasonMetadataRow = {
 	expected_subject_count: number | null;
 	ready_subject_count: number | null;
 	not_applicable_subject_count: number | null;
+	manifest: unknown | null;
 	obligation_format: string | null;
 	obligation_state: string | null;
 	finalized_event_ids: unknown;
@@ -1250,7 +1261,8 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 		       publication.row_count,
 		       publication.expected_subject_count,
 		       publication.ready_subject_count,
-		       publication.not_applicable_subject_count
+		       publication.not_applicable_subject_count,
+		       publication.payload->'manifest' AS manifest
 		FROM tournament_scope tournament
 		JOIN competition.tournament_review_heads head
 		  ON head.season_id = tournament.season_id
@@ -1287,6 +1299,7 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 	       coherent_heads.expected_subject_count,
 	       coherent_heads.ready_subject_count,
 	       coherent_heads.not_applicable_subject_count,
+	       coherent_heads.manifest,
 	       obligations.obligation_format,
 	       obligations.obligation_state,
 	       finalized_window.finalized_event_ids
@@ -1928,6 +1941,54 @@ function manifestChunkHashes(value: unknown): string[] | null {
 	}
 	descriptors.sort((left, right) => left.sectionKey.localeCompare(right.sectionKey));
 	return descriptors.flatMap((descriptor) => descriptor.chunkHashes);
+}
+
+const REVIEW_SECTION_KEYS: readonly MyTournamentReviewSeasonSection[] = [
+	"POINTS_STANDINGS",
+	"POINTS_TRAJECTORIES",
+	"H2H_STANDINGS",
+	"H2H_FIXTURES",
+	"KNOCKOUT_BRACKET",
+];
+
+type ReviewSectionChunkHashMap = Partial<Record<MyTournamentReviewSeasonSection, string[]>>;
+
+/** Extract the producer's per-section chunk witness from the lightweight
+ * manifest. This is deliberately separate from the semantic SHA: a cache hit
+ * must prove the page came from the exact immutable chunk sequence, not merely
+ * repeat the publication identity supplied in the cache key. */
+function manifestSectionChunkHashes(value: unknown): ReviewSectionChunkHashMap | null {
+	if (!isRecord(value) || !Array.isArray(value.sections)) return null;
+	const output: ReviewSectionChunkHashMap = {};
+	for (const descriptor of value.sections) {
+		if (
+			!isRecord(descriptor) ||
+			!REVIEW_SECTION_KEYS.includes(descriptor.sectionKey as MyTournamentReviewSeasonSection) ||
+			!Array.isArray(descriptor.chunkHashes)
+		) {
+			return null;
+		}
+		const sectionKey = descriptor.sectionKey as MyTournamentReviewSeasonSection;
+		if (
+			output[sectionKey] !== undefined ||
+			!descriptor.chunkHashes.every(
+				(hash: unknown) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)
+			)
+		) {
+			return null;
+		}
+		output[sectionKey] = descriptor.chunkHashes as string[];
+	}
+	return output;
+}
+
+function chunkHashesForRows(rows: readonly unknown[]): string[] {
+	if (rows.length === 0) return [postgresJsonbContentHash([])];
+	const hashes: string[] = [];
+	for (let offset = 0; offset < rows.length; offset += 100) {
+		hashes.push(postgresJsonbContentHash(rows.slice(offset, offset + 100)));
+	}
+	return hashes;
 }
 
 export function tournamentReviewChunkHashes(value: unknown): string[] {
@@ -3064,9 +3125,31 @@ function phaseDescriptorsCache(
 			(candidate.rowCount ?? null) === (phase.rowCount ?? null) &&
 			(candidate.expectedSubjectCount ?? null) === (phase.expectedSubjectCount ?? null) &&
 			(candidate.readySubjectCount ?? null) === (phase.readySubjectCount ?? null) &&
-			(candidate.notApplicableSubjectCount ?? null) === (phase.notApplicableSubjectCount ?? null)
+			(candidate.notApplicableSubjectCount ?? null) === (phase.notApplicableSubjectCount ?? null) &&
+			sectionHashMapsEqual(candidate.sectionChunkHashes, phase.sectionChunkHashes)
 		);
 	});
+}
+
+function sectionHashMapsEqual(
+	left: unknown,
+	right: Partial<Record<MyTournamentReviewSeasonSection, string[]>> | undefined
+): boolean {
+	for (const section of REVIEW_SECTION_KEYS) {
+		const leftHashes = isRecord(left) && Array.isArray(left[section]) ? left[section] : null;
+		const rightHashes = right?.[section] ?? null;
+		if (leftHashes === null || rightHashes === null) {
+			if (leftHashes !== rightHashes) return false;
+			continue;
+		}
+		if (
+			leftHashes.length !== rightHashes.length ||
+			!leftHashes.every((hash, index) => hash === rightHashes[index])
+		) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function seasonCache(
@@ -3129,6 +3212,7 @@ type SeasonSectionCacheExpectation = {
 	expectedSubjectCount: number;
 	readySubjectCount: number;
 	notApplicableSubjectCount: number;
+	sectionChunkHashes: string[] | null;
 };
 
 function seasonSectionCache(
@@ -3192,11 +3276,53 @@ function seasonSectionCache(
 	const typedKnockout = knockout as MyTournamentReviewKnockout | null;
 	const page = typedPoints ?? typedH2H ?? typedKnockout;
 	if (!isRecord(page)) return false;
+	const sectionWitness = value.__sectionWitness;
+	if (
+		!isRecord(sectionWitness) ||
+		!Array.isArray(sectionWitness.sourceRows) ||
+		!Array.isArray(sectionWitness.canonicalRows) ||
+		!Array.isArray(sectionWitness.chunkHashes)
+	) {
+		return false;
+	}
+	const sourceRows = sectionWitness.sourceRows as unknown[];
+	const canonicalRows = sectionWitness.canonicalRows as unknown[];
+	const witnessChunkHashes = sectionWitness.chunkHashes as unknown[];
+	const computedChunkHashes = chunkHashesForRows(sourceRows);
+	const expectedChunkHashes = expected.sectionChunkHashes;
+	if (
+		!witnessChunkHashes.every((hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)) ||
+		witnessChunkHashes.length !== computedChunkHashes.length ||
+		!witnessChunkHashes.every((hash, index) => hash === computedChunkHashes[index]) ||
+		(expectedChunkHashes !== null &&
+			(expectedChunkHashes.length !== computedChunkHashes.length ||
+				!expectedChunkHashes.every((hash, index) => hash === computedChunkHashes[index])))
+	) {
+		return false;
+	}
 	const pageOffset = typedPoints
 		? typedPoints.aggregateWitness.pageOffset
 		: typedH2H
 			? typedH2H.coverageWitness.pageOffset
 			: typedKnockout!.coverageWitness.pageOffset;
+	const pageRows = typedPoints
+		? typedPoints.rows
+		: typedH2H
+			? expected.section === "H2H_FIXTURES"
+				? typedH2H.matches
+				: typedH2H.standings
+			: typedKnockout!.matches;
+	const expectedRowCount =
+		expected.section === "H2H_STANDINGS" ? expected.readySubjectCount : expected.rowCount;
+	if (
+		canonicalRows.length !== expectedRowCount ||
+		pageOffset < 0 ||
+		pageOffset + pageRows.length > canonicalRows.length ||
+		postgresJsonbContentHash(pageRows) !==
+			postgresJsonbContentHash(canonicalRows.slice(pageOffset, pageOffset + pageRows.length))
+	) {
+		return false;
+	}
 	const pageLength = typedPoints
 		? typedPoints.rows.length
 		: typedH2H
@@ -3893,6 +4019,56 @@ function mapKnockout(value: unknown): MyTournamentReviewKnockoutMatch[] {
 			winnerEntryId,
 		};
 	});
+}
+
+type SeasonSectionWitness = {
+	sourceRows: unknown[];
+	canonicalRows: unknown[];
+	chunkHashes: string[];
+};
+
+/** Build the private cache witness from the trusted, materialized publication.
+ * `sourceRows` are hashed exactly as Data persisted them; `canonicalRows` are
+ * the rows after GraphQL shaping so a cached page can be checked against the
+ * complete immutable section even when the requested page is smaller than a
+ * producer chunk. */
+function seasonSectionWitness(
+	payload: unknown,
+	section: MyTournamentReviewSeasonSection
+): SeasonSectionWitness | null {
+	if (!isRecord(payload)) return null;
+	let sourceRows: unknown[];
+	let canonicalRows: unknown[];
+	if (section === "POINTS_STANDINGS" || section === "POINTS_TRAJECTORIES") {
+		const points = isRecord(payload.points) ? payload.points : null;
+		const raw = section === "POINTS_TRAJECTORIES" ? points?.trajectoryRows : points?.rows;
+		if (!Array.isArray(raw)) return null;
+		const mapped = mapPointsRows(raw);
+		sourceRows = raw;
+		canonicalRows = mapped.map((item) => ({
+			...item,
+			grossPoints: item.seasonGrossPoints,
+			transferCost: seasonTransferCost(item),
+			netPoints: item.seasonNetPoints,
+		}));
+	} else if (section === "H2H_STANDINGS" || section === "H2H_FIXTURES") {
+		const h2h = isRecord(payload.h2h) ? payload.h2h : null;
+		const raw = section === "H2H_FIXTURES" ? h2h?.matches : h2h?.standings;
+		if (!Array.isArray(raw)) return null;
+		const mapped = mapH2H(payload.h2h, true);
+		sourceRows = raw;
+		canonicalRows = section === "H2H_FIXTURES" ? mapped.matches : mapped.standings;
+	} else {
+		const knockout = isRecord(payload.knockout) ? payload.knockout : null;
+		if (!Array.isArray(knockout?.matches)) return null;
+		sourceRows = knockout.matches;
+		canonicalRows = mapKnockout(payload.knockout);
+	}
+	return {
+		sourceRows,
+		canonicalRows,
+		chunkHashes: chunkHashesForRows(sourceRows),
+	};
 }
 
 function pageSlice<T>(
@@ -4754,6 +4930,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				const revision = row.revision === null ? null : positiveInt(row.revision);
 				const contentSha = row.content_sha256 ?? null;
 				const publishedAt = iso(row.published_at);
+				const sectionChunkHashes = manifestSectionChunkHashes(row.manifest) ?? undefined;
 				if (existing) {
 					existing.startEventId = Math.min(existing.startEventId, eventId);
 					existing.endEventId = Math.max(existing.endEventId, eventId);
@@ -4768,6 +4945,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 						existing.expectedSubjectCount = row.expected_subject_count;
 						existing.readySubjectCount = row.ready_subject_count;
 						existing.notApplicableSubjectCount = row.not_applicable_subject_count;
+						existing.sectionChunkHashes = sectionChunkHashes;
 					}
 					return phases;
 				}
@@ -4786,6 +4964,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					expectedSubjectCount: row.expected_subject_count,
 					readySubjectCount: row.ready_subject_count,
 					notApplicableSubjectCount: row.not_applicable_subject_count,
+					sectionChunkHashes,
 				});
 				return phases;
 			},
@@ -4944,7 +5123,11 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			expectedSubjectCount: Number(phase.expectedSubjectCount),
 			readySubjectCount: Number(phase.readySubjectCount),
 			notApplicableSubjectCount: Number(phase.notApplicableSubjectCount),
+			sectionChunkHashes: phase.sectionChunkHashes?.[requestedSection] ?? null,
 		};
+		if (env.isProduction && expectedCache.sectionChunkHashes === null) {
+			throw integrityError("Review phase section manifest witness is missing");
+		}
 		const key = gqlCacheKey(
 			context,
 			`my-tournament-review-v2.1:season-section:${args.tournamentId}:${args.throughEventId}:${phaseId}:${requestedSection}:${expectedCache.revision}:${expectedCache.semanticSha256}:${first}:${cursor?.canonical ?? ""}`,
@@ -5006,6 +5189,19 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			});
 		}
 		const page = points ?? h2h ?? knockout;
+		const sectionWitness = seasonSectionWitness(materializedRow.payload, requestedSection);
+		if (!sectionWitness) {
+			throw integrityError("Review phase section witness is missing");
+		}
+		if (
+			expectedCache.sectionChunkHashes !== null &&
+			(expectedCache.sectionChunkHashes.length !== sectionWitness.chunkHashes.length ||
+				!expectedCache.sectionChunkHashes.every(
+					(hash, index) => hash === sectionWitness.chunkHashes[index]
+				))
+		) {
+			throw integrityError("Review phase section chunk witness does not match its manifest");
+		}
 		const result: MyTournamentSeasonSection = {
 			state: "READY",
 			tournamentId: args.tournamentId,
@@ -5021,6 +5217,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				hasNextPage: Boolean(page?.hasNextPage),
 				endCursor: page?.nextCursor ?? null,
 			},
+			__sectionWitness: sectionWitness,
 		};
 		await writeJsonQueryCache(context, key, result, REVIEW_CACHE_TTL_SECONDS);
 		return result;
