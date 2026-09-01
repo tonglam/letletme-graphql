@@ -16,14 +16,15 @@ describe("root field policy", () => {
 		}
 	});
 
-	it("fences review cache keys with the Core publication revision", () => {
+	it("fences review cache keys with the settled semantic revision", () => {
 		for (const field of [
-			"myTournamentReviewCatalog",
 			"myTournamentGameweekReview",
 			"myTournamentSeasonReview",
-			"myTournamentReviewStatus",
+			"myTournamentSeasonReviewSection",
 		]) {
 			expect(REVISIONED_QUERY_CACHE_FIELDS.has(field)).toBe(true);
 		}
+		expect(REVISIONED_QUERY_CACHE_FIELDS.has("myTournamentReviewCatalog")).toBe(false);
+		expect(REVISIONED_QUERY_CACHE_FIELDS.has("myTournamentReviewStatus")).toBe(false);
 	});
 });

@@ -2562,9 +2562,6 @@ describe("My FPL review repository", () => {
 				return { state: "EMPTY" as MyFplReviewState } as never;
 			},
 			loadManagerGameweek: async () => ({ state: "PENDING" as MyFplReviewState }) as never,
-			loadCompetitionsDesk: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
-			loadCompetitionBoard: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
-			loadCompetitionSeasonPath: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
 			loadCompetitionSetupStatus: async () => {
 				throw new GraphQLError("database unavailable", {
 					extensions: { code: "INTERNAL_SERVER_ERROR" },
@@ -2576,17 +2573,6 @@ describe("My FPL review repository", () => {
 		await resolvers.Query.myFplManagerReview(null, {}, context);
 		expect(calls).toEqual(["review"]);
 		await resolvers.Query.myFplManagerGameweek(null, { eventId: 1 }, context);
-		await resolvers.Query.myFplCompetitionsDesk(null, {}, context);
-		await resolvers.Query.myFplCompetitionBoard(
-			null,
-			{ tournamentId: 7, eventId: 1, page: 1, pageSize: 1 },
-			context
-		);
-		await resolvers.Query.myFplCompetitionSeasonPath(
-			null,
-			{ tournamentId: 7, throughEventId: 1 },
-			context
-		);
 		await expect(
 			resolvers.Query.myFplCompetitionSetupStatus(null, { tournamentId: 7 }, context)
 		).rejects.toThrow("database unavailable");

@@ -4,10 +4,7 @@ import {
 	createMyFplRepository,
 	myFplRepository,
 	type MyFplRepository,
-	type MyFplCompetitionBoardPage,
-	type MyFplCompetitionSeasonPath,
 	type MyFplCompetitionSetupStatus,
-	type MyFplCompetitionsDesk,
 	type MyFplManagerGameweek,
 	type MyFplManagerReview,
 	type MyFplSnapshotMeta,
@@ -17,34 +14,24 @@ import {
 	myTournamentReviewRepository,
 	type MyTournamentGameweekReview,
 	type MyTournamentReviewCatalog,
+	type MyTournamentReviewCatalogConnection,
 	type MyTournamentReviewRepository,
+	type MyTournamentReviewSeasonSection,
 	type MyTournamentReviewScope,
 	type MyTournamentReviewStatus,
+	type MyTournamentSeasonSection,
 	type MyTournamentSeasonReview,
 } from "./tournament-review-v2.repository";
 
 type ManagerReviewArgs = { snapshotRevision?: string | null };
 type ManagerGameweekArgs = { eventId: number; snapshotRevision?: string | null };
-type CompetitionsDeskArgs = {
-	tournamentId?: number | null;
-	eventId?: number | null;
-	snapshotRevision?: string | null;
-};
-type CompetitionBoardArgs = {
-	tournamentId: number;
-	eventId: number;
-	page?: number | null;
-	pageSize?: number | null;
-	search?: string | null;
-	snapshotRevision?: string | null;
-};
-type CompetitionSeasonPathArgs = {
-	tournamentId: number;
-	throughEventId: number;
-	snapshotRevision?: string | null;
-};
 type CompetitionSetupStatusArgs = { tournamentId: number };
-type MyTournamentReviewCatalogArgs = { scope?: MyTournamentReviewScope | null };
+type MyTournamentReviewCatalogArgs = {
+	scope?: MyTournamentReviewScope | null;
+	first?: number | null;
+	after?: string | null;
+	search?: string | null;
+};
 type MyTournamentGameweekReviewArgs = {
 	tournamentId: number;
 	eventId: number;
@@ -58,7 +45,134 @@ type MyTournamentSeasonReviewArgs = {
 	first?: number | null;
 	after?: string | null;
 };
+type MyTournamentSeasonReviewSectionArgs = {
+	tournamentId: number;
+	throughEventId: number;
+	phaseId: string;
+	section: MyTournamentReviewSeasonSection;
+	first?: number | null;
+	after?: string | null;
+	revision: string;
+	semanticSha256: string;
+};
 type MyTournamentReviewStatusArgs = { tournamentId: number };
+
+type ReviewScopePublic = {
+	tournamentId: number;
+	eventId: number;
+	revision: string;
+	format: string;
+	state: string;
+	settledAt: string;
+	publishedAt: string;
+	correctedAt: string | null;
+	semanticSha256: string;
+	rowCount: number;
+	expectedSubjectCount: number;
+	readySubjectCount: number;
+	notApplicableSubjectCount: number;
+};
+
+function publicScope(scope: MyTournamentGameweekReview["scope"]): ReviewScopePublic | null {
+	if (!scope) return null;
+	const freshness = scope.freshness;
+	if (!freshness || !scope.contentSha256) return null;
+	return {
+		tournamentId: scope.tournamentId,
+		eventId: scope.eventId,
+		revision: scope.revision,
+		format: scope.format,
+		state: scope.state,
+		settledAt: freshness.eventDataCheckedAt,
+		publishedAt: freshness.publishedAt,
+		correctedAt: scope.correctedAt ?? null,
+		semanticSha256: scope.contentSha256,
+		rowCount: scope.rowCount,
+		expectedSubjectCount: scope.expectedSubjectCount,
+		readySubjectCount: scope.readySubjectCount,
+		notApplicableSubjectCount: scope.notApplicableSubjectCount,
+	};
+}
+
+function publicPayload(review: MyTournamentGameweekReview): Record<string, unknown> | null {
+	if (review.state !== "READY" || !review.scope) return null;
+	if (review.scope.format === "POINTS" && review.points) {
+		return { format: "POINTS", points: review.points };
+	}
+	if (review.scope.format === "H2H" && review.h2h) {
+		return { format: "H2H", h2h: review.h2h };
+	}
+	if (review.scope.format === "KNOCKOUT" && review.knockout) {
+		return { format: "KNOCKOUT", knockout: review.knockout };
+	}
+	return null;
+}
+
+function publicCatalog(
+	catalog: MyTournamentReviewCatalogConnection | MyTournamentReviewCatalog
+): MyTournamentReviewCatalogConnection {
+	const connection = "edges" in catalog ? catalog : null;
+	const tournaments = catalog.tournaments ?? connection?.edges.map((edge) => edge.node) ?? [];
+	const edges =
+		connection?.edges && connection.edges.length > 0
+			? connection.edges.map((edge) => ({ ...edge, node: publicCatalogNode(edge.node) }))
+			: tournaments.map((node) => ({
+					cursor: Buffer.from(String(node.tournamentId), "utf8").toString("base64url"),
+					node: publicCatalogNode(node),
+				}));
+	return {
+		state: catalog.state,
+		asOf: catalog.asOf,
+		viewerEntryId: catalog.viewerEntryId,
+		adminReadAll: catalog.adminReadAll,
+		edges,
+		pageInfo: connection?.pageInfo ?? {
+			hasNextPage: false,
+			endCursor: edges.at(-1)?.cursor ?? null,
+		},
+		tournaments,
+	};
+}
+
+function publicCatalogNode(node: MyTournamentReviewCatalogConnection["edges"][number]["node"]) {
+	return {
+		...node,
+		setupStatus: node.setupStatus ?? "unknown",
+		previousReadyEventId: node.previousReadyEventId ?? null,
+		latestFinalizedScope: node.latestFinalizedScope ?? null,
+		phaseSummaries: node.phaseSummaries ?? [],
+	};
+}
+
+function publicSeason(review: MyTournamentSeasonReview) {
+	const finalized = review.finalizedEventIds ?? [];
+	const latest = review.latestEventId ?? finalized.at(-1) ?? null;
+	const phases = review.phases?.length
+		? review.phases
+		: review.format
+			? [
+					{
+						phaseId: review.format.toLowerCase(),
+						format: review.format,
+						startEventId: finalized[0] ?? latest ?? 1,
+						endEventId: finalized.at(-1) ?? latest ?? 1,
+						state: review.state,
+						settledAt: review.freshness?.eventDataCheckedAt ?? null,
+						publishedAt: review.freshness?.publishedAt ?? null,
+						correctedAt: null,
+						revision: review.latestRevision,
+						semanticSha256: review.semanticSha256 ?? null,
+					},
+				]
+			: [];
+	return {
+		state: review.state,
+		tournamentId: review.tournamentId,
+		throughEventId: review.throughEventId,
+		latestFinalizedEventId: latest,
+		phases,
+	};
+}
 
 export const createMyFplResolvers = (
 	repository: MyFplRepository = myFplRepository,
@@ -81,40 +195,6 @@ export const createMyFplResolvers = (
 			measureRequestStage(context.requestTiming, "myFplManagerGameweek", () =>
 				repository.loadManagerGameweek(context, args.eventId, args.snapshotRevision)
 			),
-		myFplCompetitionsDesk: (
-			_parent: unknown,
-			args: CompetitionsDeskArgs,
-			context: GraphQLContext
-		): Promise<MyFplCompetitionsDesk> =>
-			measureRequestStage(context.requestTiming, "myFplCompetitionsDesk", () =>
-				repository.loadCompetitionsDesk(
-					context,
-					args.tournamentId,
-					args.eventId,
-					args.snapshotRevision
-				)
-			),
-		myFplCompetitionBoard: (
-			_parent: unknown,
-			args: CompetitionBoardArgs,
-			context: GraphQLContext
-		): Promise<MyFplCompetitionBoardPage> =>
-			measureRequestStage(context.requestTiming, "myFplCompetitionBoard", () =>
-				repository.loadCompetitionBoard(context, args)
-			),
-		myFplCompetitionSeasonPath: (
-			_parent: unknown,
-			args: CompetitionSeasonPathArgs,
-			context: GraphQLContext
-		): Promise<MyFplCompetitionSeasonPath> =>
-			measureRequestStage(context.requestTiming, "myFplCompetitionSeasonPath", () =>
-				repository.loadCompetitionSeasonPath(
-					context,
-					args.tournamentId,
-					args.throughEventId,
-					args.snapshotRevision
-				)
-			),
 		myFplCompetitionSetupStatus: (
 			_parent: unknown,
 			args: CompetitionSetupStatusArgs,
@@ -127,26 +207,41 @@ export const createMyFplResolvers = (
 			_parent: unknown,
 			args: MyTournamentReviewCatalogArgs,
 			context: GraphQLContext
-		): Promise<MyTournamentReviewCatalog> =>
+		): Promise<MyTournamentReviewCatalogConnection> =>
 			measureRequestStage(context.requestTiming, "myTournamentReviewCatalog", () =>
-				reviewRepository.loadCatalog(context, args.scope ?? "ACCESSIBLE")
+				reviewRepository.loadCatalog(context, args.scope ?? "ACCESSIBLE", args).then(publicCatalog)
 			),
 		myTournamentGameweekReview: (
 			_parent: unknown,
 			args: MyTournamentGameweekReviewArgs,
 			context: GraphQLContext
-		): Promise<MyTournamentGameweekReview> =>
+		): Promise<Record<string, unknown>> =>
 			measureRequestStage(context.requestTiming, "myTournamentGameweekReview", () =>
-				reviewRepository.loadGameweekReview(context, args)
+				reviewRepository.loadGameweekReview(context, args).then((review) => ({
+					state: review.state,
+					scope: publicScope(review.scope),
+					payload: publicPayload(review),
+				}))
 			),
 		myTournamentSeasonReview: (
 			_parent: unknown,
 			args: MyTournamentSeasonReviewArgs,
 			context: GraphQLContext
-		): Promise<MyTournamentSeasonReview> =>
+		): Promise<Record<string, unknown>> =>
 			measureRequestStage(context.requestTiming, "myTournamentSeasonReview", () =>
-				reviewRepository.loadSeasonReview(context, args)
+				reviewRepository.loadSeasonReview(context, args).then(publicSeason)
 			),
+		myTournamentSeasonReviewSection: (
+			_parent: unknown,
+			args: MyTournamentSeasonReviewSectionArgs,
+			context: GraphQLContext
+		): Promise<MyTournamentSeasonSection> =>
+			measureRequestStage(context.requestTiming, "myTournamentSeasonReviewSection", () => {
+				if (!reviewRepository.loadSeasonReviewSection) {
+					throw new Error("Review section reader is unavailable");
+				}
+				return reviewRepository.loadSeasonReviewSection(context, args);
+			}),
 		myTournamentReviewStatus: (
 			_parent: unknown,
 			args: MyTournamentReviewStatusArgs,
@@ -155,6 +250,27 @@ export const createMyFplResolvers = (
 			measureRequestStage(context.requestTiming, "myTournamentReviewStatus", () =>
 				reviewRepository.loadStatus(context, args.tournamentId)
 			),
+	},
+	MyTournamentGameweekReview: {
+		scope: (parent: Record<string, unknown>) => parent.scope ?? null,
+		payload: (parent: Record<string, unknown>) => parent.payload ?? null,
+	},
+	MyTournamentReviewPayload: {
+		__resolveType: (value: Record<string, unknown>) => {
+			if (value.format === "POINTS") return "MyTournamentReviewPointsPayload";
+			if (value.format === "H2H") return "MyTournamentReviewH2HPayload";
+			if (value.format === "KNOCKOUT") return "MyTournamentReviewKnockoutPayload";
+			return null;
+		},
+	},
+	MyTournamentReviewPointsPayload: {
+		format: () => "POINTS",
+	},
+	MyTournamentReviewH2HPayload: {
+		format: () => "H2H",
+	},
+	MyTournamentReviewKnockoutPayload: {
+		format: () => "KNOCKOUT",
 	},
 	MyFplSnapshotMeta: {
 		completeness: (parent: MyFplSnapshotMeta, _args: unknown, context: GraphQLContext) =>

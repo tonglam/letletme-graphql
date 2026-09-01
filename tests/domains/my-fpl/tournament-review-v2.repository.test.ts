@@ -7,14 +7,14 @@ import {
 	MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
 	MY_TOURNAMENT_REVIEW_STATUS_SQL,
 	createMyTournamentReviewRepository,
-	postgresJsonbContentHash,
+	tournamentReviewPublicationHash as postgresJsonbContentHash,
 } from "../../../src/domains/my-fpl/tournament-review-v2.repository";
 import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
 
 const publicationRow = (overrides: Record<string, unknown> = {}) => {
 	const payload = {
-		schemaVersion: "my-tournament-review-v2",
-		metricVersion: "descriptive-v1",
+		schemaVersion: "my-tournament-review-v2.1",
+		metricVersion: "settled-review-v2",
 		format: "POINTS",
 		points: {
 			headline: "gross",
@@ -48,8 +48,8 @@ const publicationRow = (overrides: Record<string, unknown> = {}) => {
 		event_id: 4,
 		revision: 8,
 		format: "POINTS",
-		schema_version: "my-tournament-review-v2",
-		metric_version: "descriptive-v1",
+		schema_version: "my-tournament-review-v2.1",
+		metric_version: "settled-review-v2",
 		event_data_checked_at: "2026-08-20T00:00:00.000Z",
 		source_min_checked_at: "2026-08-20T00:00:01.000Z",
 		source_max_checked_at: "2026-08-20T00:00:02.000Z",
@@ -83,8 +83,8 @@ const h2hPublicationRow = (overrides: Record<string, unknown> = {}) =>
 		not_applicable_subject_count: 1,
 		row_count: 1,
 		payload: {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "H2H",
 			h2h: {
 				matches: [
@@ -131,8 +131,8 @@ const knockoutPublicationRow = (overrides: Record<string, unknown> = {}) =>
 		not_applicable_subject_count: 0,
 		row_count: 1,
 		payload: {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: {
 				matches: [
@@ -174,12 +174,28 @@ const catalogRow = (overrides: Record<string, unknown> = {}) => ({
 	league_id: 6953,
 	league_type: "classic",
 	total_team_num: 2,
+	group_mode: "points_races",
+	group_started_event_id: 1,
+	group_ended_event_id: 38,
+	knockout_mode: "no_knockout",
+	knockout_started_event_id: null,
+	knockout_ended_event_id: null,
 	latest_finalized_event_id: 4,
-	latest_available_event_id: 3,
+	latest_ready_event_id: 3,
 	latest_revision: 8,
 	latest_format: "POINTS",
 	latest_state: "PENDING",
 	published_at: "2026-08-20T00:00:03.000Z",
+	setup_status: "ready",
+	previous_ready_event_id: null,
+	finalized_format: "POINTS",
+	finalized_state: "PENDING",
+	finalized_next_attempt_at: null,
+	finalized_execution_attempts: 1,
+	finalized_source_rechecks: 0,
+	finalized_degraded_at: null,
+	finalized_revision: null,
+	finalized_published_at: null,
 	...overrides,
 });
 
@@ -209,8 +225,8 @@ describe("My Tournament Review V2 repository", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"date_trunc('milliseconds', head_event.data_checked_at)"
 		);
-		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("tournament.setup_status = 'ready'");
-		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT 500");
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).not.toContain("LIMIT 500");
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT $6::integer");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"head_obligation.ready_revision = review_head.revision"
 		);
@@ -293,85 +309,8 @@ describe("My Tournament Review V2 repository", () => {
 		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
 		expect(queries).toBe(1);
 		expect(observedSql).toBe(MY_TOURNAMENT_REVIEW_STATUS_SQL);
-		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: 4 });
+		expect(result).toMatchObject({ tournamentId: 6953, latestFinalizedEventId: 4 });
 		expect(result.events).toHaveLength(1);
-	});
-
-	it("rejects a cached READY status without an immutable publication identity", async () => {
-		const redis = new TestRedis();
-		let databaseReads = 0;
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => {
-				databaseReads += 1;
-				return {
-					rows: [
-						{
-							event_id: 4,
-							format: "POINTS",
-							state: "READY",
-							next_attempt_at: null,
-							execution_attempts: 1,
-							source_rechecks: 0,
-							degraded_at: null,
-							revision: 8,
-							published_at: "2026-08-20T00:00:03.000Z",
-							latest_finalized_event_id: 4,
-						},
-					],
-				};
-			},
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadStatus(context, 6953);
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			events: Array<{ revision: string | null; publishedAt: string | null }>;
-		};
-		cached.events[0]!.revision = null;
-		cached.events[0]!.publishedAt = null;
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadStatus(context, 6953);
-		expect(result.events[0]).toMatchObject({
-			revision: "8",
-			publishedAt: "2026-08-20T00:00:03.000Z",
-		});
-		expect(databaseReads).toBe(2);
-	});
-
-	it("rejects a cached status summary with an incorrect latest available event", async () => {
-		const redis = new TestRedis();
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => ({
-				rows: [
-					{
-						event_id: 4,
-						format: "POINTS",
-						state: "READY",
-						next_attempt_at: null,
-						execution_attempts: 1,
-						source_rechecks: 0,
-						degraded_at: null,
-						revision: 8,
-						published_at: "2026-08-20T00:00:03.000Z",
-						latest_finalized_event_id: 4,
-					},
-				],
-			}),
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadStatus(context, 6953);
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			latestAvailableEventId: number | null;
-		};
-		cached.latestAvailableEventId = null;
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadStatus(context, 6953);
-		expect(result.latestAvailableEventId).toBe(4);
 	});
 
 	it("preserves a finalized checkpoint when no obligation row exists", async () => {
@@ -394,7 +333,7 @@ describe("My Tournament Review V2 repository", () => {
 			}),
 		});
 		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
-		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: null });
+		expect(result).toMatchObject({ tournamentId: 6953, latestFinalizedEventId: 4 });
 		expect(result.events).toEqual([]);
 	});
 
@@ -419,7 +358,6 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
 		expect(result.latestFinalizedEventId).toBe(4);
-		expect(result.latestAvailableEventId).toBeNull();
 		expect(result.events).toMatchObject([
 			{ eventId: 5, state: "WAITING_SOURCE", revision: null, publishedAt: null },
 		]);
@@ -460,14 +398,17 @@ describe("My Tournament Review V2 repository", () => {
 		const result = await repository.loadCatalog(context, "ACCESSIBLE");
 		expect(result.tournaments[0]).toMatchObject({
 			latestFinalizedEventId: 4,
-			latestAvailableEventId: 3,
 			state: "PENDING",
 		});
 	});
 
-	it("invalidates the catalog cache when the finalized scope advances", async () => {
+	it("reads the catalog directly from PostgreSQL as the finalized scope advances", async () => {
 		const redis = new TestRedis();
-		let current = catalogRow({ latest_available_event_id: 4, latest_state: "READY" });
+		let current = catalogRow({
+			finalized_state: "READY",
+			finalized_revision: 8,
+			finalized_published_at: "2026-08-20T00:00:03.000Z",
+		});
 		let queries = 0;
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => {
@@ -481,12 +422,14 @@ describe("My Tournament Review V2 repository", () => {
 
 		current = catalogRow({
 			latest_finalized_event_id: 5,
-			latest_available_event_id: 4,
-			latest_state: "PENDING",
+			finalized_state: "PENDING",
+			finalized_revision: null,
+			finalized_published_at: null,
 		});
 		const pending = await repository.loadCatalog(context, "ACCESSIBLE");
 		expect(pending.tournaments[0]).toMatchObject({ state: "PENDING", latestFinalizedEventId: 5 });
 		expect(queries).toBe(2);
+		expect(redis.values.size).toBe(0);
 	});
 
 	it("fails closed when a catalog claims READY without a product-visible head", async () => {
@@ -494,11 +437,13 @@ describe("My Tournament Review V2 repository", () => {
 			databaseQuery: async () => ({
 				rows: [
 					catalogRow({
-						latest_available_event_id: null,
+						latest_ready_event_id: null,
 						latest_revision: null,
 						latest_format: null,
 						published_at: null,
-						latest_state: "READY",
+						finalized_state: "READY",
+						finalized_revision: null,
+						finalized_published_at: null,
 					}),
 				],
 			}),
@@ -509,60 +454,34 @@ describe("My Tournament Review V2 repository", () => {
 		});
 	});
 
-	it("fails closed when READY points to an older finalized-event head", async () => {
+	it("uses the finalized scope instead of a stale latest-head projection", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
-			databaseQuery: async () => ({ rows: [catalogRow({ latest_state: "READY" })] }),
+			databaseQuery: async () => ({
+				rows: [
+					catalogRow({
+						latest_finalized_event_id: 4,
+						latest_ready_event_id: 3,
+						latest_state: "PENDING",
+						finalized_state: "READY",
+						finalized_revision: 8,
+						finalized_published_at: "2026-08-20T00:00:03.000Z",
+					}),
+				],
+			}),
 		});
 		const repository = createMyTournamentReviewRepository();
-		await expect(repository.loadCatalog(context, "ACCESSIBLE")).rejects.toMatchObject({
-			extensions: { code: "DATA_INTEGRITY_ERROR" },
-		});
-	});
-
-	it("rejects a cached READY catalog whose immutable head tuple is incomplete", async () => {
-		const redis = new TestRedis();
-		let databaseReads = 0;
-		const publication = catalogRow({
-			latest_finalized_event_id: 4,
-			latest_available_event_id: 4,
-			latest_state: "READY",
-		});
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => {
-				databaseReads += 1;
-				return { rows: [publication] };
-			},
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadCatalog(context, "ACCESSIBLE");
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			tournaments: Array<{ latestRevision: string | null }>;
-		};
-		cached.tournaments[0]!.latestRevision = null;
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
 		const result = await repository.loadCatalog(context, "ACCESSIBLE");
-		expect(result.tournaments[0]?.latestRevision).toBe("8");
-		expect(databaseReads).toBe(2);
+		expect(result.tournaments[0]).toMatchObject({ state: "READY", latestFinalizedEventId: 4 });
 	});
 
-	it("rejects a cached catalog root state that disagrees with its items", async () => {
+	it("keeps catalog and status free of Redis cache state", async () => {
 		const redis = new TestRedis();
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => ({ rows: [catalogRow()] }),
 		});
 		const repository = createMyTournamentReviewRepository();
 		await repository.loadCatalog(context, "ACCESSIBLE");
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as { state: string };
-		cached.state = "READY";
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadCatalog(context, "ACCESSIBLE");
-		expect(result.state).toBe("PENDING");
+		expect(redis.values.size).toBe(0);
 	});
 
 	it("keeps a pending obligation visible when its publication is not ready", async () => {
@@ -1638,8 +1557,8 @@ describe("My Tournament Review V2 repository", () => {
 			winnerEntryId: null,
 		};
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: { matches: [match, { ...match }] },
 		};
@@ -1703,8 +1622,8 @@ describe("My Tournament Review V2 repository", () => {
 			winnerEntryId: 6953,
 		};
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: { matches: [match] },
 		};
@@ -3218,8 +3137,8 @@ describe("My Tournament Review V2 repository", () => {
 			pointsAgainst,
 		});
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "H2H",
 			h2h: {
 				matches,
@@ -3382,8 +3301,8 @@ describe("My Tournament Review V2 repository", () => {
 
 	it("fails closed when a completed knockout fixture has unsettled score metrics", async () => {
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: {
 				matches: [
@@ -3432,8 +3351,8 @@ describe("My Tournament Review V2 repository", () => {
 
 	it("fails closed when an H2H entry appears in multiple matches", async () => {
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "H2H",
 			h2h: {
 				matches: [
@@ -4073,7 +3992,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(result.h2h?.standings[0]).toMatchObject({ groupId: 1, entryId: 6953 });
 	});
 
-	it("rejects cached non-READY status rows that retain a publication identity", async () => {
+	it("reads status directly and never accepts a cached non-READY identity", async () => {
 		const redis = new TestRedis();
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => ({
@@ -4093,35 +4012,9 @@ describe("My Tournament Review V2 repository", () => {
 				],
 			}),
 		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadStatus(context, 6953);
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			events: Array<{ state: string; revision: string | null; publishedAt: string | null }>;
-		};
-		cached.events[0]!.state = "PENDING";
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadStatus(context, 6953);
+		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
 		expect(result.events[0]).toMatchObject({ state: "READY", revision: "8" });
-	});
-
-	it("rejects a cached catalog with an invalid DateTime asOf", async () => {
-		const redis = new TestRedis();
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => ({ rows: [catalogRow()] }),
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadCatalog(context, "ACCESSIBLE");
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as { asOf: string };
-		cached.asOf = "not-a-date";
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadCatalog(context, "ACCESSIBLE");
-		expect(result.asOf).not.toBe("not-a-date");
+		expect(redis.values.size).toBe(0);
 	});
 
 	it("rejects a cached Gameweek whose scope does not match the observed head", async () => {

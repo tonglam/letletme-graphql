@@ -93,6 +93,7 @@ const NON_PROPAGATING_LIMIT_ROOTS = new Set([
 	"myTournamentGameweekReview",
 	"myTournamentSeasonReview",
 	"tournamentOfficialH2HHistory",
+	"myTournamentSeasonReviewSection",
 ]);
 
 type GraphQLPayload = GraphQLRequestPayload;
@@ -1182,13 +1183,11 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["managedTournamentStatus", 2],
 	["myFplManagerReview", 8],
 	["myFplManagerGameweek", 5],
-	["myFplCompetitionsDesk", 10],
-	["myFplCompetitionBoard", 10],
-	["myFplCompetitionSeasonPath", 5],
 	["myFplCompetitionSetupStatus", 5],
 	["myTournamentReviewCatalog", 10],
 	["myTournamentGameweekReview", 20],
 	["myTournamentSeasonReview", 20],
+	["myTournamentSeasonReviewSection", 20],
 	["myTournamentReviewStatus", 5],
 ]);
 
@@ -1255,13 +1254,20 @@ const accepted = ({
 	const optimizedMyFplRoots = new Set([
 		"myFplManagerReview",
 		"myFplManagerGameweek",
-		"myFplCompetitionsDesk",
-		"myFplCompetitionBoard",
-		"myFplCompetitionSeasonPath",
 		"myFplCompetitionSetupStatus",
 	]);
 	const optimizedMyFplRequest =
 		rootFields.length > 0 && rootFields.every((field) => optimizedMyFplRoots.has(field.name));
+	const optimizedTournamentReviewRoots = new Set([
+		"myTournamentReviewCatalog",
+		"myTournamentGameweekReview",
+		"myTournamentSeasonReview",
+		"myTournamentSeasonReviewSection",
+		"myTournamentReviewStatus",
+	]);
+	const optimizedTournamentReviewRequest =
+		rootFields.length > 0 &&
+		rootFields.every((field) => optimizedTournamentReviewRoots.has(field.name));
 	return {
 		ok: true,
 		shape,
@@ -1271,7 +1277,7 @@ const accepted = ({
 					BOUNDED_PUBLIC_ROOT_RATE_LIMIT_FLOOR * rootFields.length,
 					heavyRootCost(rootFields)
 				)
-			: optimizedMyFplRequest
+			: optimizedMyFplRequest || optimizedTournamentReviewRequest
 				? heavyRootCost(rootFields)
 				: Math.max(1, Math.ceil(weightedComplexity / 10), heavyRootCost(rootFields)),
 		rootFields: rootFields.map((field) => field.name),
@@ -1318,14 +1324,6 @@ export const validateGraphQLPayloadLimits = (
 		rootNames.every(
 			(field) =>
 				field.name === "tournamentDetailDesk" && field.responseKey === "tournamentDetailDesk"
-		);
-	const usesMyFplCompetitionsDesk =
-		onlyReachableDefinitions &&
-		responseKeys.size === 1 &&
-		rootNames.length > 0 &&
-		rootNames.every(
-			(field) =>
-				field.name === "myFplCompetitionsDesk" && field.responseKey === "myFplCompetitionsDesk"
 		);
 	const usesPlayerStatsDesk =
 		onlyReachableDefinitions &&
@@ -1389,7 +1387,8 @@ export const validateGraphQLPayloadLimits = (
 		rootNames.every(
 			(field) =>
 				(field.name === "myTournamentGameweekReview" ||
-					field.name === "myTournamentSeasonReview") &&
+					field.name === "myTournamentSeasonReview" ||
+					field.name === "myTournamentSeasonReviewSection") &&
 				field.responseKey === field.name
 		);
 	const maxAstNodes = usesTournamentDetailDesk
