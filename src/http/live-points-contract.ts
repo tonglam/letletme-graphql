@@ -17,6 +17,7 @@ const LIVE_POINTS_ROOT_FIELDS = new Set([
 	"tournamentOfficialH2HHistory",
 	"tournamentSelectionIndex",
 	"tournamentEntrySquads",
+	"tournamentDetailDesk",
 	"gameweekDesk",
 	"homeGameweek",
 ]);
