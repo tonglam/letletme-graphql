@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { DataPublicationManifest } from "../../src/infra/data-publication";
 import {
 	coreDatasetRevision,
+	getCoreDatasetRevision,
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
 	getCoreDataSnapshot,
@@ -104,6 +105,21 @@ describe("typed Data snapshots", () => {
 		expect(first.currentEventId).toBe(1);
 		expect(first.teams[0]?.strength).toBeNull();
 		expect(coreDatasetRevision(first)).toBe("core-7");
+	});
+
+	it("reads only the Core manifest when a lightweight root needs a cache revision", async () => {
+		const publication = buildCorePublication("2627", 7, buildTestCoreData(1));
+		const redis = new TestRedis(publication);
+		let databaseCalls = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseCalls += 1;
+				return { rows: [] };
+			},
+		});
+
+		expect(await getCoreDatasetRevision(context)).toBe("core-7");
+		expect(databaseCalls).toBe(0);
 	});
 
 	it("preserves the request pin across Apollo's shallow context clone", async () => {

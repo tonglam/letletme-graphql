@@ -363,7 +363,12 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		 AND head_event.data_checked_at IS NOT NULL
 		WHERE review_head.season_id = tournament.season_id
 		  AND review_head.tournament_id = tournament.tournament_id
-		  AND publication.event_data_checked_at = head_event.data_checked_at
+		  -- Data serializes the checkpoint through JavaScript Date (millisecond
+		  -- precision), while PostgreSQL can retain microseconds on fpl.events.
+		  -- Match the canonical millisecond bucket so a sub-millisecond storage
+		  -- difference does not make every otherwise coherent head disappear.
+		  AND date_trunc('milliseconds', publication.event_data_checked_at) =
+		      date_trunc('milliseconds', head_event.data_checked_at)
 		ORDER BY review_head.event_id DESC
 		LIMIT 1
 	) head ON true
@@ -456,8 +461,9 @@ export const MY_TOURNAMENT_REVIEW_PUBLICATION_SQL = `
 	  AND publication.content_sha256 = $5::text
 		AND event.finished = true
 		AND event.data_checked = true
-		AND event.data_checked_at IS NOT NULL
-		AND publication.event_data_checked_at = event.data_checked_at
+				 AND event.data_checked_at IS NOT NULL
+				 AND date_trunc('milliseconds', publication.event_data_checked_at) =
+				     date_trunc('milliseconds', event.data_checked_at)
 	LIMIT 1
 `;
 
@@ -502,7 +508,8 @@ export const MY_TOURNAMENT_REVIEW_SEASON_SQL = `
 	  AND event.finished = true
 	  AND event.data_checked = true
 	  AND event.data_checked_at IS NOT NULL
-	  AND publication.event_data_checked_at = event.data_checked_at
+	  AND date_trunc('milliseconds', publication.event_data_checked_at) =
+	      date_trunc('milliseconds', event.data_checked_at)
 	LIMIT 1
 `;
 
@@ -580,7 +587,8 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 		 AND event.finished = true
 		 AND event.data_checked = true
 		 AND event.data_checked_at IS NOT NULL
-		 AND publication.event_data_checked_at = event.data_checked_at
+		 AND date_trunc('milliseconds', publication.event_data_checked_at) =
+		     date_trunc('milliseconds', event.data_checked_at)
 		WHERE head.season_id = $1
 		  AND head.tournament_id = $2
 		  AND head.event_id = $3
@@ -695,7 +703,8 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 		WHERE event.finished = true
 		  AND event.data_checked = true
 		  AND event.data_checked_at IS NOT NULL
-		  AND publication.event_data_checked_at = event.data_checked_at
+		  AND date_trunc('milliseconds', publication.event_data_checked_at) =
+		      date_trunc('milliseconds', event.data_checked_at)
 	)
 	SELECT keys.event_id,
 	       coherent_heads.revision,
@@ -770,7 +779,8 @@ export const MY_TOURNAMENT_REVIEW_STATUS_SQL = `
 			 AND event.finished = true
 			 AND event.data_checked = true
 			 AND event.data_checked_at IS NOT NULL
-			 AND publication.event_data_checked_at = event.data_checked_at
+				 AND date_trunc('milliseconds', publication.event_data_checked_at) =
+				     date_trunc('milliseconds', event.data_checked_at)
 			WHERE review_head.season_id = obligation.season_id
 			  AND review_head.tournament_id = obligation.tournament_id
 			  AND review_head.event_id = obligation.event_id
@@ -2182,12 +2192,21 @@ function seasonCountMetadataValid(row: SeasonMetadataRow): boolean {
 	const rowCount = row.row_count === null ? NaN : Number(row.row_count);
 	const readySubjectCount =
 		row.ready_subject_count === null ? NaN : Number(row.ready_subject_count);
+	const format = reviewFormat(row.format) ?? reviewFormat(row.obligation_format);
 	return (
 		Number.isSafeInteger(rowCount) &&
 		rowCount > 0 &&
 		Number.isSafeInteger(readySubjectCount) &&
 		readySubjectCount >= 0 &&
-		readySubjectCount <= rowCount
+		// POINTS rows are one-per-subject, so applicability cannot exceed the
+		// row count. H2H and KNOCKOUT use row_count for matches/fixtures while
+		// ready_subject_count counts participating entries and may be larger;
+		// H2H still has a hard two-sides-per-match coverage bound.
+		(format === "POINTS"
+			? readySubjectCount <= rowCount
+			: format === "H2H"
+				? readySubjectCount <= rowCount * 2
+				: true)
 	);
 }
 

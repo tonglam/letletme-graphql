@@ -204,13 +204,31 @@ const seasonMetadataRow = (
 describe("My Tournament Review V2 repository", () => {
 	it("keeps the catalog on the current event checkpoint and bounds ALL reads", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
-			"publication.event_data_checked_at = head_event.data_checked_at"
+			"date_trunc('milliseconds', publication.event_data_checked_at) ="
+		);
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
+			"date_trunc('milliseconds', head_event.data_checked_at)"
 		);
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("tournament.setup_status = 'ready'");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT 500");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"head_obligation.ready_revision = review_head.revision"
 		);
+	});
+
+	it("normalizes PostgreSQL checkpoint precision on every publication read path", () => {
+		const readQueries = [
+			MY_TOURNAMENT_REVIEW_CATALOG_SQL,
+			MY_TOURNAMENT_REVIEW_PUBLICATION_SQL,
+			MY_TOURNAMENT_REVIEW_SEASON_SQL,
+			MY_TOURNAMENT_REVIEW_HEAD_SQL,
+			MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
+			MY_TOURNAMENT_REVIEW_STATUS_SQL,
+		];
+		for (const query of readQueries) {
+			expect(query).toContain("date_trunc('milliseconds', publication.event_data_checked_at)");
+			expect(query).toMatch(/date_trunc\('milliseconds', (?:head_event|event)\.data_checked_at\)/);
+		}
 	});
 
 	it("reads a publication through the captured immutable identity", () => {
@@ -236,7 +254,10 @@ describe("My Tournament Review V2 repository", () => {
 			"publication.content_sha256 = review_head.content_sha256"
 		);
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
-			"publication.event_data_checked_at = event.data_checked_at"
+			"date_trunc('milliseconds', publication.event_data_checked_at) ="
+		);
+		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
+			"date_trunc('milliseconds', event.data_checked_at)"
 		);
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain("publication.format = obligation.format");
 		expect(MY_TOURNAMENT_REVIEW_STATUS_SQL).toContain(
@@ -2872,6 +2893,90 @@ describe("My Tournament Review V2 repository", () => {
 		expect(secondPage.h2h?.standings[0]?.entryId).toBe(6954);
 		expect(secondPage.h2h?.hasNextPage).toBe(false);
 		expect(publicationReads).toBe(2);
+	});
+
+	it("accepts Season H2H metadata with more standings than matches", async () => {
+		const base = h2hPublicationRow();
+		const payload = structuredClone(base.payload) as Record<string, unknown>;
+		const h2h = payload.h2h as Record<string, unknown>;
+		const matches = h2h.matches as Array<Record<string, unknown>>;
+		matches[0] = {
+			...matches[0],
+			isBye: false,
+			home: { ...(matches[0]!.home as Record<string, unknown>), matchPoints: 3 },
+			away: {
+				entryId: 6954,
+				entryName: "Second XI",
+				isAverage: false,
+				netPoints: 38,
+				matchPoints: 0,
+				rank: 2,
+			},
+		};
+		const standings = h2h.standings as Array<Record<string, unknown>>;
+		standings.push({
+			...standings[0],
+			entryId: 6954,
+			entryName: "Second XI",
+			rank: 2,
+			won: 0,
+			lost: 1,
+			matchPoints: 0,
+			pointsFor: 38,
+			pointsAgainst: 42,
+		});
+		const latest = h2hPublicationRow({
+			payload,
+			expected_subject_count: standings.length,
+			ready_subject_count: standings.length,
+			not_applicable_subject_count: 0,
+			content_sha256: postgresJsonbContentHash(payload),
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return { rows: [seasonMetadataRow(latest, [4])] };
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		const result = await createMyTournamentReviewRepository().loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+		});
+		expect(result.state).toBe("READY");
+		expect(result.h2h?.matches).toHaveLength(1);
+		expect(result.h2h?.standings).toHaveLength(2);
+	});
+
+	it("rejects Season H2H metadata beyond two standings per match", async () => {
+		const latest = publicationRow();
+		const older = h2hPublicationRow({
+			event_id: 3,
+			expected_subject_count: 3,
+			ready_subject_count: 3,
+			not_applicable_subject_count: 0,
+		});
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					return {
+						rows: [seasonMetadataRow(latest, [3, 4]), seasonMetadataRow(older, [3, 4])],
+					};
+				}
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		await expect(
+			createMyTournamentReviewRepository().loadSeasonReview(context, {
+				tournamentId: 6953,
+				throughEventId: 4,
+			})
+		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
 	it("uses format-specific cursors for Season knockout pages", async () => {

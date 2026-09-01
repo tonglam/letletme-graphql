@@ -644,6 +644,37 @@ describe("GraphQL request limits", () => {
 		});
 	});
 
+	it("allows the bounded tournament review V2 projections", () => {
+		const fields = Array.from({ length: 100 }, () => "state").join(" ");
+		for (const query of [
+			`query { myTournamentGameweekReview(tournamentId: 1, eventId: 1) { ${fields} } }`,
+			`query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1) { ${fields} } }`,
+		]) {
+			expect(validateGraphQLRequestLimits({ query })).toMatchObject({ ok: true });
+		}
+
+		const ordinary = validateGraphQLRequestLimits({
+			query: `query { events { ${fields} } }`,
+		});
+		expect(ordinary).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
+	it("only grants the tournament review AST cap to a sole effective root", () => {
+		const fields = Array.from({ length: 100 }, () => "state").join(" ");
+		const mixed = validateGraphQLRequestLimits({
+			query: `query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1) { ${fields} } events { id } }`,
+		});
+		expect(mixed).toEqual({
+			ok: false,
+			code: "QUERY_TOO_COMPLEX",
+			message: "GraphQL document exceeds 200 AST nodes",
+		});
+	});
+
 	it("only grants the desk AST cap to the sole effective root", () => {
 		const fields = Array.from({ length: 220 }, () => "kind").join(" ");
 		const mixed = validateGraphQLRequestLimits({
@@ -805,6 +836,16 @@ describe("GraphQL request limits", () => {
 				ok: true,
 				rateLimitCostUnits,
 			});
+		}
+	});
+
+	it("charges a tournament review page once across mutually exclusive format branches", () => {
+		const fields = Array.from({ length: 100 }, () => "state").join(" ");
+		for (const query of [
+			`query { myTournamentGameweekReview(tournamentId: 1, eventId: 1, first: 100) { ${fields} } }`,
+			`query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1, first: 100) { ${fields} } }`,
+		]) {
+			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({ ok: true });
 		}
 	});
 
