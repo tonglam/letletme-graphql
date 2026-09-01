@@ -18,6 +18,7 @@ import {
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
 	RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE,
+	RATE_LIMIT_TELEMETRY_SERVING_PROCESS_LEASE_MS,
 	recordRateLimitAggregate,
 	readRateLimitTelemetryOverflowSpool,
 	readRateLimitTelemetryPersistenceFailureSpool,
@@ -346,7 +347,11 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		await mkdir(spoolDirectory, { recursive: true });
 		await writeFile(
 			rateLimitTelemetryServingProcessIdentityFile,
-			JSON.stringify({ pid: process.pid, generation: servingGeneration }) + "\n",
+			JSON.stringify({
+				pid: process.pid,
+				generation: servingGeneration,
+				heartbeatAt: new Date().toISOString(),
+			}) + "\n",
 			{ encoding: "utf8" }
 		);
 		await writeFile(activePath, "active\n", { encoding: "utf8" });
@@ -385,12 +390,20 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		await mkdir(spoolDirectory, { recursive: true });
 		await writeFile(
 			blueIdentityPath,
-			JSON.stringify({ pid: process.pid, generation: blueGeneration }) + "\n",
+			JSON.stringify({
+				pid: process.pid,
+				generation: blueGeneration,
+				heartbeatAt: new Date().toISOString(),
+			}) + "\n",
 			{ encoding: "utf8" }
 		);
 		await writeFile(
 			greenIdentityPath,
-			JSON.stringify({ pid: process.pid, generation: greenGeneration }) + "\n",
+			JSON.stringify({
+				pid: process.pid,
+				generation: greenGeneration,
+				heartbeatAt: new Date().toISOString(),
+			}) + "\n",
 			{ encoding: "utf8" }
 		);
 		const markerPaths = [
@@ -411,6 +424,35 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 				unlink(greenIdentityPath).catch(() => undefined),
 				...markerPaths.map((path) => unlink(path).catch(() => undefined)),
 			]);
+		}
+	});
+
+	it("does not trust a stale slot lease as a serving process", async () => {
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const date = "2099-02-04";
+		const generation = "stale-serving-generation";
+		const identityPath = join(spoolDirectory, "serving-process.green.json");
+		const markerPath = join(spoolDirectory, `dirty.v3.${date}.${process.pid}.${generation}`);
+		await mkdir(spoolDirectory, { recursive: true });
+		await writeFile(
+			identityPath,
+			JSON.stringify({
+				pid: process.pid,
+				generation,
+				heartbeatAt: new Date(
+					Date.now() - RATE_LIMIT_TELEMETRY_SERVING_PROCESS_LEASE_MS - 1_000
+				).toISOString(),
+			}) + "\n",
+			{ encoding: "utf8" }
+		);
+		await writeFile(markerPath, "stale\n", { encoding: "utf8" });
+		try {
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [date])).toEqual([date]);
+		} finally {
+			await unlink(identityPath).catch(() => undefined);
+			await unlink(markerPath).catch(() => undefined);
 		}
 	});
 

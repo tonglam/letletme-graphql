@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "crypto";
-import { lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,9 @@ export const RATE_LIMIT_TELEMETRY_BATCH_SIZE = 256;
 export const RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE = 4096;
 export const RATE_LIMIT_TELEMETRY_SHUTDOWN_TIMEOUT_MS = 500;
 export const RATE_LIMIT_TELEMETRY_MARKER_RETRY_INTERVAL_MS = 5_000;
+export const RATE_LIMIT_TELEMETRY_SERVING_PROCESS_HEARTBEAT_INTERVAL_MS = 5_000;
+export const RATE_LIMIT_TELEMETRY_SERVING_PROCESS_LEASE_MS = 15_000;
+export const RATE_LIMIT_TELEMETRY_SERVING_PROCESS_CLOCK_SKEW_MS = 5_000;
 
 export type RateLimitAggregateOutcome = "allowed" | "denied" | "would_allow" | "would_deny";
 
@@ -125,7 +128,80 @@ const telemetryProcessGeneration = randomUUID();
 type RateLimitTelemetryServingProcessIdentity = Readonly<{
 	pid: number;
 	generation: string;
+	heartbeatAt: string;
 }>;
+
+let servingProcessHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let servingProcessExitHandlerRegistered = false;
+
+const servingProcessIdentityPayload = (): RateLimitTelemetryServingProcessIdentity => ({
+	pid: process.pid,
+	generation: telemetryProcessGeneration,
+	heartbeatAt: new Date().toISOString(),
+});
+
+const writeServingProcessIdentity = (replaceExisting = true): boolean => {
+	if (!replaceExisting) {
+		try {
+			const raw = readFileSync(rateLimitTelemetryServingProcessIdentityFile, { encoding: "utf8" });
+			const value: unknown = JSON.parse(raw);
+			if (
+				typeof value === "object" &&
+				value !== null &&
+				!Array.isArray(value) &&
+				((value as Record<string, unknown>).pid !== process.pid ||
+					(value as Record<string, unknown>).generation !== telemetryProcessGeneration)
+			) {
+				return false;
+			}
+		} catch (error: unknown) {
+			if (!isNodeErrorWithCode(error, "ENOENT")) throw error;
+		}
+	}
+	const temporaryPath = `${rateLimitTelemetryServingProcessIdentityFile}.${process.pid}.${telemetryProcessGeneration}.${randomUUID()}.tmp`;
+	try {
+		writeFileSync(temporaryPath, `${JSON.stringify(servingProcessIdentityPayload())}\n`, {
+			encoding: "utf8",
+			flag: "wx",
+			mode: 0o600,
+		});
+		renameSync(temporaryPath, rateLimitTelemetryServingProcessIdentityFile);
+	} catch (error: unknown) {
+		try {
+			unlinkSync(temporaryPath);
+		} catch {
+			// Preserve the registration/heartbeat error; the temporary file is only
+			// a best-effort cleanup artifact.
+		}
+		throw error;
+	}
+	return true;
+};
+
+const unregisterRateLimitTelemetryServingProcess = (): void => {
+	if (servingProcessHeartbeatTimer !== null) {
+		clearInterval(servingProcessHeartbeatTimer);
+		servingProcessHeartbeatTimer = null;
+	}
+	try {
+		const raw = readFileSync(rateLimitTelemetryServingProcessIdentityFile, { encoding: "utf8" });
+		const value: unknown = JSON.parse(raw);
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			!Array.isArray(value) &&
+			(value as Record<string, unknown>).pid === process.pid &&
+			(value as Record<string, unknown>).generation === telemetryProcessGeneration
+		) {
+			unlinkSync(rateLimitTelemetryServingProcessIdentityFile);
+		}
+	} catch (error: unknown) {
+		if (!isNodeErrorWithCode(error, "ENOENT")) {
+			// Shutdown remains best-effort; an old identity expires by lease when
+			// synchronous cleanup is unavailable.
+		}
+	}
+};
 
 /**
  * Persist the identity of the process that owns request admission. Reports
@@ -134,22 +210,23 @@ type RateLimitTelemetryServingProcessIdentity = Readonly<{
  */
 export const registerRateLimitTelemetryServingProcess = (): void => {
 	mkdirSync(rateLimitTelemetrySpoolDirectory, { recursive: true });
-	const temporaryPath = `${rateLimitTelemetryServingProcessIdentityFile}.${process.pid}.${telemetryProcessGeneration}.tmp`;
-	try {
-		writeFileSync(
-			temporaryPath,
-			JSON.stringify({ pid: process.pid, generation: telemetryProcessGeneration }) + "\n",
-			{ encoding: "utf8", flag: "wx", mode: 0o600 }
-		);
-		renameSync(temporaryPath, rateLimitTelemetryServingProcessIdentityFile);
-	} catch (error: unknown) {
+	writeServingProcessIdentity();
+	if (servingProcessHeartbeatTimer !== null) clearInterval(servingProcessHeartbeatTimer);
+	servingProcessHeartbeatTimer = setInterval(() => {
 		try {
-			unlinkSync(temporaryPath);
+			if (!writeServingProcessIdentity(false) && servingProcessHeartbeatTimer !== null) {
+				clearInterval(servingProcessHeartbeatTimer);
+				servingProcessHeartbeatTimer = null;
+			}
 		} catch {
-			// Preserve the registration error; the temporary file is only a
-			// best-effort cleanup artifact after startup has already failed.
+			// A transient spool failure lets the lease expire; the next heartbeat
+			// will retry and reports fail closed while ownership is uncertain.
 		}
-		throw error;
+	}, RATE_LIMIT_TELEMETRY_SERVING_PROCESS_HEARTBEAT_INTERVAL_MS);
+	servingProcessHeartbeatTimer.unref?.();
+	if (!servingProcessExitHandlerRegistered) {
+		process.once("exit", unregisterRateLimitTelemetryServingProcess);
+		servingProcessExitHandlerRegistered = true;
 	}
 };
 
@@ -221,16 +298,6 @@ const isNodeErrorWithCode = (error: unknown, code: string): boolean =>
 	"code" in error &&
 	(error as { code?: unknown }).code === code;
 
-const isProcessAlive = (pid: number | null): boolean => {
-	if (pid === null) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error: unknown) {
-		return isNodeErrorWithCode(error, "EPERM");
-	}
-};
-
 const readServingProcessIdentity = async (
 	identityFile: string
 ): Promise<RateLimitTelemetryServingProcessIdentity | null> => {
@@ -241,16 +308,19 @@ const readServingProcessIdentity = async (
 		const record = value as Record<string, unknown>;
 		const pid = record.pid;
 		const generation = record.generation;
+		const heartbeatAt = record.heartbeatAt;
 		if (
-			Object.keys(record).length !== 2 ||
+			Object.keys(record).length !== 3 ||
 			typeof pid !== "number" ||
 			!Number.isSafeInteger(pid) ||
 			pid <= 0 ||
 			typeof generation !== "string" ||
-			!/^[A-Za-z0-9-]+$/.test(generation)
+			!/^[A-Za-z0-9-]+$/.test(generation) ||
+			typeof heartbeatAt !== "string" ||
+			!Number.isFinite(Date.parse(heartbeatAt))
 		)
 			return null;
-		return { pid, generation };
+		return { pid, generation, heartbeatAt };
 	} catch (error: unknown) {
 		if (isNodeErrorWithCode(error, "ENOENT")) return null;
 		return null;
@@ -269,6 +339,19 @@ const readServingProcessIdentities = async (): Promise<
 	);
 	return identities.filter(
 		(identity): identity is RateLimitTelemetryServingProcessIdentity => identity !== null
+	);
+};
+
+const isServingProcessLeaseLive = (
+	identity: RateLimitTelemetryServingProcessIdentity,
+	now = Date.now()
+): boolean => {
+	const heartbeatAt = Date.parse(identity.heartbeatAt);
+	if (!Number.isFinite(heartbeatAt)) return false;
+	const age = now - heartbeatAt;
+	return (
+		age <= RATE_LIMIT_TELEMETRY_SERVING_PROCESS_LEASE_MS &&
+		age >= -RATE_LIMIT_TELEMETRY_SERVING_PROCESS_CLOCK_SKEW_MS
 	);
 };
 
@@ -319,7 +402,7 @@ const readOrphanedDirtyWindowDates = async (
 	);
 	const servingIdentities = await readServingProcessIdentities();
 	const liveServingIdentities = servingIdentities.filter((identity) =>
-		isProcessAlive(identity.pid)
+		isServingProcessLeaseLive(identity)
 	);
 	return [
 		...new Set(
@@ -337,7 +420,7 @@ const readOrphanedDirtyWindowDates = async (
 					// registered yet; production startup registers it before serving.
 					if (entry.ownerPid === process.pid)
 						return entry.ownerGeneration !== telemetryProcessGeneration;
-					return !isProcessAlive(entry.ownerPid);
+					return true;
 				})
 				.map((entry) => entry.date)
 		),
