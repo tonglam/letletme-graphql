@@ -568,15 +568,6 @@ local function detail_candidate(pointer)
       return { publication = publication, manifest = manifest, items = {} }
     end
   end
-  if mode ~= "FULL" then
-    -- HEAD and DESK use the publication plus manifest for revision
-    -- observation only. Do not load immutable player-detail bodies on the
-    -- heartbeat path; FULL is the only mode that verifies their bytes.
-    return { publication = publication, manifest = manifest, items = items }
-  end
-
-  -- FULL reads the immutable item bytes so the TypeScript reader can verify
-  -- SHA256/length/count before constructing player projections.
   for _, item in ipairs(decoded.fixtures) do
     local expected_metadata = tostring(item.count) .. "|" .. tostring(item.bytes) .. "|" .. item.sha256
     if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
@@ -585,9 +576,25 @@ local function detail_candidate(pointer)
     table.insert(items, {
       fixtureId = item.fixtureId,
       key = item.key,
-      payload = read_string(item.key) or null_value(),
+      payload = null_value(),
       metadata = expected_metadata
     })
+  end
+  if mode ~= "FULL" then
+    -- HEAD and DESK do not need player-detail bodies. The producer-bound
+    -- item metadata above still has to be present, so a missing key cannot
+    -- make an intact publication look current and block the previous pointer.
+    -- The body SHA remains unverified until FULL; the TypeScript candidate is
+    -- therefore metadata-only and cannot become a complete process LKG.
+    return { publication = publication, manifest = manifest, items = items }
+  end
+
+  -- FULL reads the immutable item bytes so the TypeScript reader can verify
+  -- SHA256/length/count before constructing player projections.
+  for index, item in ipairs(decoded.fixtures) do
+    local payload = read_string(item.key)
+    if not payload then return { publication = publication, manifest = manifest, items = {} } end
+    items[index].payload = payload
   end
   return { publication = publication, manifest = manifest or null_value(), items = items }
 end
@@ -1294,9 +1301,26 @@ const decodeDetailMetadataCandidate = (
 		!publication ||
 		!manifest ||
 		!sameDetailMetadata(publication, manifest) ||
-		publication.fixtures.length > LIVE_MATCH_MAX_FIXTURES
+		publication.fixtures.length > LIVE_MATCH_MAX_FIXTURES ||
+		raw.items.length !== publication.fixtures.length
 	)
 		return null;
+	const seen = new Set<string>();
+	for (const rawItem of raw.items) {
+		if (rawItem.fixtureId === null || rawItem.key === null) return null;
+		const publicationItem = publication.fixtures.find(
+			(item) => item.fixtureId === rawItem.fixtureId && item.key === rawItem.key
+		);
+		if (
+			!publicationItem ||
+			seen.has(`${rawItem.fixtureId}:${rawItem.key}`) ||
+			rawItem.metadata !==
+				`${publicationItem.count}|${publicationItem.bytes}|${publicationItem.sha256}`
+		)
+			return null;
+		seen.add(`${rawItem.fixtureId}:${rawItem.key}`);
+	}
+	if (seen.size !== publication.fixtures.length) return null;
 	return {
 		publication,
 		fixtures: [],

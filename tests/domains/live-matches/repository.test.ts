@@ -51,7 +51,7 @@ type DeskBundleSlot = {
 type DetailBundleItem = {
 	fixtureId: number;
 	key: string;
-	payload: string;
+	payload: string | null;
 	metadata: string;
 };
 
@@ -499,7 +499,10 @@ describe("Live Matches V3 read path", () => {
 			resetLiveMatchProcessStateForTests();
 			const redis = new TestRedis();
 			const bundle = structuredClone(buildBundle().bundle);
-			bundle.detail.active.items = [];
+			bundle.detail.active.items = bundle.detail.active.items.map((item) => ({
+				...item,
+				payload: null,
+			}));
 			attachBundle(redis, bundle);
 
 			const result = await readLiveMatchday(buildSnapshotContext(redis), 1, mode);
@@ -508,6 +511,19 @@ describe("Live Matches V3 read path", () => {
 			expect(result.detail?.payloadLoaded).toBe(false);
 			expect(result.detail?.fixtures).toEqual([]);
 		}
+	});
+
+	it("rejects metadata when an immutable detail item is missing and uses previous", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		bundle.detail.active.items = [];
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detail?.payloadLoaded).toBe(false);
 	});
 
 	it("rejects a corrupt desk item before accepting a HEAD metadata candidate", async () => {
@@ -618,6 +634,7 @@ describe("Live Matches V3 read path", () => {
 		const bundle = structuredClone(buildBundle().bundle);
 		const item = bundle.detail.active.items[0];
 		if (!item) throw new Error("missing active detail item");
+		if (item.payload === null) throw new Error("missing active detail payload");
 		const players = JSON.parse(item.payload) as Array<Record<string, unknown>>;
 		const firstPlayer = players[0];
 		if (!firstPlayer) throw new Error("missing detail player");
@@ -789,7 +806,7 @@ describe("Live Matches V3 read path", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.data?.liveMatchday).toMatchObject({
-			delivery: { state: "FRESH" },
+			delivery: { state: "DEGRADED" },
 			snapshot: {
 				detailDelivery: {
 					state: "DEGRADED",
@@ -1402,6 +1419,9 @@ describe("Live Matches V3 read path", () => {
 			detailScript.indexOf("payload = read_string(item.key)")
 		);
 		expect(detailScript).toContain('if mode ~= "FULL" then');
+		expect(detailScript.indexOf("redis_type(item.key)")).toBeLessThan(
+			detailScript.indexOf('if mode ~= "FULL" then')
+		);
 		expect(detailScript.indexOf('if mode ~= "FULL" then')).toBeLessThan(
 			detailScript.indexOf("payload = read_string(item.key)")
 		);

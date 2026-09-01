@@ -94,10 +94,11 @@ const detailState = (
 		return "DEGRADED";
 	if (detail.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
 	if (isPast(detail.publication.staleAt)) return "DEGRADED";
-	// HEAD and DESK deliberately validate only the detail manifest. Its
-	// metadata is still useful for freshness and revision observation, but it
-	// must never be advertised as a complete player payload.
-	if (mode !== "FULL" && detail.payloadLoaded === false) return "DEGRADED";
+	// HEAD and DESK validate the detail manifest and compact item metadata. The
+	// metadata is useful for revision observation, but it must never be
+	// advertised as a complete player payload without a FULL body SHA check.
+	if (mode !== "FULL" && detail.payloadLoaded === false)
+		return deskHasStartedActivity(desk) ? "DEGRADED" : "PENDING";
 	return "FRESH";
 };
 
@@ -117,7 +118,7 @@ const deliveryState = (
 	if (detail && detail.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
 	if (detail && isPast(detail.publication.staleAt))
 		return mode === "FULL" || detailRequired ? "DEGRADED" : "STALE";
-	if (mode === "FULL" && detailRequired && detail?.payloadLoaded === false) return "DEGRADED";
+	if (detailRequired && detail?.payloadLoaded === false) return "DEGRADED";
 	return "FRESH";
 };
 
