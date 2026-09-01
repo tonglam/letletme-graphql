@@ -39,6 +39,16 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("NETWORK_SPARE_WORKER_RATIO");
 		expect(capacitySource).toContain("workerCountForStage");
 		expect(capacitySource).toContain("spareWorkers");
+		expect(capacitySource).toContain("http2CapacityWaiters");
+		expect(capacitySource).toContain("totalRemaining");
+		expect(capacitySource).toContain("waitForHttp2Capacity");
+		expect(capacitySource).toContain("runtimeReadinessSamples");
+		expect(capacitySource).toContain('new URL("/health/ready", endpoint.origin)');
+		expect(capacitySource).toContain("runtimeReadinessHealthy");
+		expect(capacitySource).not.toContain("LIVE_MATCH_LOAD_REQUIRE_READY");
+		expect(capacitySource.indexOf("reserveHttp2Stream(selected.session)")).toBeLessThan(
+			capacitySource.indexOf("stream = session.request")
+		);
 		expect(capacitySource).not.toContain("report.maxInFlight");
 		expect(capacitySource).not.toContain("gunzipSync");
 		expect(capacitySource).not.toContain("brotliDecompressSync");

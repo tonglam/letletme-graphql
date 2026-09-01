@@ -142,6 +142,7 @@ if (metricsEndpoint !== null) validateCapacityEndpoint(metricsEndpoint, "cold");
 const metricsDeployHealthEndpoint = metricsEndpoint
 	? new URL("/health/deploy", metricsEndpoint.origin)
 	: null;
+const readyHealthEndpoint = new URL("/health/ready", endpoint.origin);
 const stages = [
 	...new Set(
 		(process.env.LIVE_MATCH_LOAD_STAGES ?? "50,100,200,300")
@@ -164,7 +165,6 @@ if (requestedRunId && !/^[A-Za-z0-9._-]{1,48}$/.test(requestedRunId)) {
 }
 const runId = requestedRunId || `match-${Date.now().toString(36)}`;
 const outputPath = option("--output") ?? process.env.LIVE_MATCH_LOAD_OUTPUT;
-const requireReady = process.env.LIVE_MATCH_LOAD_REQUIRE_READY !== "false";
 const expectedDeploySha = required("LIVE_MATCH_LOAD_DEPLOY_SHA").toLowerCase();
 if (!/^[0-9a-f]{40}$/.test(expectedDeploySha)) {
 	throw new Error("LIVE_MATCH_LOAD_DEPLOY_SHA must be the exact 40-character lowercase Git SHA");
@@ -325,9 +325,35 @@ let http2SessionPromise: Promise<ClientHttp2Session> | null = null;
 let http2CapacityTarget: number | null = null;
 let http2EnsurePromise: Promise<Http2CapacityEvidence> | null = null;
 let http2Closing = false;
-let http2RoundRobin = 0;
+let http2DispatchCursor = 0;
 const http2UnusableSessions = new WeakSet<ClientHttp2Session>();
 let http2CapacityEvidence: Http2CapacityEvidence | null = null;
+
+type Http2CapacityWaiter = {
+	resolve: () => void;
+	reject: (error: Error) => void;
+};
+
+const http2CapacityWaiters = new Set<Http2CapacityWaiter>();
+
+const wakeHttp2CapacityWaiters = (): void => {
+	const waiters = [...http2CapacityWaiters];
+	http2CapacityWaiters.clear();
+	for (const waiter of waiters) waiter.resolve();
+};
+
+const rejectHttp2CapacityWaiters = (error: Error): void => {
+	const waiters = [...http2CapacityWaiters];
+	http2CapacityWaiters.clear();
+	for (const waiter of waiters) waiter.reject(error);
+};
+
+const waitForHttp2Capacity = (): Promise<void> => {
+	if (http2Closing) return Promise.reject(new Error("HTTP/2 capacity pool is closing"));
+	return new Promise((resolve, reject) => {
+		http2CapacityWaiters.add({ resolve, reject });
+	});
+};
 
 const isHttp2SessionUsable = (session: ClientHttp2Session): boolean =>
 	!session.closed && !session.destroyed && !http2UnusableSessions.has(session);
@@ -336,7 +362,8 @@ const removeHttp2Session = (session: ClientHttp2Session): void => {
 	const index = http2Sessions.findIndex((slot) => slot.session === session);
 	if (index < 0) return;
 	http2Sessions.splice(index, 1);
-	if (http2RoundRobin >= http2Sessions.length) http2RoundRobin = 0;
+	if (http2DispatchCursor >= Number.MAX_SAFE_INTEGER) http2DispatchCursor = 0;
+	wakeHttp2CapacityWaiters();
 	scheduleHttp2CapacityReplenish();
 };
 
@@ -388,6 +415,7 @@ const createHttp2Session = (): Promise<ClientHttp2Session> =>
 				maxConcurrentStreams: advertisedMaxConcurrentStreams,
 				activeStreams: 0,
 			});
+			wakeHttp2CapacityWaiters();
 			resolve(session);
 		};
 		const onRemoteSettings = (settings: Settings) => {
@@ -411,6 +439,7 @@ const createHttp2Session = (): Promise<ClientHttp2Session> =>
 			if (index >= 0) {
 				const slot = http2Sessions[index]!;
 				http2Sessions[index] = { ...slot, maxConcurrentStreams };
+				wakeHttp2CapacityWaiters();
 				if (
 					http2CapacityTarget !== null &&
 					http2CapacityOf(usableHttp2Slots()) < http2CapacityTarget
@@ -456,19 +485,52 @@ const createSharedHttp2Session = (): Promise<ClientHttp2Session> => {
 };
 
 async function getHttp2Session(): Promise<ClientHttp2Session> {
-	let slots = usableHttp2Slots();
-	if (http2CapacityTarget !== null && http2CapacityOf(slots) < http2CapacityTarget) {
-		await ensureHttp2Capacity(http2CapacityTarget);
-		slots = usableHttp2Slots();
-	}
-	if (slots.length > 0) {
+	while (true) {
+		if (http2Closing) throw new Error("HTTP/2 capacity pool is closing");
+		const slots = usableHttp2Slots();
+		if (http2CapacityTarget !== null && http2CapacityOf(slots) < http2CapacityTarget) {
+			await ensureHttp2Capacity(http2CapacityTarget);
+			continue;
+		}
+
 		const available = slots.filter((slot) => slot.activeStreams < slot.maxConcurrentStreams);
-		const candidates = available.length > 0 ? available : slots;
-		const slot = candidates[http2RoundRobin % candidates.length];
-		http2RoundRobin = (http2RoundRobin + 1) % candidates.length;
-		return slot!.session;
+		if (available.length > 0) {
+			const remainingCapacity = available.map((slot) => ({
+				slot,
+				remaining: slot.maxConcurrentStreams - slot.activeStreams,
+			}));
+			const totalRemaining = remainingCapacity.reduce(
+				(total, candidate) => total + candidate.remaining,
+				0
+			);
+			let ticket = http2DispatchCursor % totalRemaining;
+			http2DispatchCursor =
+				http2DispatchCursor >= Number.MAX_SAFE_INTEGER - 1 ? 0 : http2DispatchCursor + 1;
+			let selected = remainingCapacity[remainingCapacity.length - 1]!.slot;
+			for (const candidate of remainingCapacity) {
+				if (ticket < candidate.remaining) {
+					selected = candidate.slot;
+					break;
+				}
+				ticket -= candidate.remaining;
+			}
+
+			// Reserve before session.request(). JavaScript does not interleave this
+			// synchronous update with another selector, so a burst cannot queue
+			// streams on a slot that has already exhausted its advertised budget.
+			reserveHttp2Stream(selected.session);
+			return selected.session;
+		}
+
+		if (slots.length === 0) {
+			await createSharedHttp2Session();
+			continue;
+		}
+
+		// Spare processing workers wait for a released advertised slot instead of
+		// creating locally queued HTTP/2 streams that would fake concurrency.
+		await waitForHttp2Capacity();
 	}
-	return createSharedHttp2Session();
 }
 
 const reserveHttp2Stream = (session: ClientHttp2Session): void => {
@@ -483,6 +545,7 @@ const releaseHttp2Stream = (session: ClientHttp2Session): void => {
 	if (index < 0) return;
 	const slot = http2Sessions[index]!;
 	http2Sessions[index] = { ...slot, activeStreams: Math.max(0, slot.activeStreams - 1) };
+	wakeHttp2CapacityWaiters();
 };
 
 async function ensureHttp2Capacity(
@@ -537,7 +600,8 @@ function closeHttp2Session(): void {
 	http2CapacityTarget = null;
 	const sessions = http2Sessions.map((slot) => slot.session);
 	http2Sessions.length = 0;
-	http2RoundRobin = 0;
+	http2DispatchCursor = 0;
+	rejectHttp2CapacityWaiters(new Error("HTTP/2 capacity pool is closing"));
 	for (const session of sessions) {
 		if (!session.closed && !session.destroyed) session.close();
 	}
@@ -736,6 +800,9 @@ function requestOnceHttp2(stage: number): Promise<RawResponse> {
 
 		const assignStream = (session: ClientHttp2Session): void => {
 			if (!isHttp2SessionUsable(session)) {
+				// The selector reserved this session before resolving. Release the
+				// reservation even when the close event wins the hand-off race.
+				releaseHttp2Stream(session);
 				if (sessionRetryUsed) {
 					fail(new Error("http2 session became unusable before request assignment"));
 					return;
@@ -746,6 +813,10 @@ function requestOnceHttp2(stage: number): Promise<RawResponse> {
 				return;
 			}
 
+			// getHttp2Session has already reserved one advertised stream slot. Keep
+			// the ownership visible while session.request() is attempted so every
+			// failure path releases that reservation exactly once.
+			assignedSession = session;
 			let stream;
 			try {
 				stream = session.request({
@@ -762,6 +833,8 @@ function requestOnceHttp2(stage: number): Promise<RawResponse> {
 					"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
 				});
 			} catch (error) {
+				releaseHttp2Stream(session);
+				assignedSession = null;
 				if (!sessionRetryUsed && !isHttp2SessionUsable(session)) {
 					sessionRetryUsed = true;
 					removeHttp2Session(session);
@@ -771,8 +844,6 @@ function requestOnceHttp2(stage: number): Promise<RawResponse> {
 				fail(error);
 				return;
 			}
-			reserveHttp2Stream(session);
-			assignedSession = session;
 			beginNetworkRequest(stage);
 
 			const chunks: Buffer[] = [];
@@ -864,7 +935,7 @@ function semanticError(body: unknown): string | null {
 	const data = isRecord(body.data) ? body.data : null;
 	const root = data && isRecord(data.liveMatchday) ? data.liveMatchday : null;
 	if (!root) return "missing_live_matchday";
-	if (root.availability !== "READY") return requireReady ? "availability_not_ready" : null;
+	if (root.availability !== "READY") return "availability_not_ready";
 	const delivery = isRecord(root.delivery) ? root.delivery : null;
 	const deliveryState = delivery?.state;
 	if (deliveryState !== "FRESH" && deliveryState !== "FINAL") return "unhealthy_delivery";
@@ -1210,6 +1281,18 @@ type DeploymentIdentitySample = {
 const deploymentIdentitySamples: DeploymentIdentitySample[] = [];
 let deploymentIdentityFailure: string | null = null;
 
+type RuntimeReadinessSample = {
+	phase: string;
+	status: number | null;
+	responseStatus: string | null;
+	observedSha: string | null;
+	checks: Record<string, string> | null;
+	ok: boolean;
+};
+
+const runtimeReadinessSamples: RuntimeReadinessSample[] = [];
+let runtimeReadinessFailure: string | null = null;
+
 const verifyDeploymentIdentity = async (
 	phase: string,
 	healthEndpoint: URL,
@@ -1247,6 +1330,62 @@ const verifyAllDeploymentIdentities = async (phase: string): Promise<boolean> =>
 			? true
 			: await verifyDeploymentIdentity(`${phase}-metrics`, metricsDeployHealthEndpoint, "metrics");
 	return graphqlOk && metricsOk;
+};
+
+const verifyRuntimeReadiness = async (phase: string): Promise<boolean> => {
+	if (runtimeReadinessFailure !== null) return false;
+	try {
+		const response = await fetch(readyHealthEndpoint, {
+			headers: { accept: "application/json" },
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		const payload = (await response.json()) as unknown;
+		const checksValue = isRecord(payload) && isRecord(payload.checks) ? payload.checks : null;
+		const checks = checksValue
+			? (Object.fromEntries(
+					Object.entries(checksValue).filter(
+						([key, value]) =>
+							["redis", "rateLimitRedis", "postgres", "season"].includes(key) &&
+							typeof value === "string"
+					)
+				) as Record<string, string>)
+			: null;
+		const observedSha =
+			isRecord(payload) && typeof payload.deploySha === "string"
+				? payload.deploySha.toLowerCase()
+				: null;
+		const responseStatus =
+			isRecord(payload) && typeof payload.status === "string" ? payload.status : null;
+		const checksHealthy =
+			checks !== null &&
+			["redis", "rateLimitRedis", "postgres", "season"].every((key) => checks[key] === "ok");
+		const ok =
+			response.ok && responseStatus === "ok" && observedSha === expectedDeploySha && checksHealthy;
+		runtimeReadinessSamples.push({
+			phase,
+			status: response.status,
+			responseStatus,
+			observedSha,
+			checks,
+			ok,
+		});
+		if (!ok) {
+			runtimeReadinessFailure = `${phase}: /health/ready did not report healthy checks and the expected deploy SHA`;
+			return false;
+		}
+		return true;
+	} catch (error) {
+		runtimeReadinessSamples.push({
+			phase,
+			status: null,
+			responseStatus: null,
+			observedSha: null,
+			checks: null,
+			ok: false,
+		});
+		runtimeReadinessFailure = `${phase}: /health/ready readiness check failed (${error instanceof Error ? error.message : String(error)})`;
+		return false;
+	}
 };
 
 async function collectMetrics(): Promise<MetricObservation | null> {
@@ -1297,6 +1436,9 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 if (!(await verifyAllDeploymentIdentities("before-run"))) {
 	throw new Error(deploymentIdentityFailure ?? "deployment identity check failed");
 }
+if (!(await verifyRuntimeReadiness("before-run"))) {
+	throw new Error(runtimeReadinessFailure ?? "runtime readiness check failed");
+}
 const initialMetrics = await collectMetrics();
 const globalDeniedBaseline = initialMetrics?.globalDenied ?? null;
 const poolWaitEventsBaseline = initialMetrics?.poolWaitEvents ?? null;
@@ -1312,7 +1454,9 @@ if (transport === "warm") await ensureHttp2Capacity();
 const startedAt = new Date().toISOString();
 let stageExecutionAborted = false;
 for (const stage of stages) {
-	if (!(await verifyAllDeploymentIdentities(`before-stage-${stage}`))) {
+	const identityReady = await verifyAllDeploymentIdentities(`before-stage-${stage}`);
+	const runtimeReady = await verifyRuntimeReadiness(`before-stage-${stage}`);
+	if (!identityReady || !runtimeReady) {
 		stageExecutionAborted = true;
 		break;
 	}
@@ -1325,7 +1469,9 @@ for (const stage of stages) {
 	} finally {
 		finishNetworkConcurrencyStage(stage);
 	}
-	if (!(await verifyAllDeploymentIdentities(`after-stage-${stage}`))) {
+	const identityReadyAfter = await verifyAllDeploymentIdentities(`after-stage-${stage}`);
+	const runtimeReadyAfter = await verifyRuntimeReadiness(`after-stage-${stage}`);
+	if (!identityReadyAfter || !runtimeReadyAfter) {
 		stageExecutionAborted = true;
 		break;
 	}
@@ -1336,6 +1482,7 @@ await collectMetrics();
 closeHttp2Session();
 if (!stageExecutionAborted && deploymentIdentityFailure === null) {
 	await verifyAllDeploymentIdentities("after-run");
+	await verifyRuntimeReadiness("after-run");
 }
 
 const stageReports = stages.map((stage) => ({
@@ -1453,7 +1600,11 @@ const capacityGate = {
 			return sourceSamples.length >= 2 && sourceSamples.every((sample) => sample.ok);
 		}),
 	stageExecutionAborted: stageExecutionAborted,
-	readyValidationRequired: requireReady,
+	readyValidationRequired: true,
+	runtimeReadinessObserved: runtimeReadinessSamples.length > 0,
+	runtimeReadinessHealthy:
+		runtimeReadinessSamples.length > 0 && runtimeReadinessSamples.every((sample) => sample.ok),
+	runtimeReadinessFailure,
 	dbPoolWaitingIsZero:
 		metricObservations.length > 0 && metricObservations.every((sample) => sample.poolWaiting === 0),
 	dbPoolWaitEventsZero:
@@ -1480,6 +1631,8 @@ const capacityGatePassed = [
 	capacityGate.globalDeniedDeltaIsZero,
 	capacityGate.deploymentIdentityPinned,
 	capacityGate.readyValidationRequired,
+	capacityGate.runtimeReadinessObserved,
+	capacityGate.runtimeReadinessHealthy,
 	capacityGate.dbPoolWaitingIsZero,
 	capacityGate.dbPoolWaitEventsZero,
 	capacityGate.metricsObserved,
@@ -1505,6 +1658,11 @@ const report = {
 		samples: deploymentIdentitySamples,
 		failure: deploymentIdentityFailure,
 	},
+	runtimeReadiness: {
+		endpoint: `${readyHealthEndpoint.origin}${readyHealthEndpoint.pathname}`,
+		samples: runtimeReadinessSamples,
+		failure: runtimeReadinessFailure,
+	},
 	requestCount,
 	oneRequestPerSample: true,
 	request: {
@@ -1525,7 +1683,7 @@ const report = {
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",
-		"Every capacity stage is bounded by /health/deploy identity checks for LIVE_MATCH_LOAD_DEPLOY_SHA; a mismatch aborts the run and fails the gate.",
+		"Every capacity stage is bounded by /health/deploy identity checks for LIVE_MATCH_LOAD_DEPLOY_SHA and /health/ready checks for healthy Redis, rate-limit Redis, PostgreSQL, and season state; any mismatch or unhealthy result aborts the run and fails the gate.",
 		"When metrics are configured, the metrics origin is independently pinned to the same deploy SHA before and around every required stage.",
 		"Pool waiting is gated by both the sampled waiting gauge and the monotonic postgres_pool_wait_events_total counter; transient queue waits cannot disappear between scrapes.",
 		"Any semantic, non-429, or client/workload 429 failure in a required stage fails the stepped capacity gate even if a later stage recovers.",
