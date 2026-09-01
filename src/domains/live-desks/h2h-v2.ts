@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { GraphQLContext } from "../../graphql/context";
+import { LIVE_LEAGUE_CHECKPOINT_SQL } from "./league-v2";
 import { isPublishedEntryLiveInputV2 } from "../entry-live/v2-service";
 
 type H2HScope = "H2H_HEAD" | "H2H_STANDINGS";
@@ -147,6 +148,10 @@ export type H2HLeagueHeadReadV2 = {
 const MAX_LKG_BYTES = 64 * 1024 * 1024;
 const lkg = new Map<string, { value: H2HLeaguePublicationReadV2; bytes: number }>();
 let lkgBytes = 0;
+const requestPublicationMemo = new WeakMap<
+	object,
+	Map<string, Promise<H2HLeaguePublicationReadV2 | null>>
+>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -249,7 +254,11 @@ const validRevisionVector = (value: unknown): value is H2HRevisionVectorV2 => {
 		if (!validHash(value[key])) return false;
 	}
 	for (const key of ["officialRank", "schedule", "averageSide"] as const) {
-		if (value[key] !== null && !validHash(value[key])) return false;
+		if (
+			!Object.prototype.hasOwnProperty.call(value, key) ||
+			(value[key] !== null && !validHash(value[key]))
+		)
+			return false;
 	}
 	return true;
 };
@@ -407,8 +416,15 @@ const validMatch = (value: unknown, manifest: H2HManifestV2): value is H2HMatchP
 		isRecord(value.globalRef) &&
 		validUuid(value.globalRef.publicationId) &&
 		positiveInteger(value.globalRef.generation) &&
+		value.globalRef.publicationId === manifest.globalRef.publicationId &&
+		value.globalRef.generation === manifest.globalRef.generation &&
 		validSide(value.home, manifest.season, manifest.eventId, manifest, value.isBye) &&
 		validSide(value.away, manifest.season, manifest.eventId, manifest, value.isBye) &&
+		(value.isBye ||
+			!(
+				(value.home.entryId !== null && value.home.entryId === value.away.entryId) ||
+				(value.home.isAverage === true && value.away.isAverage === true)
+			)) &&
 		(value.state !== "READY" ||
 			((value.home.entryId === null || value.home.input !== null) &&
 				(value.away.entryId === null || value.away.input !== null)))
@@ -456,7 +472,11 @@ const validHeadPayload = (
 			match.officialMatchId !== row.matchId ||
 			match.state !== row.availability ||
 			match.home.entryId !== row.homeEntryId ||
-			match.away.entryId !== row.awayEntryId
+			match.away.entryId !== row.awayEntryId ||
+			match.eventId !== row.eventId ||
+			match.groupId !== row.groupId ||
+			match.sourceOrder !== row.sourceOrder ||
+			match.phase !== row.phase
 		)
 			return false;
 	}
@@ -478,7 +498,10 @@ const validStandingsPayload = (
 		standings.season !== manifest.season ||
 		standings.eventId !== manifest.eventId ||
 		standings.tournamentId !== manifest.tournamentId ||
-		!positiveInteger(standings.throughEventId) ||
+		typeof standings.throughEventId !== "number" ||
+		!Number.isSafeInteger(standings.throughEventId) ||
+		standings.throughEventId < 0 ||
+		standings.throughEventId > manifest.eventId ||
 		(standings.state !== "READY" &&
 			standings.state !== "UPDATING" &&
 			standings.state !== "UNAVAILABLE") ||
@@ -536,45 +559,6 @@ const validPayload = (
 	manifest.scope === "H2H_HEAD"
 		? validHeadPayload(index, payload, manifest)
 		: validStandingsPayload(index, payload, manifest);
-
-const validHeadIndexOnly = (value: unknown, publication: H2HManifestV2): value is H2HIndexRow[] => {
-	if (
-		publication.scope !== "H2H_HEAD" ||
-		!Array.isArray(value) ||
-		value.length !== publication.counts.expected ||
-		value.length !== publication.items.index.count
-	)
-		return false;
-	const matchIds = new Set<number>();
-	for (const row of value) {
-		if (
-			!isRecord(row) ||
-			!positiveInteger(row.matchId) ||
-			!positiveInteger(row.eventId) ||
-			row.eventId !== publication.eventId ||
-			!positiveInteger(row.groupId) ||
-			typeof row.sourceOrder !== "number" ||
-			!Number.isSafeInteger(row.sourceOrder) ||
-			row.sourceOrder < 0 ||
-			(row.phase !== "REGULAR" && row.phase !== "KNOCKOUT") ||
-			(row.availability !== "READY" &&
-				row.availability !== "PENDING" &&
-				row.availability !== "ERROR") ||
-			(row.homeEntryId !== null && !positiveInteger(row.homeEntryId)) ||
-			(row.awayEntryId !== null && !positiveInteger(row.awayEntryId)) ||
-			row.homeEntryId === undefined ||
-			row.awayEntryId === undefined ||
-			matchIds.has(row.matchId)
-		)
-			return false;
-		matchIds.add(row.matchId);
-	}
-	const rows = value as unknown as H2HIndexRow[];
-	return (
-		publication.counts.published === rows.length &&
-		publication.counts.ready === rows.filter((row) => row.availability === "READY").length
-	);
-};
 
 const remember = (scope: string, value: H2HLeaguePublicationReadV2): void => {
 	const bytes = Buffer.byteLength(canonical(value), "utf8");
@@ -651,10 +635,7 @@ const readCheckpoint = async (
 ): Promise<H2HLeaguePublicationReadV2 | null> => {
 	try {
 		const result = await context.database.query<Record<string, unknown>>(
-			`SELECT manifest, index_payload, payload, row_count, payload_bytes, payload_sha256
-			 FROM competition.live_league_checkpoints
-			 WHERE season_id = $1 AND event_id = $2 AND tournament_id = $3 AND scope_kind = $4
-			 LIMIT 1`,
+			LIVE_LEAGUE_CHECKPOINT_SQL,
 			[context.currentSeason.seasonId, eventId, tournamentId, scope]
 		);
 		const row = result.rows[0];
@@ -686,7 +667,7 @@ const readCheckpoint = async (
 	}
 };
 
-export const readH2HLeaguePublicationV2 = async (
+const readH2HLeaguePublicationUnmemoized = async (
 	context: GraphQLContext,
 	tournamentId: number,
 	eventId: number,
@@ -716,24 +697,53 @@ export const readH2HLeaguePublicationV2 = async (
 	return readCheckpoint(context, season, eventId, tournamentId, scope, expectedGlobal);
 };
 
-const readHeadPointer = async (
+export const readH2HLeaguePublicationV2 = (
 	context: GraphQLContext,
-	season: string,
-	eventId: number,
 	tournamentId: number,
+	eventId: number,
 	scope: H2HScope,
-	pointer: "active" | "previous"
+	expectedGlobal?: { publicationId: string; generation: number }
+): Promise<H2HLeaguePublicationReadV2 | null> => {
+	let memo = requestPublicationMemo.get(context);
+	if (!memo) {
+		memo = new Map();
+		requestPublicationMemo.set(context, memo);
+	}
+	const expectedKey = expectedGlobal
+		? `:${expectedGlobal.publicationId}:${expectedGlobal.generation}`
+		: "";
+	const key = `${scopeKey(context.currentSeason.seasonCode, eventId, tournamentId, scope)}${expectedKey}`;
+	const existing = memo.get(key);
+	if (existing) return existing;
+	const baseKey = scopeKey(context.currentSeason.seasonCode, eventId, tournamentId, scope);
+	const base = expectedGlobal ? memo.get(baseKey) : undefined;
+	const load = base
+		? base.then((value) =>
+				value && expectedGlobalMatches(value.publication, expectedGlobal)
+					? value
+					: readH2HLeaguePublicationUnmemoized(
+							context,
+							tournamentId,
+							eventId,
+							scope,
+							expectedGlobal
+						)
+			)
+		: readH2HLeaguePublicationUnmemoized(context, tournamentId, eventId, scope, expectedGlobal);
+	memo.set(key, load);
+	return load;
+};
+
+const readHead = async (
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number,
+	scope: H2HScope
 ): Promise<H2HLeagueHeadReadV2 | null> => {
-	const publication = parseManifest(
-		await context.redis.get(pointerKey(season, eventId, tournamentId, scope, pointer)),
-		season,
-		eventId,
-		tournamentId,
-		scope
-	);
-	return publication
-		? { publication, servedFrom: pointer === "active" ? "REDIS_CURRENT" : "REDIS_PREVIOUS" }
-		: null;
+	// Validate both immutable items before returning a head.  A syntactically
+	// valid manifest with a missing/corrupt payload is not a usable publication.
+	const complete = await readH2HLeaguePublicationV2(context, tournamentId, eventId, scope);
+	return complete ? { publication: complete.publication, servedFrom: complete.servedFrom } : null;
 };
 
 export const readH2HLeagueHeadV2 = async (
@@ -742,68 +752,24 @@ export const readH2HLeagueHeadV2 = async (
 	eventId: number,
 	scope: H2HScope = "H2H_HEAD"
 ): Promise<H2HLeagueHeadReadV2 | null> => {
-	const season = context.currentSeason.seasonCode;
-	for (const pointer of ["active", "previous"] as const) {
-		try {
-			const value = await readHeadPointer(context, season, eventId, tournamentId, scope, pointer);
-			if (value) return value;
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, eventId, tournamentId, scope, pointer },
-				"H2H league head read unavailable"
-			);
-		}
+	try {
+		return await readHead(context, tournamentId, eventId, scope);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId, tournamentId, scope },
+			"H2H league head read unavailable"
+		);
+		return null;
 	}
-	const cached = lkg.get(scopeKey(season, eventId, tournamentId, scope));
-	if (cached) return { publication: cached.value.publication, servedFrom: "PROCESS_LKG" };
-	const checkpoint = await readCheckpoint(context, season, eventId, tournamentId, scope);
-	return checkpoint
-		? { publication: checkpoint.publication, servedFrom: checkpoint.servedFrom }
-		: null;
 };
 
-/** Read H2H membership from the immutable match index without loading payloads. */
+/** Read H2H membership from the request-scoped complete publication. */
 export const readH2HLeagueMembershipV2 = async (
 	context: GraphQLContext,
 	tournamentId: number,
 	eventId: number,
 	entryId: number
 ): Promise<boolean | null> => {
-	const season = context.currentSeason.seasonCode;
-	for (const pointer of ["active", "previous"] as const) {
-		try {
-			const head = await readHeadPointer(
-				context,
-				season,
-				eventId,
-				tournamentId,
-				"H2H_HEAD",
-				pointer
-			);
-			if (!head) continue;
-			const rawIndex = await context.redis.get(head.publication.items.index.key);
-			const indexMeta = await context.redis.get(`${head.publication.items.index.key}:meta`);
-			if (
-				rawIndex === null ||
-				indexMeta !==
-					`${head.publication.items.index.count}|${head.publication.items.index.bytes}|${head.publication.items.index.sha256}` ||
-				Buffer.byteLength(rawIndex, "utf8") !== head.publication.items.index.bytes
-			)
-				continue;
-			const index = parseJson(rawIndex);
-			if (
-				hash(index) !== head.publication.items.index.sha256 ||
-				!validHeadIndexOnly(index, head.publication)
-			)
-				continue;
-			return index.some((row) => row.homeEntryId === entryId || row.awayEntryId === entryId);
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, eventId, tournamentId, pointer },
-				"H2H roster authorization probe unavailable"
-			);
-		}
-	}
 	try {
 		const publication = await readH2HLeaguePublicationV2(
 			context,
@@ -853,7 +819,11 @@ export const h2hLeagueDeliveryV2 = (
 	now = Date.now()
 ) => {
 	const state =
-		read.publication.state === "FINALIZED" ? "FINAL" : freshness(read.publication, now).state;
+		read.publication.state === "FINALIZED"
+			? "FINAL"
+			: read.servedFrom !== "REDIS_CURRENT"
+				? "DEGRADED"
+				: freshness(read.publication, now).state;
 	return {
 		state,
 		servedFrom: read.servedFrom,

@@ -12,9 +12,11 @@ import {
 	type LeagueLiveScope,
 } from "./league-v2";
 import {
+	LIVE_POINTS_ALGORITHM_VERSION,
 	projectLivePointsFromPublishedEntryV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
+	type LiveDeliveryV2,
 	type LiveCalcDataV2,
 	type LivePublicationReadV2,
 } from "../entry-live/v2-service";
@@ -25,6 +27,7 @@ export type EntryLiveCompetitionBoardSort =
 	| "TRANSFER_COST"
 	| "PLAYED"
 	| "TOTAL_POINTS"
+	| "OVERALL_RANK"
 	| "TEAM_VALUE"
 	| "RANK"
 	| "ENTRY_NAME";
@@ -112,6 +115,8 @@ export type EntryLiveCompetitionBoardPageV2 = {
 };
 
 const MAX_FIRST = 50;
+const MAX_PROJECTION_ENTRIES = 5_000;
+const MAX_PROJECTION_CONCURRENCY = 16;
 const MAX_LKG_BYTES = 64 * 1024 * 1024;
 const projectionCache = new Map<string, { value: EntryLiveCompetitionBoardV2; bytes: number }>();
 const projectionInFlight = new Map<string, Promise<EntryLiveCompetitionBoardV2>>();
@@ -152,6 +157,7 @@ const BOARD_SORTS = new Set<EntryLiveCompetitionBoardSort>([
 	"TRANSFER_COST",
 	"PLAYED",
 	"TOTAL_POINTS",
+	"OVERALL_RANK",
 	"TEAM_VALUE",
 	"RANK",
 	"ENTRY_NAME",
@@ -315,6 +321,79 @@ const rowFor = (
 	};
 };
 
+const deliverySeverity = (servedFrom: LiveCalcDataV2["delivery"]["servedFrom"]): number => {
+	switch (servedFrom) {
+		case "REDIS_CURRENT":
+			return 0;
+		case "REDIS_PREVIOUS":
+			return 1;
+		case "PROCESS_LKG":
+			return 2;
+		case "POSTGRES_CHECKPOINT":
+			return 3;
+		case "FINAL_RESULT":
+			return 0;
+		case "UNAVAILABLE":
+			return 4;
+	}
+};
+
+const withBoardDelivery = (
+	value: LiveCalcDataV2,
+	servedFrom: LeagueLivePublicationReadV2["servedFrom"]
+): LiveCalcDataV2 => {
+	const effectiveServedFrom =
+		deliverySeverity(value.delivery.servedFrom) >= deliverySeverity(servedFrom)
+			? value.delivery.servedFrom
+			: servedFrom;
+	if (effectiveServedFrom === value.delivery.servedFrom && servedFrom === "REDIS_CURRENT")
+		return value;
+	const delivery: LiveDeliveryV2 = {
+		...value.delivery,
+		state: value.delivery.state === "FINAL" ? "FINAL" : "DEGRADED",
+		servedFrom: effectiveServedFrom,
+		reasonCodes: [...new Set([...value.delivery.reasonCodes, "LEAGUE_PUBLICATION_FALLBACK"])],
+	};
+	return {
+		...value,
+		delivery,
+		score: { ...value.score, delivery },
+		snapshot: { ...value.snapshot, delivery },
+	};
+};
+
+const withBoardRowDelivery = (
+	row: IndexedRow,
+	servedFrom: LeagueLivePublicationReadV2["servedFrom"]
+): IndexedRow => {
+	if (!row.score) return row;
+	const effectiveServedFrom =
+		deliverySeverity(row.score.delivery.servedFrom) >= deliverySeverity(servedFrom)
+			? row.score.delivery.servedFrom
+			: servedFrom;
+	if (effectiveServedFrom === row.score.delivery.servedFrom && servedFrom === "REDIS_CURRENT")
+		return row;
+	const delivery: LiveDeliveryV2 = {
+		...row.score.delivery,
+		state: row.score.delivery.state === "FINAL" ? "FINAL" : "DEGRADED",
+		servedFrom: effectiveServedFrom,
+		reasonCodes: [...new Set([...row.score.delivery.reasonCodes, "LEAGUE_PUBLICATION_FALLBACK"])],
+	};
+	return { ...row, score: { ...row.score, delivery } };
+};
+
+const withBoardReadDelivery = (
+	board: EntryLiveCompetitionBoardV2,
+	servedFrom: LeagueLivePublicationReadV2["servedFrom"]
+): EntryLiveCompetitionBoardV2 =>
+	board.servedFrom === servedFrom
+		? board
+		: {
+				...board,
+				servedFrom,
+				rows: board.rows.map((row) => withBoardRowDelivery(row, servedFrom)),
+			};
+
 const noPicksRow = (value: LeagueLiveIndexRowV2): IndexedRow => ({
 	availability: "MISSING",
 	entry: value.entryId,
@@ -355,6 +434,8 @@ const metric = (row: IndexedRow, sort: EntryLiveCompetitionBoardSort): number | 
 			return row.played;
 		case "TOTAL_POINTS":
 			return row.score.totalPoints;
+		case "OVERALL_RANK":
+			return row.overallRank;
 		case "TEAM_VALUE":
 			return row.teamValue;
 		case "RANK":
@@ -394,8 +475,9 @@ const matches = (row: IndexedRow, request: EntryLiveCompetitionBoardRequest): bo
 				(!role || request.ownership.playerIds.some((id) => role.includes(id))))) &&
 		request.teamCountRules.every(
 			(rule) =>
+				row.availability === "READY" &&
 				(teamValues(row, rule.scope).find(([teamId]) => teamId === rule.teamId)?.[1] ?? 0) ===
-				rule.exactCount
+					rule.exactCount
 		)
 	);
 };
@@ -583,12 +665,26 @@ const projectCompleteBoard = async (
 ): Promise<EntryLiveCompetitionBoardV2> => {
 	if (
 		read.publication.globalRef.publicationId !== global.publication.publicationId ||
-		read.publication.globalRef.generation !== global.publication.generation
+		read.publication.globalRef.generation !== global.publication.generation ||
+		read.publication.revisions.scoreCore !== global.publication.revisions.scoreCore.revision ||
+		read.publication.revisions.fixtureIdentity !==
+			global.publication.revisions.fixtureIdentity.revision ||
+		read.publication.revisions.rules !== global.publication.revisions.rules.revision ||
+		read.publication.revisions.algorithm !== LIVE_POINTS_ALGORITHM_VERSION
 	)
 		throw new Error("LEAGUE_GLOBAL_REVISION_MISMATCH");
-	const projected = await Promise.all(
-		read.index.map(async (indexRow): Promise<IndexedRow> => {
-			if (indexRow.availability === "NO_PICKS") return noPicksRow(indexRow);
+	if (read.index.length > MAX_PROJECTION_ENTRIES) throw new Error("LEAGUE_PUBLICATION_TOO_LARGE");
+	const projected = Array<IndexedRow>(read.index.length);
+	let cursor = 0;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const index = cursor++;
+			if (index >= read.index.length) return;
+			const indexRow = read.index[index]!;
+			if (indexRow.availability === "NO_PICKS") {
+				projected[index] = noPicksRow(indexRow);
+				continue;
+			}
 			const input = read.payload[String(indexRow.entryId)];
 			if (
 				indexRow.inputPublicationId === null ||
@@ -607,8 +703,14 @@ const projectCompleteBoard = async (
 				},
 				entryFromIndex(indexRow)
 			);
-			return rowFor(value, 0, indexRow.overallRank);
-		})
+			projected[index] = rowFor(withBoardDelivery(value, read.servedFrom), 0, indexRow.overallRank);
+		}
+	};
+	await Promise.all(
+		Array.from(
+			{ length: Math.min(MAX_PROJECTION_CONCURRENCY, Math.max(1, read.index.length)) },
+			() => worker()
+		)
 	);
 	const ready = projected.filter(
 		(row): row is IndexedRow & { score: NonNullable<IndexedRow["score"]> } =>
@@ -670,10 +772,10 @@ const projectBoardRead = async (
 	if (cached) {
 		projectionCache.delete(key);
 		projectionCache.set(key, cached);
-		return { ...cached.value, servedFrom: read.servedFrom };
+		return withBoardReadDelivery(cached.value, read.servedFrom);
 	}
 	const existing = projectionInFlight.get(key);
-	if (existing) return existing;
+	if (existing) return existing.then((value) => withBoardReadDelivery(value, read.servedFrom));
 	const load = projectCompleteBoard(context, read, global)
 		.then((value) => {
 			rememberProjection(key, value);
@@ -690,7 +792,8 @@ export const readEntryLiveCompetitionBoardWithPreviousV2 = async (
 	global: LivePublicationReadV2
 ): Promise<EntryLiveCompetitionBoardV2 | null> => {
 	try {
-		return await readEntryLiveCompetitionBoardV2(context, scope, global);
+		const current = await readEntryLiveCompetitionBoardV2(context, scope, global);
+		if (current) return current;
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, eventId: scope.eventId, tournamentId: scope.tournamentId },

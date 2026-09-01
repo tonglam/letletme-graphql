@@ -17,10 +17,15 @@ import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import type { Event } from "../events/repository";
 import {
 	calcLivePointsForEntriesV2,
+	readLivePublicationByRefV2,
 	type BatchLiveCalcResultV2,
 	type LiveCalcDataV2,
 } from "../entry-live/v2-service";
-import { readH2HLeaguePublicationV2, type H2HStandingsPayloadV2 } from "../live-desks/h2h-v2";
+import {
+	readH2HLeaguePublicationV2,
+	type H2HLeaguePublicationReadV2,
+	type H2HStandingsPayloadV2,
+} from "../live-desks/h2h-v2";
 
 export type HomePublicBootstrap = {
 	context: CoreEventContext;
@@ -155,18 +160,39 @@ const validOfficialH2HRank = (
 	Number.isSafeInteger(rank) &&
 	rank > 0;
 
+type HomeOfficialH2HStandingRead = {
+	payload: H2HStandingsPayloadV2;
+	globalRef: H2HLeaguePublicationReadV2["publication"]["globalRef"];
+	globalFinalized: boolean;
+};
+
+type HomeOfficialH2HStandingInput = H2HStandingsPayloadV2 | HomeOfficialH2HStandingRead;
+
+const standingPayload = (
+	value: HomeOfficialH2HStandingInput | null | undefined
+): H2HStandingsPayloadV2 | undefined =>
+	value && "payload" in value ? value.payload : (value ?? undefined);
+
+const standingHasFinalGlobal = (value: HomeOfficialH2HStandingInput | null | undefined): boolean =>
+	value && "payload" in value ? value.globalFinalized : true;
+
 export const applyHomeOfficialH2HRanksV2 = (
 	desk: HomePersonalDesk,
 	eventId: number,
-	standingsByTournament: ReadonlyMap<number, H2HStandingsPayloadV2 | null>
+	standingsByTournament: ReadonlyMap<number, HomeOfficialH2HStandingInput | null>
 ): HomePersonalDesk => ({
 	...desk,
 	leagueRanks: desk.leagueRanks.map((league) => {
 		if (league.leagueType !== "H2H" || league.tournamentId === null) return league;
-		const payload = standingsByTournament.get(league.tournamentId) ?? undefined;
+		const raw = standingsByTournament.get(league.tournamentId) ?? undefined;
+		const payload = standingPayload(raw);
 		const standing = payload?.rows.find((row) => row.entryId === desk.entryId);
 		const rank = standing?.rank;
-		if (!validOfficialH2HRank(payload ?? undefined, eventId, rank) || typeof rank !== "number") {
+		if (
+			!standingHasFinalGlobal(raw) ||
+			!validOfficialH2HRank(payload, eventId, rank) ||
+			typeof rank !== "number"
+		) {
 			return { ...league, rankState: "UPDATING" };
 		}
 		return {
@@ -205,7 +231,27 @@ const reconcileHomeOfficialH2HRanksV2 = async (
 					"H2H_STANDINGS"
 				);
 				const payload = read?.payload.standings as H2HStandingsPayloadV2 | undefined;
-				return [tournamentId, payload ?? null] as const;
+				if (!read || !payload) return [tournamentId, null] as const;
+				const global = await readLivePublicationByRefV2(
+					context,
+					eventId,
+					read.publication.globalRef
+				).catch(() => null);
+				if (
+					!global ||
+					global.publication.state !== "FINALIZED" ||
+					global.publication.publicationId !== read.publication.globalRef.publicationId ||
+					global.publication.generation !== read.publication.globalRef.generation
+				)
+					return [tournamentId, null] as const;
+				return [
+					tournamentId,
+					{
+						payload,
+						globalRef: read.publication.globalRef,
+						globalFinalized: true,
+					},
+				] as const;
 			} catch (error) {
 				context.logger.warn(
 					{

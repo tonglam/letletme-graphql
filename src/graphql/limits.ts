@@ -1175,7 +1175,7 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["tournamentEntryRankingSummary", 10],
 	["tournamentParticipants", 30],
 	["tournamentSeasonSnapshot", 30],
-	["tournamentOfficialH2H", 5],
+	["tournamentOfficialH2H", 30],
 	["tournamentOfficialH2HHistory", 5],
 	["tournamentDetailDesk", 30],
 	["managedTournamentStatus", 2],

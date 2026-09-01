@@ -1,3 +1,4 @@
+import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../../graphql/context";
 import type { Entry } from "../../contracts/entry";
 import type { Event } from "../events/repository";
@@ -9,6 +10,7 @@ import {
 	h2hLeagueDeliveryV2,
 	h2hLeagueTimesV2,
 	readH2HLeaguePublicationV2,
+	readH2HLeagueMembershipV2,
 	type H2HLeaguePublicationReadV2,
 	type H2HMatchPayloadV2,
 	type H2HMatchSideV2,
@@ -16,6 +18,7 @@ import {
 } from "../live-desks/h2h-v2";
 import { assertLiveTournamentAccessV2 } from "../live-desks/access-v2";
 import {
+	LIVE_POINTS_ALGORITHM_VERSION,
 	projectLivePointsFromPublishedEntryV2,
 	readLivePublicationByRefV2,
 	type LivePublicationReadV2,
@@ -321,6 +324,17 @@ const projectH2HSide = async (
 	side: H2HMatchSideV2
 ) => {
 	if (match.state !== "READY") return unavailableH2HSide(side, match.state);
+	if (match.isBye && side.entryId === null && !side.isAverage) {
+		return {
+			availability: "READY",
+			entryId: null,
+			entryName: side.entryName,
+			playerName: side.playerName,
+			isAverage: false,
+			points: side.officialNetPoints ?? 0,
+			netPoints: side.officialNetPoints ?? 0,
+		};
+	}
 	if (side.entryId === null || side.isAverage) {
 		return side.officialNetPoints === null
 			? unavailableH2HSide(side, "PENDING")
@@ -377,30 +391,66 @@ const unavailableH2HDelivery = () => ({
 	reasonCodes: ["PUBLICATION_UNAVAILABLE"],
 });
 
+const samePublicationRef = (
+	left: { publicationId: string; generation: number },
+	right: { publicationId: string; generation: number }
+): boolean => left.publicationId === right.publicationId && left.generation === right.generation;
+
+const h2hPublicationMatchesGlobal = (
+	publication: H2HLeaguePublicationReadV2["publication"],
+	global: LivePublicationReadV2
+): boolean =>
+	publication.revisions.scoreCore === global.publication.revisions.scoreCore.revision &&
+	publication.revisions.fixtureIdentity === global.publication.revisions.fixtureIdentity.revision &&
+	publication.revisions.rules === global.publication.revisions.rules.revision &&
+	publication.revisions.algorithm === LIVE_POINTS_ALGORITHM_VERSION;
+
+const h2hMatchDelivery = (
+	base: ReturnType<typeof h2hLeagueDeliveryV2>,
+	global: LivePublicationReadV2 | null
+) => {
+	if (!global)
+		return {
+			...base,
+			state: base.state === "FINAL" ? "FINAL" : "DEGRADED",
+			servedFrom: "UNAVAILABLE",
+			reasonCodes: [...new Set([...base.reasonCodes, "MATCH_GLOBAL_UNAVAILABLE"])],
+		};
+	if (global.servedFrom === "REDIS_CURRENT") return base;
+	return {
+		...base,
+		state: base.state === "FINAL" ? "FINAL" : "DEGRADED",
+		servedFrom: global.servedFrom,
+		reasonCodes: [...new Set([...base.reasonCodes, "MATCH_GLOBAL_FALLBACK"])],
+	};
+};
+
 const readTournamentOfficialH2HV2 = async (
 	context: GraphQLContext,
 	tournamentId: number,
 	eventId: number
 ) => {
-	const [headRead, standingsRead] = await Promise.all([
+	const viewerEntryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
+	const membership = viewerEntryId
+		? await readH2HLeagueMembershipV2(context, tournamentId, eventId, viewerEntryId)
+		: null;
+	await assertLiveTournamentAccessV2(context, tournamentId, viewerEntryId ?? 0, membership);
+	const [headRead, initialStandingsRead] = await Promise.all([
 		readH2HLeaguePublicationV2(context, tournamentId, eventId, "H2H_HEAD"),
 		readH2HLeaguePublicationV2(context, tournamentId, eventId, "H2H_STANDINGS"),
 	]);
-	const viewerEntryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
-	const publicationMembership =
-		viewerEntryId && headRead
-			? headRead.index.some((indexRow) => {
-					if (!("matchId" in indexRow)) return false;
-					const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
-					return match?.home.entryId === viewerEntryId || match?.away.entryId === viewerEntryId;
-				})
-			: null;
-	await assertLiveTournamentAccessV2(
-		context,
-		tournamentId,
-		viewerEntryId ?? 0,
-		publicationMembership
-	);
+	const standingsRead =
+		headRead &&
+		initialStandingsRead &&
+		!samePublicationRef(headRead.publication.globalRef, initialStandingsRead.publication.globalRef)
+			? await readH2HLeaguePublicationV2(
+					context,
+					tournamentId,
+					eventId,
+					"H2H_STANDINGS",
+					headRead.publication.globalRef
+				)
+			: initialStandingsRead;
 	if (!headRead) {
 		return {
 			eventId,
@@ -427,9 +477,13 @@ const readTournamentOfficialH2HV2 = async (
 		};
 	}
 	const publication = headRead.publication;
-	const global = await readLivePublicationByRefV2(context, eventId, publication.globalRef).catch(
-		() => null
-	);
+	const globalRead = await readLivePublicationByRefV2(
+		context,
+		eventId,
+		publication.globalRef
+	).catch(() => null);
+	const global =
+		globalRead && h2hPublicationMatchesGlobal(publication, globalRead) ? globalRead : null;
 	const delivery = h2hLeagueDeliveryV2(headRead);
 	const revisions = h2hRevisionVector(publication);
 	const times = h2hLeagueTimesV2(publication);
@@ -443,72 +497,104 @@ const readTournamentOfficialH2HV2 = async (
 	const globalForMatch = async (
 		match: H2HMatchPayloadV2
 	): Promise<LivePublicationReadV2 | null> => {
+		if (!samePublicationRef(match.globalRef, publication.globalRef)) return null;
 		const key = `${match.globalRef.publicationId}:${match.globalRef.generation}`;
 		const existing = globalByRef.get(key);
 		if (existing) return existing;
-		const load = readLivePublicationByRefV2(context, eventId, match.globalRef).catch(() => null);
+		const load = readLivePublicationByRefV2(context, eventId, match.globalRef)
+			.then((value) => (value && h2hPublicationMatchesGlobal(publication, value) ? value : null))
+			.catch(() => null);
 		globalByRef.set(key, load);
 		return load;
 	};
-	const matches = await Promise.all(
-		headRead.index.flatMap((indexRow) => {
-			if (!("matchId" in indexRow)) return [];
-			const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
-			if (!match) return [];
-			return [
-				(async () => {
-					const matchGlobal = await globalForMatch(match);
-					const [home, away] = await Promise.all([
-						projectH2HSide(context, matchGlobal, match, match.home),
-						projectH2HSide(context, matchGlobal, match, match.away),
-					]);
-					const availability =
-						match.state !== "READY"
-							? match.state
-							: home.availability === "ERROR" || away.availability === "ERROR"
-								? "ERROR"
-								: home.availability === "PENDING" || away.availability === "PENDING"
-									? "PENDING"
-									: "READY";
-					return {
-						officialMatchId: match.officialMatchId,
-						eventId: match.eventId,
-						groupId: match.groupId,
-						sourceOrder: match.sourceOrder,
-						phase: match.phase,
-						knockoutName: match.knockoutName,
-						tiebreak: match.tiebreak,
-						isBye: match.isBye,
-						availability,
-						delivery: {
-							...delivery,
-							reasonCodes:
-								availability === "READY"
-									? delivery.reasonCodes
-									: [...delivery.reasonCodes, "MATCH_PROJECTION_INCOMPLETE"],
-						},
-						revisions: matchGlobal
-							? {
-									...revisions,
-									publicationId: matchGlobal.publication.publicationId,
-									generation: matchGlobal.publication.generation,
-									scoreCore: matchGlobal.publication.revisions.scoreCore.revision,
-									fixtureIdentity: matchGlobal.publication.revisions.fixtureIdentity.revision,
-									algorithm: "live-points-v2-algorithm-1",
-								}
-							: revisions,
-						times: {
-							...times,
-							sourceCheckedAt: match.sourceCheckedAt,
-							contentUpdatedAt: match.sourceCheckedAt,
-						},
-						home,
-						away,
-					};
-				})(),
-			];
-		})
+	const matchRows = headRead.index.flatMap((indexRow) => {
+		if (!("matchId" in indexRow)) return [];
+		const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
+		return match ? [{ indexRow, match }] : [];
+	});
+	const projectedEntryIds = new Set(
+		matchRows.flatMap(({ match }) =>
+			[match.home.entryId, match.away.entryId].filter(
+				(entryId): entryId is number => entryId !== null
+			)
+		)
 	);
+	if (projectedEntryIds.size > 500 || matchRows.length > 500)
+		throw new GraphQLError("The live H2H publication is too large to project", {
+			extensions: { code: "LIVE_H2H_TOO_LARGE" },
+		});
+	type ProjectedH2HMatch = {
+		officialMatchId: number;
+		eventId: number;
+		groupId: number;
+		sourceOrder: number;
+		phase: H2HMatchPayloadV2["phase"];
+		knockoutName: string | null;
+		tiebreak: string | null;
+		isBye: boolean;
+		availability: "READY" | "PENDING" | "ERROR";
+		delivery: ReturnType<typeof h2hMatchDelivery>;
+		revisions: ReturnType<typeof h2hRevisionVector>;
+		times: ReturnType<typeof h2hLeagueTimesV2>;
+		home: Awaited<ReturnType<typeof projectH2HSide>>;
+		away: Awaited<ReturnType<typeof projectH2HSide>>;
+	};
+	let matchCursor = 0;
+	const matchResults: Array<ProjectedH2HMatch | undefined> = Array.from(
+		{ length: matchRows.length },
+		() => undefined
+	);
+	const matchWorker = async (): Promise<void> => {
+		for (;;) {
+			const index = matchCursor++;
+			if (index >= matchRows.length) return;
+			const { match } = matchRows[index]!;
+			const matchGlobal = await globalForMatch(match);
+			const [home, away] = await Promise.all([
+				projectH2HSide(context, matchGlobal, match, match.home),
+				projectH2HSide(context, matchGlobal, match, match.away),
+			]);
+			const availability =
+				match.state !== "READY"
+					? match.state
+					: home.availability === "ERROR" || away.availability === "ERROR"
+						? "ERROR"
+						: home.availability === "PENDING" || away.availability === "PENDING"
+							? "PENDING"
+							: "READY";
+			const matchDelivery = h2hMatchDelivery(delivery, matchGlobal);
+			matchResults[index] = {
+				officialMatchId: match.officialMatchId,
+				eventId: match.eventId,
+				groupId: match.groupId,
+				sourceOrder: match.sourceOrder,
+				phase: match.phase,
+				knockoutName: match.knockoutName,
+				tiebreak: match.tiebreak,
+				isBye: match.isBye,
+				availability,
+				delivery:
+					availability === "READY"
+						? matchDelivery
+						: {
+								...matchDelivery,
+								reasonCodes: [...matchDelivery.reasonCodes, "MATCH_PROJECTION_INCOMPLETE"],
+							},
+				revisions: revisions,
+				times: {
+					...times,
+					sourceCheckedAt: match.sourceCheckedAt,
+					contentUpdatedAt: match.sourceCheckedAt,
+				},
+				home,
+				away,
+			};
+		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(16, Math.max(1, matchRows.length)) }, () => matchWorker())
+	);
+	const matches = matchResults.filter((match): match is ProjectedH2HMatch => match !== undefined);
 	const standingsPayload = standingsRead?.payload.standings as H2HStandingsPayloadV2 | undefined;
 	const standingsState = standingsPayload
 		? standingsPayload.state === "UPDATING"

@@ -372,12 +372,18 @@ const boardResponse = async (
 	context: GraphQLContext,
 	request: EntryLiveCompetitionBoardRequest
 ) => {
-	const headRead = await readLeagueLiveHeadV2(context, {
+	const scope = {
 		season: context.currentSeason.seasonCode,
 		eventId: request.eventId,
 		tournamentId: request.tournamentId,
 		mode: "CLASSIC",
-	});
+	} as const;
+	// Check membership from the immutable roster before loading or projecting
+	// the full board.  Unauthorized requests must not be able to trigger the
+	// expensive all-entry projection path.
+	const membership = await readLeagueLivePublicationMembershipV2(context, scope, request.entryId);
+	await assertLiveTournamentAccessV2(context, request.tournamentId, request.entryId, membership);
+	const headRead = await readLeagueLiveHeadV2(context, scope);
 	const global = headRead
 		? await readLivePublicationByRefV2(
 				context,
@@ -410,7 +416,6 @@ const boardResponse = async (
 			: null;
 	const servingGlobal = global ?? fallbackGlobal;
 	if (!servingGlobal) {
-		await assertLiveTournamentAccessV2(context, request.tournamentId, request.entryId, null);
 		return unavailableBoardResponse(
 			leagueHead(context, headRead, request.eventId, request.tournamentId, "ERROR")
 		);
@@ -426,7 +431,6 @@ const boardResponse = async (
 		servingGlobal
 	);
 	if (!board) {
-		await assertLiveTournamentAccessV2(context, request.tournamentId, request.entryId, null);
 		return unavailableBoardResponse(
 			leagueHead(
 				context,
@@ -437,12 +441,6 @@ const boardResponse = async (
 			)
 		);
 	}
-	await assertLiveTournamentAccessV2(
-		context,
-		request.tournamentId,
-		request.entryId,
-		board.rows.some((row) => row.entry === request.entryId)
-	);
 	const page = queryEntryLiveCompetitionBoardV2(board, request);
 	const read = { publication: board.publication, servedFrom: board.servedFrom };
 	return {

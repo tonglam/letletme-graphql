@@ -802,6 +802,7 @@ describe("direct Data SQL contract", () => {
 				"competition.my_fpl_snapshot_entries",
 				"competition.my_fpl_snapshot_tournament_rows",
 				"competition.my_fpl_snapshot_tournament_aggregates",
+				"competition.live_league_checkpoints",
 				"fpl.live_match_desk_checkpoints",
 				"fpl.live_match_detail_checkpoints",
 			])

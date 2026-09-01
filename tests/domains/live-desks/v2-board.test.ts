@@ -190,4 +190,26 @@ describe("live competition board sorting", () => {
 			queryEntryLiveCompetitionBoardV2(board, request("ASC")).rows.map((item) => item.entry)
 		).toEqual([1, 2]);
 	});
+
+	it("sorts official overall rank independently from live rank", () => {
+		const board: EntryLiveCompetitionBoardV2 = {
+			publication: manifest,
+			servedFrom: "REDIS_CURRENT",
+			boardRevision: "board",
+			scoreCoreRevision: "score-core",
+			rows: [
+				{ ...row(1, 10, 10), overallRank: 2, liveRank: 1 },
+				{ ...row(2, 1, 1), overallRank: 1, liveRank: 2 },
+			],
+			totalEntries: 2,
+			highestEventPoints: 10,
+			averageEventPoints: 5.5,
+		};
+		const result = queryEntryLiveCompetitionBoardV2(board, {
+			...request("ASC"),
+			sort: "OVERALL_RANK",
+		});
+
+		expect(result.rows.map((item) => item.entry)).toEqual([2, 1]);
+	});
 });

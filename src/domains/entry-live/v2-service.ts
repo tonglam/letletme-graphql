@@ -260,7 +260,9 @@ const readGlobalLkg = (
 	expectedScoreCoreRevision: string | undefined,
 	expectedPublicationRef: LivePublicationRefV2 | undefined
 ): GlobalRead | null => {
-	for (const [key, cached] of globalLkg) {
+	for (const key of [...globalLkg.keys()].reverse()) {
+		const cached = globalLkg.get(key);
+		if (!cached) continue;
 		if (!key.startsWith(`${context.currentSeason.seasonCode}:${eventId}:`)) continue;
 		const publication = cached.value.publication;
 		if (
@@ -2050,6 +2052,48 @@ const requireCompleteGlobalPublication = (
 	return null;
 };
 
+/**
+ * Exact league/H2H references are read on the availability-first path, where
+ * opening a new PostgreSQL request would defeat the Redis hot-path contract.
+ * If this request already has an authoritative Core/fixture snapshot, use its
+ * event-scoped expectations. Otherwise the producer's immutable, checksum-
+ * validated publication is the only safe local witness and is checked through
+ * the same complete-publication gate before it can enter the LKG.
+ */
+const validateExactRedisGlobal = async (
+	context: GraphQLContext,
+	global: GlobalRead
+): Promise<GlobalRead | null> => {
+	const scope = requestScope(context);
+	const cachedCorePromise = requestCoreMemo.get(scope);
+	if (cachedCorePromise) {
+		const core = await cachedCorePromise;
+		if (core) {
+			const expectedPlayerIds = await expectedPlayerIdsForEvent(
+				context,
+				global.publication.eventId,
+				core
+			);
+			const expectedFixtureIds = await expectedFixtureIdsForEvent(
+				context,
+				global.publication.eventId
+			);
+			return requireCompleteGlobalPublication(
+				context,
+				global,
+				expectedPlayerIds,
+				expectedFixtureIds
+			);
+		}
+	}
+	return requireCompleteGlobalPublication(
+		context,
+		global,
+		new Set(global.eventLives.map((row) => row.elementId)),
+		new Set(global.fixtures.map((fixture) => fixture.id))
+	);
+};
+
 const readGlobal = async (
 	context: GraphQLContext,
 	eventId: number,
@@ -2072,8 +2116,11 @@ const readGlobal = async (
 			expectedPublicationRef
 		);
 		if (exactRedis) {
-			rememberGlobalLkg(context, eventId, exactRedis);
-			return exactRedis;
+			const completeExactRedis = await validateExactRedisGlobal(context, exactRedis);
+			if (completeExactRedis) {
+				rememberGlobalLkg(context, eventId, completeExactRedis);
+				return completeExactRedis;
+			}
 		}
 		const exactLkg = readGlobalLkg(
 			context,

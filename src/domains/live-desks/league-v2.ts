@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 
 export type LeagueLiveScope = {
@@ -99,6 +100,10 @@ export type LeagueLiveHeadReadV2 = {
 const MAX_LKG_BYTES = 64 * 1024 * 1024;
 const lkg = new Map<string, { value: LeagueLivePublicationReadV2; bytes: number }>();
 let lkgBytes = 0;
+const requestPublicationMemo = new WeakMap<
+	object,
+	Map<string, Promise<LeagueLivePublicationReadV2 | null>>
+>();
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
@@ -213,15 +218,11 @@ const parseManifest = (raw: unknown, scope: LeagueLiveScope): LeagueLiveManifest
 			"algorithm",
 			"content",
 		].every((key) => validHash(revisions[key])) ||
-		(revisions.officialRank !== null &&
-			revisions.officialRank !== undefined &&
-			!validHash(revisions.officialRank)) ||
-		(revisions.schedule !== null &&
-			revisions.schedule !== undefined &&
-			!validHash(revisions.schedule)) ||
-		(revisions.averageSide !== null &&
-			revisions.averageSide !== undefined &&
-			!validHash(revisions.averageSide)) ||
+		!["officialRank", "schedule", "averageSide"].every(
+			(key) =>
+				Object.prototype.hasOwnProperty.call(revisions, key) &&
+				(revisions[key] === null || validHash(revisions[key]))
+		) ||
 		!iso(times.sourceCheckedAt) ||
 		!iso(times.contentUpdatedAt) ||
 		!iso(times.publishedAt) ||
@@ -276,29 +277,6 @@ const validIndexRow = (value: unknown): value is LeagueLiveIndexRowV2 => {
 		(value.inputGeneration === null || nullableInt(value.inputGeneration, 1)) &&
 		(value.inputRevision === null || validHash(value.inputRevision)) &&
 		(value.inputContentUpdatedAt === null || iso(value.inputContentUpdatedAt))
-	);
-};
-
-const validIndexOnly = (
-	value: unknown,
-	publication: LeagueLiveManifestV2
-): value is LeagueLiveIndexRowV2[] => {
-	if (
-		!Array.isArray(value) ||
-		value.length !== publication.counts.expected ||
-		value.length !== publication.items.index.count
-	)
-		return false;
-	const entryIds = new Set<number>();
-	for (const row of value) {
-		if (!validIndexRow(row) || entryIds.has(row.entryId)) return false;
-		entryIds.add(row.entryId);
-	}
-	const rows = value as unknown as LeagueLiveIndexRowV2[];
-	return (
-		publication.counts.published === rows.length &&
-		publication.counts.ready === rows.filter((row) => row.availability === "READY").length &&
-		publication.counts.noPicks === rows.filter((row) => row.availability === "NO_PICKS").length
 	);
 };
 
@@ -366,7 +344,12 @@ const validPublicationPayload = (
 		return false;
 	const ids = new Set<number>();
 	for (const row of index) {
-		if (!validIndexRow(row) || ids.has(row.entryId)) return false;
+		if (
+			!validIndexRow(row) ||
+			ids.has(row.entryId) ||
+			(row.overallRank !== null && publication.revisions.officialRank === null)
+		)
+			return false;
 		ids.add(row.entryId);
 		const value = payload[String(row.entryId)];
 		if (row.availability === "READY") {
@@ -445,11 +428,8 @@ const readCheckpoint = async (
 ): Promise<LeagueLivePublicationReadV2 | null> => {
 	try {
 		const result = await context.database.query<Record<string, unknown>>(
-			`SELECT manifest, index_payload, payload, row_count, payload_bytes, payload_sha256
-			 FROM competition.live_league_checkpoints
-			 WHERE season_id = $1 AND event_id = $2 AND tournament_id = $3 AND scope_kind = 'CLASSIC'
-			 LIMIT 1`,
-			[context.currentSeason.seasonId, scope.eventId, scope.tournamentId]
+			LIVE_LEAGUE_CHECKPOINT_SQL,
+			[context.currentSeason.seasonId, scope.eventId, scope.tournamentId, "CLASSIC"]
 		);
 		const row = result.rows[0];
 		if (!row) return null;
@@ -486,7 +466,7 @@ const readCheckpoint = async (
 	}
 };
 
-export const readLeagueLivePublicationV2 = async (
+const readLeagueLivePublicationUnmemoized = async (
 	context: GraphQLContext,
 	scope: LeagueLiveScope,
 	expectedGlobal?: { publicationId: string; generation: number }
@@ -521,16 +501,48 @@ export const readLeagueLivePublicationV2 = async (
 	return readCheckpoint(context, scope, expectedGlobal);
 };
 
-const readHeadPointer = async (
+export const readLeagueLivePublicationV2 = (
 	context: GraphQLContext,
 	scope: LeagueLiveScope,
-	pointer: "active" | "previous"
+	expectedGlobal?: { publicationId: string; generation: number }
+): Promise<LeagueLivePublicationReadV2 | null> => {
+	let memo = requestPublicationMemo.get(context);
+	if (!memo) {
+		memo = new Map();
+		requestPublicationMemo.set(context, memo);
+	}
+	const expectedKey = expectedGlobal
+		? `:${expectedGlobal.publicationId}:${expectedGlobal.generation}`
+		: "";
+	const key = `${scopeKey(scope)}${expectedKey}`;
+	const existing = memo.get(key);
+	if (existing) return existing;
+	const base = expectedGlobal ? memo.get(scopeKey(scope)) : undefined;
+	const load = base
+		? base.then((value) => {
+				if (
+					value &&
+					expectedGlobal !== undefined &&
+					value.publication.globalRef.publicationId === expectedGlobal.publicationId &&
+					value.publication.globalRef.generation === expectedGlobal.generation
+				)
+					return value;
+				return readLeagueLivePublicationUnmemoized(context, scope, expectedGlobal);
+			})
+		: readLeagueLivePublicationUnmemoized(context, scope, expectedGlobal);
+	memo.set(key, load);
+	return load;
+};
+
+const readHead = async (
+	context: GraphQLContext,
+	scope: LeagueLiveScope
 ): Promise<LeagueLiveHeadReadV2 | null> => {
-	const raw = await context.redis.get(pointerKey(scope, pointer));
-	const publication = parseManifest(raw, scope);
-	return publication
-		? { publication, servedFrom: pointer === "active" ? "REDIS_CURRENT" : "REDIS_PREVIOUS" }
-		: null;
+	// Validate both immutable items before advertising a usable head, then return
+	// only metadata to the GraphQL resolver. Otherwise a corrupt pointer can make
+	// clients skip the full refresh and remain stuck on an unusable generation.
+	const complete = await readLeagueLivePublicationV2(context, scope);
+	return complete ? { publication: complete.publication, servedFrom: complete.servedFrom } : null;
 };
 
 export const readLeagueLivePublicationPointerV2 = async (
@@ -555,64 +567,29 @@ export const readLeagueLiveHeadV2 = async (
 	context: GraphQLContext,
 	scope: LeagueLiveScope
 ): Promise<LeagueLiveHeadReadV2 | null> => {
-	for (const pointer of ["active", "previous"] as const) {
-		try {
-			const value = await readHeadPointer(context, scope, pointer);
-			if (value) return value;
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, eventId: scope.eventId, tournamentId: scope.tournamentId, pointer },
-				"Live league head read unavailable"
-			);
-		}
+	try {
+		return await readHead(context, scope);
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId: scope.eventId, tournamentId: scope.tournamentId },
+			"Live league head read unavailable"
+		);
+		return null;
 	}
-	const cached = lkg.get(scopeKey(scope));
-	if (cached) return { publication: cached.value.publication, servedFrom: "PROCESS_LKG" };
-	const checkpoint = await readCheckpoint(context, scope);
-	return checkpoint
-		? { publication: checkpoint.publication, servedFrom: checkpoint.servedFrom }
-		: null;
 };
 
 /**
- * Authorizes a live head probe from the immutable roster index.  The head
- * probe deliberately avoids the board payload; a full publication read is
- * only needed when Redis has already fallen back to process LKG/PostgreSQL.
- * `null` means that no complete publication was available and the caller may
- * use its narrow durable authorization fallback.
+ * Authorizes a live head probe from the immutable roster index.  The same
+ * request-scoped complete publication read is reused by the later head/board
+ * path, so authorization does not issue a second Redis read. `null` means that
+ * no complete publication was available and the caller may use its narrow
+ * durable authorization fallback.
  */
 export const readLeagueLivePublicationMembershipV2 = async (
 	context: GraphQLContext,
 	scope: LeagueLiveScope,
 	entryId: number
 ): Promise<boolean | null> => {
-	for (const pointer of ["active", "previous"] as const) {
-		try {
-			const head = await readHeadPointer(context, scope, pointer);
-			if (!head) continue;
-			const rawIndex = await context.redis.get(head.publication.items.index.key);
-			const indexMeta = await context.redis.get(`${head.publication.items.index.key}:meta`);
-			if (
-				rawIndex === null ||
-				indexMeta !==
-					`${head.publication.items.index.count}|${head.publication.items.index.bytes}|${head.publication.items.index.sha256}` ||
-				Buffer.byteLength(rawIndex, "utf8") !== head.publication.items.index.bytes
-			)
-				continue;
-			const index = parseJson(rawIndex);
-			if (
-				hash(index) !== head.publication.items.index.sha256 ||
-				!validIndexOnly(index, head.publication)
-			)
-				continue;
-			return index.some((row) => row.entryId === entryId);
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, eventId: scope.eventId, tournamentId: scope.tournamentId, pointer },
-				"Live league roster authorization probe unavailable"
-			);
-		}
-	}
 	try {
 		const publication = await readLeagueLivePublicationV2(context, scope);
 		return publication ? publication.index.some((row) => row.entryId === entryId) : null;
@@ -657,7 +634,11 @@ export const leagueLiveDeliveryV2 = (
 	now = Date.now()
 ) => {
 	const state =
-		read.publication.state === "FINALIZED" ? "FINAL" : freshness(read.publication, now).state;
+		read.publication.state === "FINALIZED"
+			? "FINAL"
+			: read.servedFrom !== "REDIS_CURRENT"
+				? "DEGRADED"
+				: freshness(read.publication, now).state;
 	const servedFrom = read.servedFrom;
 	return {
 		state,
@@ -670,3 +651,46 @@ export const leagueLiveDeliveryV2 = (
 };
 
 export const leagueLiveScopeKey = scopeKey;
+
+export const LIVE_LEAGUE_CHECKPOINT_SQL = `
+	SELECT manifest, index_payload, payload, row_count, payload_bytes, payload_sha256
+	FROM competition.live_league_checkpoints
+	WHERE season_id = $1 AND event_id = $2 AND tournament_id = $3 AND scope_kind = $4
+	LIMIT 1
+`;
+
+/** Exact SQL/result-shape probe for the V2 league checkpoint fallback reader. */
+export const LIVE_LEAGUE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	...(["CLASSIC", "H2H_HEAD", "H2H_STANDINGS"] as const).map((scopeKind) => ({
+		name: `live-league-v2.checkpoint-fallback.${scopeKind.toLowerCase()}`,
+		sql: LIVE_LEAGUE_CHECKPOINT_SQL,
+		values: [2026, 1, 1, scopeKind],
+		resultTypes: [
+			{
+				relation: "competition.live_league_checkpoints",
+				column: "manifest",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "competition.live_league_checkpoints",
+				column: "index_payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{
+				relation: "competition.live_league_checkpoints",
+				column: "payload",
+				pgType: "jsonb",
+				acceptedPgTypes: ["json", "jsonb"],
+			},
+			{ relation: "competition.live_league_checkpoints", column: "row_count", pgType: "integer" },
+			{
+				relation: "competition.live_league_checkpoints",
+				column: "payload_bytes",
+				pgType: "integer",
+			},
+			{ relation: "competition.live_league_checkpoints", column: "payload_sha256", pgType: "text" },
+		],
+	})),
+];
