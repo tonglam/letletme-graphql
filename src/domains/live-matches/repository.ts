@@ -6,8 +6,8 @@ import { DateTimeResolver } from "graphql-scalars";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import type { GraphQLContext } from "../../graphql/context";
 
-export const LIVE_MATCHES_CONTRACT_VERSION = "live-matches-v2" as const;
-export const LIVE_MATCHES_REDIS_PREFIX = "llm:data:v2:fpl:live-match";
+export const LIVE_MATCHES_CONTRACT_VERSION = "live-matches-v3" as const;
+export const LIVE_MATCHES_REDIS_PREFIX = "llm:data:v3:fpl:live-match";
 export const LIVE_MATCHES_POSTGRES_TIMEOUT_MS = 400;
 export const LIVE_MATCHES_PROCESS_LKG_LIMIT = 8;
 export const LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS = 30_000;
@@ -60,8 +60,7 @@ export type MatchDeskFixture = Readonly<{
 export type MatchDetailStat = Readonly<{
 	identifier: string;
 	value: number;
-	points: number;
-	pointsModification: number | null;
+	awardedPoints: number;
 }>;
 
 export type MatchDetailPlayer = Readonly<{
@@ -130,22 +129,28 @@ type MatchDetailPublication = Readonly<{
 type MatchDeskCandidate = Readonly<{
 	publication: MatchDeskPublication;
 	fixtures: readonly MatchDeskFixture[];
+	/** False for HEAD metadata reads; omitted means a full desk payload. */
+	payloadLoaded?: boolean;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
 
 type MatchDetailCandidate = Readonly<{
 	publication: MatchDetailPublication;
 	fixtures: readonly MatchFixtureDetail[];
+	/** False for HEAD/DESK metadata reads; omitted means a full candidate. */
+	payloadLoaded?: boolean;
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 }>;
 
 export type LiveMatchdayRead = Readonly<{
 	season: string;
 	eventId: number | null;
+	readMode?: LiveMatchReadMode;
 	desk: MatchDeskCandidate | null;
 	detail: MatchDetailCandidate | null;
 	redisReadFailed: boolean;
 	postgresReadFailed: boolean;
+	redisRoundtrips: number;
 }>;
 
 type RedisDeskRaw = Readonly<{
@@ -169,9 +174,12 @@ type RedisDetailRaw = Readonly<{
 
 type RedisReadBundle = Readonly<{
 	eventId: number | null;
+	pointer: "active" | "previous";
 	desk: { active: RedisDeskRaw; previous: RedisDeskRaw };
 	detail: { active: RedisDetailRaw; previous: RedisDetailRaw };
 }>;
+
+export type LiveMatchReadMode = "HEAD" | "DESK" | "FULL";
 
 type SelectedLkg = Readonly<{
 	desk: MatchDeskCandidate;
@@ -202,7 +210,6 @@ type ScopedEventCheckpointBudget = Readonly<{
 
 const processLkg = new Map<string, SelectedLkg>();
 const processActiveEvent = new Map<string, number>();
-const processActiveEventCheckedAt = new Map<string, number>();
 const processEventCheckedAt = new Map<string, ScopedEventCheckpointCheck>();
 const processEventCheckpointBudget = new Map<string, ScopedEventCheckpointBudget>();
 const postgresDetailMissUntil = new Map<string, number>();
@@ -232,7 +239,10 @@ const finiteNumber = (value: unknown): value is number =>
 const nonEmptyString = (value: unknown): value is string =>
 	typeof value === "string" && value.length > 0;
 
-// Data's V2 checkpoint contract reserves a fixed-width publication identity.
+const statIdentifierKey = (value: unknown): string | null =>
+	typeof value === "string" && value.trim().length > 0 ? value.trim().toLowerCase() : null;
+
+// Data's V3 checkpoint contract reserves a fixed-width publication identity.
 // Keep the reader boundary equally strict so an arbitrary non-empty value
 // cannot become a trusted publication reference after Redis/PG recovery.
 const validPublicationId = (value: unknown): value is string =>
@@ -326,9 +336,11 @@ const detailItemKeyMatches = (
  * through a sequence of independently changing MGETs. The script returns raw
  * JSON; all contract validation remains in TypeScript where it is testable.
  */
-export const LIVE_MATCHES_READ_BUNDLE_LUA = `
+export const LIVE_MATCHES_READ_POINTER_LUA = `
 local season = ARGV[1]
 local requested_event = ARGV[2]
+local pointer = ARGV[3] or "active"
+local mode = ARGV[4] or "FULL"
 
 local function null_value()
   return cjson.null
@@ -373,7 +385,7 @@ local function desk_candidate(pointer)
   end
   local decoded = nil
   local ok = pcall(function() decoded = cjson.decode(publication) end)
-  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v2" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) then
+  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v3" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) then
     return { publication = publication, payload = null_value(), metadata = null_value() }
   end
   local item = decoded.desk
@@ -384,6 +396,16 @@ local function desk_candidate(pointer)
   local expected_metadata = tostring(item.count) .. "|" .. tostring(item.bytes) .. "|" .. item.sha256
   if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
     return { publication = publication, payload = null_value(), metadata = null_value() }
+  end
+  -- HEAD observes the publication and its immutable item metadata only.  Do
+  -- not read the desk payload until a caller has selected DESK or FULL; this
+  -- keeps heartbeat probes independent of the fixture JSON size.
+  if mode == "HEAD" then
+    return {
+      publication = publication,
+      payload = null_value(),
+      metadata = expected_metadata
+    }
   end
   return {
     publication = publication,
@@ -402,7 +424,7 @@ local function detail_candidate(pointer)
   end
   local decoded = nil
   local ok = pcall(function() decoded = cjson.decode(publication) end)
-  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v2" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) or type(decoded.fixtures) ~= "table" or #decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES} then
+  if not ok or type(decoded) ~= "table" or decoded.contractVersion ~= "live-matches-v3" or decoded.season ~= season or decoded.eventId ~= tonumber(event_id) or not positive_integer(decoded.generation) or type(decoded.fixtures) ~= "table" or #decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES} then
     return { publication = publication, manifest = null_value(), items = {} }
   end
   local manifest_key = "${LIVE_MATCHES_REDIS_PREFIX}:detail:" .. season .. ":" .. event_id .. ":" .. tostring(decoded.generation) .. ":manifest"
@@ -410,6 +432,9 @@ local function detail_candidate(pointer)
   local items = {}
   if not manifest or string.len(manifest) > ${LIVE_MATCH_MAX_PUBLICATION_BYTES} or manifest ~= publication then
     return { publication = publication, manifest = manifest or null_value(), items = items }
+  end
+  if mode == "HEAD" or mode == "DESK" then
+    return { publication = publication, manifest = manifest, items = items }
   end
   local total_bytes = 0
   local seen = {}
@@ -451,8 +476,8 @@ end
 
 return cjson.encode({
   eventId = event_id == "" and null_value() or tonumber(event_id),
-  desk = { active = desk_candidate("active"), previous = desk_candidate("previous") },
-  detail = { active = detail_candidate("active"), previous = detail_candidate("previous") }
+  desk = { active = desk_candidate(pointer), previous = { publication = null_value(), payload = null_value(), metadata = null_value() } },
+  detail = { active = detail_candidate(pointer), previous = { publication = null_value(), manifest = null_value(), items = {} } }
 })
 `;
 
@@ -465,6 +490,7 @@ WITH target_event AS (
       SELECT checkpoint.event_id
       FROM fpl.live_match_desk_checkpoints checkpoint
       WHERE checkpoint.season_id = $1
+        AND checkpoint.contract_version = 'live-matches-v3'
       ORDER BY checkpoint.event_id DESC
       LIMIT 1
     )
@@ -477,6 +503,7 @@ SELECT
     FROM fpl.live_match_desk_checkpoints checkpoint
     WHERE checkpoint.season_id = $1
       AND checkpoint.event_id = target_event.event_id
+      AND checkpoint.contract_version = 'live-matches-v3'
     LIMIT 1
   ) AS desk,
   (
@@ -484,6 +511,7 @@ SELECT
     FROM fpl.live_match_detail_checkpoints checkpoint
     WHERE checkpoint.season_id = $1
       AND checkpoint.event_id = target_event.event_id
+      AND checkpoint.contract_version = 'live-matches-v3'
     LIMIT 1
   ) AS detail
 FROM target_event
@@ -492,13 +520,14 @@ FROM target_event
 /** Planner, decoded-column, and reader-role gate for the cold fallback. */
 export const LIVE_MATCHES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
-		name: "live-matches-v2.checkpoint-fallback",
+		name: "live-matches-v3.checkpoint-fallback",
 		sql: LIVE_MATCH_CHECKPOINT_SQL,
 		values: [2026, 1],
 		runtime: "must-return-row",
 		resultTypes: [
 			{ relation: "fpl.live_match_desk_checkpoints", column: "season_id", pgType: "smallint" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.live_match_desk_checkpoints", column: "contract_version", pgType: "text" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "publication_id", pgType: "text" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "generation", pgType: "bigint" },
 			{ relation: "fpl.live_match_desk_checkpoints", column: "state", pgType: "text" },
@@ -550,6 +579,7 @@ export const LIVE_MATCHES_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			},
 			{ relation: "fpl.live_match_detail_checkpoints", column: "season_id", pgType: "smallint" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "event_id", pgType: "integer" },
+			{ relation: "fpl.live_match_detail_checkpoints", column: "contract_version", pgType: "text" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "publication_id", pgType: "text" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "generation", pgType: "bigint" },
 			{ relation: "fpl.live_match_detail_checkpoints", column: "state", pgType: "text" },
@@ -811,7 +841,7 @@ const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 	const teamId = safeInteger(value.teamId);
 	const price = safeInteger(value.price);
 	const totalPoints = safeInteger(value.totalPoints);
-	return (
+	if (!(
 		id !== null &&
 		id > 0 &&
 		nonEmptyString(value.webName) &&
@@ -825,18 +855,25 @@ const validDetailPlayer = (value: unknown): value is MatchDetailPlayer => {
 		totalPoints !== null &&
 		Array.isArray(value.stats) &&
 		value.stats.length <= LIVE_MATCH_MAX_STATS_PER_PLAYER &&
-		new Set(value.stats.map((stat) => (isRecord(stat) ? stat.identifier : null))).size ===
-			value.stats.length &&
+		new Set(value.stats.map((stat) => statIdentifierKey(isRecord(stat) ? stat.identifier : null)))
+			.size === value.stats.length &&
 		value.stats.every((stat) => {
 			if (!isRecord(stat)) return false;
 			return (
 				nonEmptyString(stat.identifier) &&
 				finiteNumber(stat.value) &&
-				finiteNumber(stat.points) &&
-				(stat.pointsModification === null || finiteNumber(stat.pointsModification))
+				finiteNumber(stat.awardedPoints)
 			);
 		})
+	))
+		return false;
+	const stats = value.stats as readonly unknown[];
+	const awardedPoints = stats.reduce<number>(
+		(sum, stat) =>
+			sum + (isRecord(stat) && finiteNumber(stat.awardedPoints) ? stat.awardedPoints : 0),
+		0
 	);
+	return awardedPoints === totalPoints;
 };
 
 const validDeskPayload = (value: unknown, eventId: number): value is readonly MatchDeskFixture[] =>
@@ -908,8 +945,24 @@ const decodeDeskCandidate = (
 	return fixtures &&
 		fixtures.length === publication.desk.count &&
 		deskRevisionsMatchPayload(publication, fixtures)
-		? { publication, fixtures, servedFrom }
+		? { publication, fixtures, payloadLoaded: true, servedFrom }
 		: null;
+};
+
+const decodeDeskMetadataCandidate = (
+	raw: RedisDeskRaw,
+	season: string,
+	eventId: number,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): MatchDeskCandidate | null => {
+	const publication = parseDeskPublication(raw.publication, season, eventId);
+	if (
+		!publication ||
+		raw.metadata !==
+			`${publication.desk.count}|${publication.desk.bytes}|${publication.desk.sha256}`
+	)
+		return null;
+	return { publication, fixtures: [], payloadLoaded: false, servedFrom };
 };
 
 const sameDetailMetadata = (
@@ -982,21 +1035,38 @@ const decodeDetailCandidate = (
 	return {
 		publication,
 		fixtures,
+		payloadLoaded: true,
 		servedFrom,
 	};
+};
+
+const decodeDetailMetadataCandidate = (
+	raw: RedisDetailRaw,
+	season: string,
+	eventId: number,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): MatchDetailCandidate | null => {
+	const publication = parseDetailPublication(raw.publication, season, eventId);
+	const manifest = parseDetailPublication(raw.manifest, season, eventId);
+	if (!publication || !manifest || !sameDetailMetadata(publication, manifest)) return null;
+	return { publication, fixtures: [], payloadLoaded: false, servedFrom };
 };
 
 const readRedisBundle = async (
 	redis: Redis,
 	season: string,
-	eventId?: number
+	eventId: number | undefined,
+	mode: LiveMatchReadMode = "FULL",
+	pointer: "active" | "previous" = "active"
 ): Promise<RedisReadBundle | null> => {
 	try {
 		const raw = await redis.eval(
-			LIVE_MATCHES_READ_BUNDLE_LUA,
+			LIVE_MATCHES_READ_POINTER_LUA,
 			0,
 			season,
-			eventId === undefined ? "" : String(eventId)
+			eventId === undefined ? "" : String(eventId),
+			pointer,
+			mode
 		);
 		if (typeof raw !== "string") return null;
 		if (Buffer.byteLength(raw, "utf8") > LIVE_MATCH_MAX_REDIS_BUNDLE_BYTES) return null;
@@ -1033,6 +1103,7 @@ const readRedisBundle = async (
 		};
 		return {
 			eventId: safeInteger(value.eventId),
+			pointer,
 			desk: {
 				active: candidate(value.desk.active),
 				previous: candidate(value.desk.previous),
@@ -1048,6 +1119,14 @@ const readRedisBundle = async (
 };
 
 const lkgKey = (season: string, eventId: number): string => `${season}:${eventId}`;
+
+const rememberActiveEvent = (season: string, eventId: number): void => {
+	const current = processActiveEvent.get(season);
+	// Explicit historical reads must not move the active pointer backwards,
+	// but a valid explicit read of the current/future event should seed the
+	// eventless Redis-outage fallback for this process.
+	if (current === undefined || eventId >= current) processActiveEvent.set(season, eventId);
+};
 
 const isActiveLkgKey = (key: string): boolean => {
 	for (const [season, eventId] of processActiveEvent) {
@@ -1137,17 +1216,26 @@ const chooseDetail = (
 	return selected;
 };
 
-const selectNewestDesk = (
-	candidates: readonly (MatchDeskCandidate | null)[]
-): MatchDeskCandidate | null => {
-	let selected: MatchDeskCandidate | null = null;
+const compatibleDetailMetadata = (
+	desk: MatchDeskCandidate,
+	detail: MatchDetailCandidate | null
+): detail is MatchDetailCandidate => {
+	if (!detail) return false;
+	return (
+		detail.publication.observedDeskGeneration <= desk.publication.generation &&
+		detail.publication.fixtureIdentityRevision ===
+			desk.publication.revisions.fixtureIdentity.revision
+	);
+};
+
+const chooseDetailMetadata = (
+	desk: MatchDeskCandidate,
+	candidates: readonly (MatchDetailCandidate | null)[]
+): MatchDetailCandidate | null => {
+	let selected: MatchDetailCandidate | null = null;
 	for (const candidate of candidates) {
-		if (!candidate) continue;
-		if (!selected) {
-			selected = candidate;
-			continue;
-		}
-		if (candidate.publication.generation > selected.publication.generation) {
+		if (!compatibleDetailMetadata(desk, candidate)) continue;
+		if (!selected || candidate.publication.generation > selected.publication.generation) {
 			selected = candidate;
 			continue;
 		}
@@ -1196,6 +1284,7 @@ const buildPostgresDesk = (
 		!publication ||
 		generation === null ||
 		generation <= 0 ||
+		row.contract_version !== LIVE_MATCHES_CONTRACT_VERSION ||
 		row.publication_id !== publication.publicationId ||
 		generation !== publication.generation ||
 		row.state !== publication.state ||
@@ -1250,6 +1339,7 @@ const buildPostgresDetail = (
 		!publication ||
 		generation === null ||
 		generation <= 0 ||
+		row.contract_version !== LIVE_MATCHES_CONTRACT_VERSION ||
 		row.publication_id !== publication.publicationId ||
 		generation !== publication.generation ||
 		row.state !== (publication.finalized ? "FINALIZED" : "PROVISIONAL") ||
@@ -1368,11 +1458,13 @@ const readPostgresCheckpoint = async (
 	return flight;
 };
 
-const allFixturesStarted = (desk: MatchDeskCandidate): boolean =>
-	desk.fixtures.some(
+const allFixturesStarted = (desk: MatchDeskCandidate): boolean => {
+	if (desk.payloadLoaded === false) return desk.publication.state !== "PRE_DEADLINE";
+	return desk.fixtures.some(
 		(fixture) =>
 			fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
 	);
+};
 
 const detailFallbackKey = (season: string, eventId: number, desk: MatchDeskCandidate): string =>
 	`${season}:${eventId}:${desk.publication.publicationId}:${desk.publication.generation}`;
@@ -1449,9 +1541,53 @@ const reserveScopedEventCheckpointBudget = (season: string, now = Date.now()): b
 const requestedEventId = (value: number | undefined): number | undefined =>
 	value === undefined ? undefined : Number.isSafeInteger(value) && value > 0 ? value : undefined;
 
+const decodeRedisCandidates = (
+	bundle: RedisReadBundle,
+	season: string,
+	eventId: number,
+	mode: LiveMatchReadMode,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): { desk: MatchDeskCandidate | null; detail: MatchDetailCandidate | null } => {
+	// The production Lua reader returns the selected pointer in `active` and
+	// leaves the sibling slot empty. Test doubles and future read scripts may
+	// return both slots, so prefer the explicitly selected slot when it exists
+	// without making the normal current path inspect previous payloads.
+	const deskRaw =
+		servedFrom === "REDIS_PREVIOUS" && bundle.desk.previous.publication !== null
+			? bundle.desk.previous
+			: bundle.desk.active;
+	const detailRaw =
+		servedFrom === "REDIS_PREVIOUS" && bundle.detail.previous.publication !== null
+			? bundle.detail.previous
+			: bundle.detail.active;
+	return {
+		desk:
+			mode === "HEAD"
+				? decodeDeskMetadataCandidate(deskRaw, season, eventId, servedFrom)
+				: decodeDeskCandidate(deskRaw, season, eventId, servedFrom),
+		detail:
+			mode === "FULL"
+				? decodeDetailCandidate(detailRaw, season, eventId, servedFrom)
+				: decodeDetailMetadataCandidate(detailRaw, season, eventId, servedFrom),
+	};
+};
+
+const chooseDetailForMode = (
+	mode: LiveMatchReadMode,
+	desk: MatchDeskCandidate,
+	candidates: readonly (MatchDetailCandidate | null)[]
+): MatchDetailCandidate | null =>
+	mode === "FULL" ? chooseDetail(desk, candidates) : chooseDetailMetadata(desk, candidates);
+
+/**
+ * Read one publication mode without paying the full detail cost on every
+ * heartbeat. The active pointer is the normal path; previous is queried only
+ * after the selected active candidate fails validation or compatibility.
+ */
 export const readLiveMatchday = async (
 	context: GraphQLContext,
-	eventId?: number
+	eventId?: number,
+	mode: LiveMatchReadMode = "FULL"
 ): Promise<LiveMatchdayRead> => {
 	const season = context.currentSeason.seasonCode;
 	const requested = requestedEventId(eventId);
@@ -1459,103 +1595,125 @@ export const readLiveMatchday = async (
 		return {
 			season,
 			eventId: null,
+			readMode: mode,
 			desk: null,
 			detail: null,
 			redisReadFailed: false,
 			postgresReadFailed: false,
+			redisRoundtrips: 0,
 		};
 
-	const redisBundle = await readRedisBundle(context.redis, season, requested);
-	const redisReadFailed = redisBundle === null;
 	const cachedActiveEvent = processActiveEvent.get(season);
+	let redisRoundtrips = 0;
+	const readRedis = async (
+		requestedEvent: number | undefined,
+		pointer: "active" | "previous"
+	): Promise<RedisReadBundle | null> => {
+		redisRoundtrips += 1;
+		return readRedisBundle(context.redis, season, requestedEvent, mode, pointer);
+	};
+	let activeBundle = await readRedis(requested, "active");
+	let redisReadFailed = activeBundle === null;
+	if (activeBundle === null && requested === undefined && cachedActiveEvent !== undefined) {
+		const cachedBundle = await readRedis(cachedActiveEvent, "active");
+		if (cachedBundle !== null) activeBundle = cachedBundle;
+		else redisReadFailed = true;
+	}
+
+	let postgresReadFailed = false;
 	let unscopedPostgres: PostgresCheckpointRead | null | undefined;
-	const shouldRevalidateActiveEvent =
+	let selectedEventId = requested ?? activeBundle?.eventId ?? cachedActiveEvent ?? null;
+	if (
 		requested === undefined &&
-		(redisBundle === null || redisBundle.eventId === null) &&
-		(cachedActiveEvent === undefined ||
-			Date.now() - (processActiveEventCheckedAt.get(season) ?? 0) >=
-				LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS);
-	if (shouldRevalidateActiveEvent) {
+		activeBundle?.eventId !== null &&
+		activeBundle?.eventId !== undefined
+	) {
+		processActiveEvent.set(season, activeBundle.eventId);
+	}
+
+	if (selectedEventId === null) {
 		unscopedPostgres = await readPostgresCheckpoint(
 			context,
 			context.currentSeason.seasonId,
 			season,
 			null
 		);
-		processActiveEventCheckedAt.set(season, Date.now());
+		postgresReadFailed = unscopedPostgres === null;
+		selectedEventId = unscopedPostgres?.eventId ?? null;
+		if (selectedEventId !== null) rememberActiveEvent(season, selectedEventId);
 	}
-	const selectedEventId =
-		requested ?? redisBundle?.eventId ?? unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
-	if (
-		requested === undefined &&
-		redisBundle?.eventId !== null &&
-		redisBundle?.eventId !== undefined
-	)
-		processActiveEvent.set(season, redisBundle.eventId);
-	if (
-		requested === undefined &&
-		selectedEventId !== null &&
-		unscopedPostgres?.eventId === selectedEventId
-	)
-		processActiveEvent.set(season, selectedEventId);
+
 	if (selectedEventId === null) {
-		const postgres =
-			unscopedPostgres !== undefined
-				? unscopedPostgres
-				: await readPostgresCheckpoint(context, context.currentSeason.seasonId, season, null);
-		const fallbackEventId = postgres?.eventId ?? null;
-		const fallbackDesk = postgres?.desk ?? null;
-		const fallbackDetail = fallbackDesk
-			? chooseDetail(fallbackDesk, [postgres?.detail ?? null])
-			: null;
-		if (fallbackEventId !== null && fallbackDesk) {
-			processActiveEvent.set(season, fallbackEventId);
-			rememberLkg(season, fallbackEventId, { desk: fallbackDesk, detail: fallbackDetail });
-		}
 		return {
 			season,
-			eventId: fallbackEventId,
-			desk: fallbackDesk,
-			detail: fallbackDetail,
+			eventId: null,
+			readMode: mode,
+			desk: null,
+			detail: null,
 			redisReadFailed,
-			postgresReadFailed: postgres === null,
+			postgresReadFailed,
+			redisRoundtrips,
 		};
 	}
 
-	const redisDesk = redisBundle
-		? [
-				decodeDeskCandidate(redisBundle.desk.active, season, selectedEventId, "REDIS_CURRENT"),
-				decodeDeskCandidate(redisBundle.desk.previous, season, selectedEventId, "REDIS_PREVIOUS"),
-			].filter((value): value is MatchDeskCandidate => value !== null)
-		: [];
-	const redisDetail = redisBundle
-		? [
-				decodeDetailCandidate(redisBundle.detail.active, season, selectedEventId, "REDIS_CURRENT"),
-				decodeDetailCandidate(
-					redisBundle.detail.previous,
-					season,
-					selectedEventId,
-					"REDIS_PREVIOUS"
-				),
-			].filter((value): value is MatchDetailCandidate => value !== null)
-		: [];
+	const active = activeBundle
+		? decodeRedisCandidates(activeBundle, season, selectedEventId, mode, "REDIS_CURRENT")
+		: { desk: null, detail: null };
+	let previous: { desk: MatchDeskCandidate | null; detail: MatchDetailCandidate | null } = {
+		desk: null,
+		detail: null,
+	};
+	const activeDetailNeedsFallback =
+		activeBundle !== null &&
+		active.desk !== null &&
+		chooseDetailForMode(mode, active.desk, [active.detail]) === null &&
+		(activeBundle.detail.active.publication !== null || allFixturesStarted(active.desk));
+	const previousAttempted =
+		activeBundle !== null && (active.desk === null || activeDetailNeedsFallback);
+	if (previousAttempted) {
+		const previousBundle = await readRedis(selectedEventId, "previous");
+		if (previousBundle === null) {
+			redisReadFailed = true;
+		} else {
+			previous = decodeRedisCandidates(
+				previousBundle,
+				season,
+				selectedEventId,
+				mode,
+				"REDIS_PREVIOUS"
+			);
+		}
+	}
+
 	const stored = processLkg.get(lkgKey(season, selectedEventId));
 	const processLkgValue = stored ? asProcessLkg(stored) : null;
-	const processDesk = processLkgValue?.desk ?? null;
-	const redisDeskCandidate = redisDesk[0] ?? null;
-	const initialDesk = redisDeskCandidate ?? processDesk;
-
-	let postgresReadFailed = unscopedPostgres === null;
+	let effectiveDesk = active.desk ?? previous.desk ?? processLkgValue?.desk ?? null;
 	let postgres: PostgresCheckpointRead | null =
 		unscopedPostgres?.eventId === selectedEventId ? unscopedPostgres : null;
 	const scopedEventKey = lkgKey(season, selectedEventId);
-	const scopedEventNeedsCheckpoint =
-		requested !== undefined && (redisBundle === null || redisDeskCandidate === null);
-	const recentScopedCheck = scopedEventNeedsCheckpoint
-		? recentScopedEventCheckpointCheck(scopedEventKey)
-		: null;
-	let scopedPostgresAttempted = recentScopedCheck !== null;
-	if (scopedEventNeedsCheckpoint && recentScopedCheck === null) {
+	const redisDeskAvailable = active.desk !== null || previous.desk !== null;
+	const detailNeedsPostgres =
+		mode === "FULL" &&
+		effectiveDesk !== null &&
+		allFixturesStarted(effectiveDesk) &&
+		chooseDetailForMode(mode, effectiveDesk, [
+			active.detail,
+			previous.detail,
+			processLkgValue?.detail ?? null,
+		]) === null;
+	const needsPostgres =
+		effectiveDesk === null ||
+		(detailNeedsPostgres && detailCheckpointMayBeRetried(season, selectedEventId, effectiveDesk));
+	let scopedPostgresAttempted = unscopedPostgres !== undefined;
+	const recentScopedCheck =
+		requested !== undefined && !redisDeskAvailable
+			? recentScopedEventCheckpointCheck(scopedEventKey)
+			: null;
+	if (recentScopedCheck !== null) {
+		scopedPostgresAttempted = true;
+		postgresReadFailed = recentScopedCheck.failed;
+	}
+	if (needsPostgres && !scopedPostgresAttempted && recentScopedCheck === null) {
 		if (reserveScopedEventCheckpointBudget(season)) {
 			postgres = await readPostgresCheckpoint(
 				context,
@@ -1564,79 +1722,55 @@ export const readLiveMatchday = async (
 				selectedEventId
 			);
 			postgresReadFailed = postgres === null;
+			if (detailNeedsPostgres && effectiveDesk !== null && postgres?.detail === null) {
+				rememberMissingDetailCheckpoint(season, selectedEventId, effectiveDesk);
+			}
 			rememberScopedEventCheckpointCheck(scopedEventKey, postgresReadFailed);
-			scopedPostgresAttempted = true;
-		} else {
-			// A rotating set of explicit misses must not turn the bounded per-event
-			// cache into one cold PostgreSQL read per request. Reserve the budget
-			// before awaiting the query so concurrent misses cannot all pass the
-			// admission check; Redis/process LKG candidates remain eligible and the
-			// next window can retry PostgreSQL.
-			scopedPostgresAttempted = true;
-		}
-	} else if (recentScopedCheck !== null) postgresReadFailed = recentScopedCheck.failed;
-	const retainedDetail = initialDesk
-		? chooseDetail(initialDesk, [
-				...redisDetail,
-				processLkgValue?.detail ?? null,
-				postgres?.detail ?? null,
-			])
-		: null;
-	if (
-		!initialDesk ||
-		(allFixturesStarted(initialDesk) &&
-			retainedDetail === null &&
-			detailCheckpointMayBeRetried(season, selectedEventId, initialDesk))
-	) {
-		if (unscopedPostgres === undefined && !scopedPostgresAttempted) {
-			postgres = await readPostgresCheckpoint(
-				context,
-				context.currentSeason.seasonId,
-				season,
-				selectedEventId
-			);
-			postgresReadFailed = postgres === null;
-			if (initialDesk && postgres !== null && chooseDetail(initialDesk, [postgres.detail]) === null)
-				rememberMissingDetailCheckpoint(season, selectedEventId, initialDesk);
 		}
 	}
-	const effectiveDesk =
-		redisDeskCandidate ?? selectNewestDesk([processDesk, postgres?.desk ?? null]);
-	if (!effectiveDesk)
+
+	if (effectiveDesk === null) effectiveDesk = postgres?.desk ?? null;
+	if (effectiveDesk === null) {
 		return {
 			season,
 			eventId: selectedEventId,
+			readMode: mode,
 			desk: null,
 			detail: null,
 			redisReadFailed,
 			postgresReadFailed,
+			redisRoundtrips,
 		};
+	}
 
-	const detail = chooseDetail(
-		effectiveDesk,
-		effectiveDesk.servedFrom === "POSTGRES_CHECKPOINT"
-			? [...redisDetail, postgres?.detail ?? null, processLkgValue?.detail ?? null]
-			: [retainedDetail, postgres?.detail ?? null]
-	);
+	const detail = chooseDetailForMode(mode, effectiveDesk, [
+		active.detail,
+		previous.detail,
+		processLkgValue?.detail ?? null,
+		postgres?.detail ?? null,
+	]);
 	const result = {
 		season,
 		eventId: selectedEventId,
+		readMode: mode,
 		desk: effectiveDesk,
 		detail,
 		redisReadFailed,
 		postgresReadFailed,
+		redisRoundtrips,
 	};
-	rememberLkg(season, selectedEventId, {
-		desk: effectiveDesk,
-		detail,
-	});
+	rememberActiveEvent(season, selectedEventId);
+	// A metadata-only observation must never replace a complete process LKG
+	// with an object whose detail payload was deliberately not read.
+	if (mode === "FULL" && (detail === null || detail.payloadLoaded !== false)) {
+		rememberLkg(season, selectedEventId, { desk: effectiveDesk, detail });
+	}
 	return result;
 };
 
 export const resetLiveMatchProcessStateForTests = (): void => {
 	processLkg.clear();
 	processActiveEvent.clear();
-	processActiveEventCheckedAt.clear();
 	processEventCheckedAt.clear();
 	processEventCheckpointBudget.clear();
 	postgresDetailMissUntil.clear();

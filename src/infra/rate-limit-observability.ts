@@ -8,10 +8,26 @@ import { metrics } from "./metrics";
 
 export const RATE_LIMIT_AGGREGATE_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 export const RATE_LIMIT_RECENT_RETENTION_SECONDS = 2 * 60 * 60;
+export const RATE_LIMIT_TELEMETRY_FLUSH_INTERVAL_MS = 250;
+export const RATE_LIMIT_TELEMETRY_BATCH_SIZE = 256;
+export const RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE = 4096;
+export const RATE_LIMIT_TELEMETRY_SHUTDOWN_TIMEOUT_MS = 500;
 
 export type RateLimitAggregateOutcome = "allowed" | "denied" | "would_allow" | "would_deny";
 
 export type GraphQLRateLimitPolicyVersion = "graphql-v3" | "graphql-v4";
+
+type RateLimitAggregateRecord = Readonly<{
+	redis: Redis;
+	trafficClass: GraphQLTrafficClass;
+	workload: GraphQLWorkload;
+	scope: GraphQLRateLimitHeaderScope;
+	outcome: RateLimitAggregateOutcome;
+	fingerprint: string;
+	policyVersion: GraphQLRateLimitPolicyVersion;
+	date: Date;
+	logger: Logger;
+}>;
 
 const deniedOutcomes = new Set<RateLimitAggregateOutcome>(["denied", "would_deny"]);
 
@@ -189,7 +205,72 @@ export const summarizeRateLimitTotals = (
 	};
 };
 
-export const recordRateLimitAggregate = async ({
+const persistRateLimitAggregateBatch = async (
+	records: readonly RateLimitAggregateRecord[]
+): Promise<void> => {
+	const byRedis = new Map<Redis, RateLimitAggregateRecord[]>();
+	for (const record of records) {
+		const group = byRedis.get(record.redis);
+		if (group) group.push(record);
+		else byRedis.set(record.redis, [record]);
+	}
+	await Promise.all(
+		[...byRedis.entries()].map(async ([redis, group]) => {
+			const failedPolicies = new Set<GraphQLRateLimitPolicyVersion>();
+			try {
+				const pipeline = redis.pipeline();
+				for (const record of group) {
+					const day = rateLimitAggregateDate(record.date);
+					const aggregateKey = rateLimitAggregateKey(day, record.policyVersion);
+					const recentKey = rateLimitRecentAggregateKey(
+						rateLimitAggregateMinute(record.date),
+						record.policyVersion
+					);
+					const field = [record.trafficClass, record.workload, record.scope, record.outcome].join(
+						"|"
+					);
+					pipeline.hincrby(aggregateKey, field, 1);
+					pipeline.expire(aggregateKey, RATE_LIMIT_AGGREGATE_RETENTION_SECONDS);
+					pipeline.hincrby(recentKey, field, 1);
+					pipeline.expire(recentKey, RATE_LIMIT_RECENT_RETENTION_SECONDS);
+					if (deniedOutcomes.has(record.outcome)) {
+						const rankingKey = rateLimitDeniedRankingKey(day, record.policyVersion);
+						pipeline.zincrby(
+							rankingKey,
+							1,
+							[
+								record.trafficClass,
+								record.workload,
+								record.scope,
+								record.outcome,
+								record.fingerprint,
+							].join("|")
+						);
+						pipeline.expire(rankingKey, RATE_LIMIT_AGGREGATE_RETENTION_SECONDS);
+					}
+				}
+				const results = await pipeline.exec();
+				const failure = results?.find(([error]) => error);
+				if (failure?.[0]) throw failure[0];
+			} catch (error) {
+				for (const record of group) failedPolicies.add(record.policyVersion);
+				for (const policyVersion of failedPolicies) {
+					metrics.rateLimitStorageFailures.labels(`${policyVersion}-aggregate`, "open").inc();
+				}
+				group[0]?.logger.warn(
+					{
+						err: error,
+						batchSize: group.length,
+						policyVersions: [...failedPolicies],
+					},
+					"Rate-limit aggregate persistence unavailable"
+				);
+			}
+		})
+	);
+};
+
+const recordShape = ({
 	redis,
 	trafficClass,
 	workload,
@@ -209,35 +290,125 @@ export const recordRateLimitAggregate = async ({
 	policyVersion?: GraphQLRateLimitPolicyVersion;
 	date?: Date;
 	logger: Logger;
+}): RateLimitAggregateRecord => ({
+	redis,
+	trafficClass,
+	workload,
+	scope,
+	outcome,
+	fingerprint,
+	policyVersion,
+	date,
+	logger,
+});
+
+/**
+ * Synchronous, testable persistence entrypoint retained for reports and
+ * maintenance tools. Request admission uses the bounded enqueue path below.
+ */
+export const recordRateLimitAggregate = async (input: {
+	redis: Redis;
+	trafficClass: GraphQLTrafficClass;
+	workload: GraphQLWorkload;
+	scope: GraphQLRateLimitHeaderScope;
+	outcome: RateLimitAggregateOutcome;
+	fingerprint: string;
+	policyVersion?: GraphQLRateLimitPolicyVersion;
+	date?: Date;
+	logger: Logger;
 }): Promise<void> => {
-	metrics.graphqlRateLimitV3Decisions.labels(trafficClass, workload, scope, outcome).inc();
-	const day = rateLimitAggregateDate(date);
-	const aggregateKey = rateLimitAggregateKey(day, policyVersion);
-	const recentKey = rateLimitRecentAggregateKey(rateLimitAggregateMinute(date), policyVersion);
-	const field = [trafficClass, workload, scope, outcome].join("|");
+	const record = recordShape(input);
+	metrics.graphqlRateLimitV3Decisions
+		.labels(record.trafficClass, record.workload, record.scope, record.outcome)
+		.inc();
+	await persistRateLimitAggregateBatch([record]);
+};
+
+const pendingTelemetry: RateLimitAggregateRecord[] = [];
+let telemetryFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let telemetryFlushPromise: Promise<void> | null = null;
+
+const clearTelemetryFlushTimer = (): void => {
+	if (telemetryFlushTimer === null) return;
+	clearTimeout(telemetryFlushTimer);
+	telemetryFlushTimer = null;
+};
+
+const flushTelemetryQueue = async (): Promise<void> => {
+	while (pendingTelemetry.length > 0) {
+		const batch = pendingTelemetry.splice(0, RATE_LIMIT_TELEMETRY_BATCH_SIZE);
+		await persistRateLimitAggregateBatch(batch);
+	}
+};
+
+const startTelemetryFlush = (): Promise<void> => {
+	clearTelemetryFlushTimer();
+	if (telemetryFlushPromise) return telemetryFlushPromise;
+	const running = flushTelemetryQueue();
+	const settled = running
+		.catch(() => undefined)
+		.finally(() => {
+			if (telemetryFlushPromise === settled) telemetryFlushPromise = null;
+		});
+	telemetryFlushPromise = settled;
+	return settled;
+};
+
+const scheduleTelemetryFlush = (): void => {
+	if (telemetryFlushTimer !== null) return;
+	telemetryFlushTimer = setTimeout(() => {
+		telemetryFlushTimer = null;
+		void startTelemetryFlush();
+	}, RATE_LIMIT_TELEMETRY_FLUSH_INTERVAL_MS);
+};
+
+/**
+ * Enqueue aggregate telemetry without putting a Redis write on the request
+ * path. Admission decisions and Prometheus counters remain synchronous; a
+ * full queue drops only observability data and records that loss.
+ */
+export const enqueueRateLimitAggregate = (input: {
+	redis: Redis;
+	trafficClass: GraphQLTrafficClass;
+	workload: GraphQLWorkload;
+	scope: GraphQLRateLimitHeaderScope;
+	outcome: RateLimitAggregateOutcome;
+	fingerprint: string;
+	policyVersion?: GraphQLRateLimitPolicyVersion;
+	date?: Date;
+	logger: Logger;
+}): void => {
+	const record = recordShape(input);
+	metrics.graphqlRateLimitV3Decisions
+		.labels(record.trafficClass, record.workload, record.scope, record.outcome)
+		.inc();
+	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE) {
+		metrics.rateLimitTelemetryOverflows.labels(record.policyVersion).inc();
+		return;
+	}
+	pendingTelemetry.push(record);
+	if (pendingTelemetry.length >= RATE_LIMIT_TELEMETRY_BATCH_SIZE) {
+		void startTelemetryFlush();
+	} else {
+		scheduleTelemetryFlush();
+	}
+};
+
+/** Flush queued telemetry, bounded for process shutdown. */
+export const flushRateLimitAggregateTelemetry = async (
+	timeoutMs = RATE_LIMIT_TELEMETRY_SHUTDOWN_TIMEOUT_MS
+): Promise<void> => {
+	const running = startTelemetryFlush();
+	if (timeoutMs <= 0) return;
+	let timeout: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const pipeline = redis.pipeline();
-		pipeline.hincrby(aggregateKey, field, 1);
-		pipeline.expire(aggregateKey, RATE_LIMIT_AGGREGATE_RETENTION_SECONDS);
-		pipeline.hincrby(recentKey, field, 1);
-		pipeline.expire(recentKey, RATE_LIMIT_RECENT_RETENTION_SECONDS);
-		if (deniedOutcomes.has(outcome)) {
-			const rankingKey = rateLimitDeniedRankingKey(day, policyVersion);
-			pipeline.zincrby(
-				rankingKey,
-				1,
-				[trafficClass, workload, scope, outcome, fingerprint].join("|")
-			);
-			pipeline.expire(rankingKey, RATE_LIMIT_AGGREGATE_RETENTION_SECONDS);
-		}
-		const results = await pipeline.exec();
-		const failure = results?.find(([error]) => error);
-		if (failure?.[0]) throw failure[0];
-	} catch (error) {
-		metrics.rateLimitStorageFailures.labels(`${policyVersion}-aggregate`, "open").inc();
-		logger.warn(
-			{ err: error, trafficClass, workload, scope, outcome },
-			"Rate-limit aggregate persistence unavailable"
-		);
+		await Promise.race([
+			running,
+			new Promise<void>((resolve) => {
+				timeout = setTimeout(resolve, timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timeout !== undefined) clearTimeout(timeout);
 	}
 };

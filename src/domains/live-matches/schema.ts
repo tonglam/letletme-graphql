@@ -69,8 +69,7 @@ export const liveMatchesTypeDefs = /* GraphQL */ `
 	type LiveMatchPlayerStat {
 		identifier: String!
 		value: Float!
-		points: Float!
-		pointsModification: Float
+		awardedPoints: Float!
 	}
 
 	type LiveMatchPlayer {

@@ -5,6 +5,9 @@ import {
 	rateLimitFingerprint,
 	rateLimitRecentAggregateKey,
 	parseRateLimitStorageFailureTotal,
+	enqueueRateLimitAggregate,
+	flushRateLimitAggregateTelemetry,
+	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
 	recordRateLimitAggregate,
 	summarizeRateLimitTotals,
 } from "../../src/infra/rate-limit-observability";
@@ -91,6 +94,39 @@ rate_limit_storage_failures_total{scope="service-weighted",mode="closed"} 3
 			logger: { warn: () => undefined } as never,
 		});
 		expect(commands.some(([command]) => command === "zincrby")).toBe(false);
+	});
+
+	it("batches request telemetry and flushes the remainder without changing admission", async () => {
+		const pipelines: unknown[][] = [];
+		const redis = {
+			pipeline: () => {
+				const commands: unknown[] = [];
+				pipelines.push(commands);
+				return {
+					hincrby: (...args: unknown[]) => commands.push(["hincrby", ...args]),
+					expire: (...args: unknown[]) => commands.push(["expire", ...args]),
+					zincrby: (...args: unknown[]) => commands.push(["zincrby", ...args]),
+					exec: async () => commands.map(() => [null, 1]),
+				};
+			},
+		} as unknown as Redis;
+		const count = RATE_LIMIT_TELEMETRY_BATCH_SIZE + 1;
+		for (let index = 0; index < count; index += 1) {
+			enqueueRateLimitAggregate({
+				redis,
+				trafficClass: "web_rsc",
+				workload: "fixtures",
+				scope: "workload",
+				outcome: "allowed",
+				fingerprint: "abc123abc123",
+				date: new Date("2026-08-20T00:00:00.000Z"),
+				logger: { warn: () => undefined } as never,
+			});
+		}
+		await flushRateLimitAggregateTelemetry();
+
+		expect(pipelines.length).toBe(2);
+		expect(pipelines.reduce((total, commands) => total + commands.length, 0)).toBe(count * 4);
 	});
 
 	it("exports GraphQL outcomes with only one controlled result dimension", () => {

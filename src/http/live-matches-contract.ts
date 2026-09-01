@@ -1,5 +1,5 @@
 export const LIVE_MATCHES_CONTRACT_HEADER = "X-LetLetMe-Contract";
-export const LIVE_MATCHES_CONTRACT_VALUE = "live-matches-v2";
+export const LIVE_MATCHES_CONTRACT_VALUE = "live-matches-v3";
 
 const LIVE_MATCHES_ROOT_FIELDS = new Set(["liveMatchday"]);
 const LIVE_MATCHES_HOT_PATH_SAFE_COMPANION_ROOT_FIELDS = new Set([
@@ -12,7 +12,7 @@ const LIVE_MATCHES_HOT_PATH_SAFE_COMPANION_ROOT_FIELDS = new Set([
 export const isLiveMatchesRootField = (field: string): boolean =>
 	LIVE_MATCHES_ROOT_FIELDS.has(field);
 
-export const requiresLiveMatchesV2Contract = (rootFields: readonly string[]): boolean =>
+export const requiresLiveMatchesV3Contract = (rootFields: readonly string[]): boolean =>
 	rootFields.some(isLiveMatchesRootField);
 
 export const isLiveMatchesHotPathOperation = (rootFields: readonly string[]): boolean =>
@@ -22,7 +22,7 @@ export const isLiveMatchesHotPathOperation = (rootFields: readonly string[]): bo
 			isLiveMatchesRootField(field) || LIVE_MATCHES_HOT_PATH_SAFE_COMPANION_ROOT_FIELDS.has(field)
 	);
 
-export const hasLiveMatchesV2Contract = (headers: Headers): boolean =>
+export const hasLiveMatchesV3Contract = (headers: Headers): boolean =>
 	(headers.get(LIVE_MATCHES_CONTRACT_HEADER) ?? "")
 		.split(",")
 		.map((token) => token.trim())

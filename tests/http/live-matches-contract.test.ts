@@ -1,16 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import {
-	hasLiveMatchesV2Contract,
+	hasLiveMatchesV3Contract,
 	LIVE_MATCHES_CONTRACT_HEADER,
 	LIVE_MATCHES_CONTRACT_VALUE,
 	isLiveMatchesHotPathOperation,
-	requiresLiveMatchesV2Contract,
+	requiresLiveMatchesV3Contract,
 } from "../../src/http/live-matches-contract";
 
-describe("Live Matches V2 contract gate", () => {
-	it("requires the exact V2 header for the liveMatchday root", () => {
-		expect(requiresLiveMatchesV2Contract(["liveMatchday"])).toBe(true);
-		expect(requiresLiveMatchesV2Contract(["events"])).toBe(false);
+describe("Live Matches V3 contract gate", () => {
+	it("requires the exact V3 header for the liveMatchday root", () => {
+		expect(requiresLiveMatchesV3Contract(["liveMatchday"])).toBe(true);
+		expect(requiresLiveMatchesV3Contract(["events"])).toBe(false);
 	});
 
 	it("does not classify a mixed full-core operation as the match hot path", () => {
@@ -21,14 +21,14 @@ describe("Live Matches V2 contract gate", () => {
 	});
 
 	it("rejects missing and semantic header variants", () => {
-		expect(hasLiveMatchesV2Contract(new Headers())).toBe(false);
+		expect(hasLiveMatchesV3Contract(new Headers())).toBe(false);
 		expect(
-			hasLiveMatchesV2Contract(
+			hasLiveMatchesV3Contract(
 				new Headers({ [LIVE_MATCHES_CONTRACT_HEADER]: LIVE_MATCHES_CONTRACT_VALUE })
 			)
 		).toBe(true);
-		for (const value of ["live-matches-v1", "LIVE-MATCHES-V2", "live-matches-v2/"]) {
-			expect(hasLiveMatchesV2Contract(new Headers({ [LIVE_MATCHES_CONTRACT_HEADER]: value }))).toBe(
+		for (const value of ["live-matches-v1", "LIVE-MATCHES-V2", "live-matches-v3/"]) {
+			expect(hasLiveMatchesV3Contract(new Headers({ [LIVE_MATCHES_CONTRACT_HEADER]: value }))).toBe(
 				false
 			);
 		}
@@ -36,9 +36,9 @@ describe("Live Matches V2 contract gate", () => {
 
 	it("accepts the live-matches token when a review contract shares the header", () => {
 		expect(
-			hasLiveMatchesV2Contract(
+			hasLiveMatchesV3Contract(
 				new Headers({
-					[LIVE_MATCHES_CONTRACT_HEADER]: "live-matches-v2, my-tournament-review-v2",
+					[LIVE_MATCHES_CONTRACT_HEADER]: "live-matches-v3, my-tournament-review-v2",
 				})
 			)
 		).toBe(true);

@@ -29,6 +29,7 @@ const withDrainTimeout = async (server: ShutdownServer, timeoutMs: number): Prom
 export const createShutdownHandler = ({
 	server,
 	stopApollo,
+	flushTelemetry,
 	closeRedis,
 	closeDbPool,
 	drainTimeoutMs,
@@ -42,6 +43,7 @@ export const createShutdownHandler = ({
 }: {
 	server: ShutdownServer;
 	stopApollo: () => Promise<void>;
+	flushTelemetry?: () => Promise<void>;
 	closeRedis: () => Promise<void>;
 	closeDbPool: () => Promise<void>;
 	drainTimeoutMs?: number;
@@ -63,6 +65,14 @@ export const createShutdownHandler = ({
 				} catch (error) {
 					failed = true;
 					log(error);
+				}
+			}
+			if (flushTelemetry) {
+				try {
+					await flushTelemetry();
+				} catch (error) {
+					failed = true;
+					log({ dependency: "rate-limit-telemetry", error });
 				}
 			}
 			for (const [dependency, close] of [

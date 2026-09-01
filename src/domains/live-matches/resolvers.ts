@@ -1,7 +1,11 @@
+import { Kind, type GraphQLResolveInfo, type SelectionSetNode, type ValueNode } from "graphql";
+
 import type { GraphQLContext } from "../../graphql/context";
+import { metrics } from "../../infra/metrics";
 import {
 	readLiveMatchday,
 	type LiveMatchdayRead,
+	type LiveMatchReadMode,
 	type MatchDeskCandidate,
 	type MatchDetailCandidate,
 } from "./repository";
@@ -69,45 +73,50 @@ const detailFixtureMap = (
 ): Map<number, MatchDetailCandidate["fixtures"][number]> =>
 	new Map((detail?.fixtures ?? []).map((fixture) => [fixture.fixtureId, fixture]));
 
+const deskHasStartedActivity = (desk: MatchDeskCandidate): boolean => {
+	if (desk.payloadLoaded === false) return desk.publication.state !== "PRE_DEADLINE";
+	return desk.fixtures.some(
+		(fixture) =>
+			fixture.started || fixture.finished || fixture.finishedProvisional || fixture.minutes > 0
+	);
+};
+
 const detailState = (
 	desk: MatchDeskCandidate,
 	detail: MatchDetailCandidate | null,
-	final: boolean
+	final: boolean,
+	mode: LiveMatchReadMode
 ): "FRESH" | "STALE" | "DEGRADED" | "FINAL" | "PENDING" => {
-	if (!detail)
-		return desk.fixtures.some(
-			(fixture) => fixture.started || fixture.finished || fixture.minutes > 0
-		)
-			? "DEGRADED"
-			: "PENDING";
+	if (!detail) return deskHasStartedActivity(desk) ? "DEGRADED" : "PENDING";
 	if (final) return "FINAL";
 	if (desk.publication.state === "FINALIZED" || detail.publication.finalized === true)
 		return "DEGRADED";
-	if (detail.servedFrom !== "REDIS_CURRENT" || isPast(detail.publication.staleAt))
-		return "DEGRADED";
+	if (detail.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
+	if (isPast(detail.publication.staleAt)) return "DEGRADED";
+	// HEAD and DESK deliberately validate only the detail manifest. Its
+	// metadata is still useful for freshness and revision observation, but it
+	// must never be advertised as a complete player payload.
+	if (mode !== "FULL" && detail.payloadLoaded === false) return "DEGRADED";
 	return "FRESH";
 };
 
 const deliveryState = (
 	desk: MatchDeskCandidate,
 	detail: MatchDetailCandidate | null,
-	final: boolean
+	final: boolean,
+	mode: LiveMatchReadMode
 ): "FRESH" | "STALE" | "DEGRADED" | "FINAL" => {
 	if (final) return "FINAL";
 	if (desk.publication.state === "FINALIZED" || detail?.publication.finalized === true)
 		return "DEGRADED";
 	if (desk.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
-	const detailRequired = desk.fixtures.some(
-		(fixture) => fixture.started || fixture.finished || fixture.minutes > 0
-	);
-	if (
-		detailRequired &&
-		(!detail || detail.servedFrom !== "REDIS_CURRENT" || isPast(detail.publication.staleAt))
-	)
-		return "DEGRADED";
+	const detailRequired = deskHasStartedActivity(desk);
+	if (detailRequired && (!detail || detail.servedFrom !== "REDIS_CURRENT")) return "DEGRADED";
 	if (isPast(desk.publication.staleAt)) return "STALE";
-	if (detail && (detail.servedFrom !== "REDIS_CURRENT" || isPast(detail.publication.staleAt)))
-		return "DEGRADED";
+	if (detail && detail.servedFrom !== "REDIS_CURRENT") return "DEGRADED";
+	if (detail && isPast(detail.publication.staleAt))
+		return mode === "FULL" || detailRequired ? "DEGRADED" : "STALE";
+	if (mode === "FULL" && detailRequired && detail?.payloadLoaded === false) return "DEGRADED";
 	return "FRESH";
 };
 
@@ -168,8 +177,16 @@ const toPlayer = (player: MatchDetailCandidate["fixtures"][number]["players"][nu
 	stats: player.stats,
 });
 
-const toMatches = (desk: MatchDeskCandidate, detail: MatchDetailCandidate | null) => {
-	const details = detailFixtureMap(detail);
+const toMatches = (
+	desk: MatchDeskCandidate,
+	detail: MatchDetailCandidate | null,
+	mode: LiveMatchReadMode
+) => {
+	if (mode === "HEAD") return [];
+	const includePlayers = mode === "FULL";
+	const details: Map<number, MatchDetailCandidate["fixtures"][number]> = includePlayers
+		? detailFixtureMap(detail)
+		: new Map<number, MatchDetailCandidate["fixtures"][number]>();
 	return desk.fixtures.map((fixture) => ({
 		fixtureId: fixture.fixtureId,
 		eventId: fixture.eventId,
@@ -186,7 +203,7 @@ const toMatches = (desk: MatchDeskCandidate, detail: MatchDetailCandidate | null
 		started: fixture.started,
 		finished: fixture.finished,
 		finishedProvisional: fixture.finishedProvisional,
-		players: (details.get(fixture.fixtureId)?.players ?? []).map(toPlayer),
+		players: includePlayers ? (details.get(fixture.fixtureId)?.players ?? []).map(toPlayer) : [],
 	}));
 };
 
@@ -205,14 +222,122 @@ const toUnavailable = (read: LiveMatchdayRead) => {
 	};
 };
 
+const resolveBooleanValue = (
+	value: ValueNode | undefined,
+	variableValues: GraphQLResolveInfo["variableValues"]
+): boolean | null => {
+	if (!value) return null;
+	if (value.kind === Kind.BOOLEAN) return value.value;
+	if (value.kind !== Kind.VARIABLE) return null;
+	const resolved = variableValues[value.name.value];
+	return typeof resolved === "boolean" ? resolved : null;
+};
+
+const directiveExcludesSelection = (
+	directives:
+		| readonly {
+				name: { value: string };
+				arguments?: readonly { name: { value: string }; value: ValueNode }[];
+		  }[]
+		| undefined,
+	variableValues: GraphQLResolveInfo["variableValues"]
+): boolean =>
+	(directives ?? []).some((directive) => {
+		const condition = directive.arguments?.find((argument) => argument.name.value === "if")?.value;
+		const resolved = resolveBooleanValue(condition, variableValues);
+		if (resolved === null) return false;
+		if (directive.name.value === "skip") return resolved;
+		if (directive.name.value === "include") return !resolved;
+		return false;
+	});
+
+/**
+ * Determine the smallest safe publication read from the actual selection
+ * tree. Operation names are client-controlled and aliases do not identify the
+ * schema field, so this deliberately walks field names and fragments.
+ */
+export const liveMatchReadModeFromInfo = (info: GraphQLResolveInfo): LiveMatchReadMode => {
+	let selectedMatches = false;
+	let selectedPlayers = false;
+	const visitedFragments = new Set<string>();
+
+	const visit = (
+		selectionSet: SelectionSetNode | undefined,
+		stage: "root" | "snapshot" | "matches"
+	): void => {
+		if (!selectionSet) return;
+		for (const selection of selectionSet.selections) {
+			if (directiveExcludesSelection(selection.directives, info.variableValues)) continue;
+			if (selection.kind === Kind.FRAGMENT_SPREAD) {
+				const key = `${stage}:${selection.name.value}`;
+				if (visitedFragments.has(key)) continue;
+				visitedFragments.add(key);
+				visit(info.fragments[selection.name.value]?.selectionSet, stage);
+				continue;
+			}
+			if (selection.kind === Kind.INLINE_FRAGMENT) {
+				visit(selection.selectionSet, stage);
+				continue;
+			}
+			const fieldName = selection.name.value;
+			if (stage === "root" && fieldName === "snapshot") {
+				visit(selection.selectionSet, "snapshot");
+			} else if (stage === "snapshot" && fieldName === "matches") {
+				selectedMatches = true;
+				visit(selection.selectionSet, "matches");
+			} else if (stage === "matches" && fieldName === "players") {
+				selectedPlayers = true;
+			}
+		}
+	};
+
+	for (const fieldNode of info.fieldNodes) visit(fieldNode.selectionSet, "root");
+	if (selectedPlayers) return "FULL";
+	if (selectedMatches) return "DESK";
+	return "HEAD";
+};
+
+const liveMatchServedFrom = (read: LiveMatchdayRead): string =>
+	read.desk?.servedFrom ?? "UNAVAILABLE";
+
+const liveMatchRedisRoundtripOutcome = (read: LiveMatchdayRead): "none" | "single" | "fallback" => {
+	if (read.redisRoundtrips === 0) return "none";
+	return read.redisRoundtrips === 1 ? "single" : "fallback";
+};
+
+const observeLiveMatchRead = (
+	mode: LiveMatchReadMode,
+	read: LiveMatchdayRead,
+	response: ReturnType<typeof toResult>,
+	readDurationMs: number
+): void => {
+	const source = liveMatchServedFrom(read);
+	metrics.liveMatchReadDurationSeconds.labels(mode, source).observe(readDurationMs / 1000);
+	metrics.liveMatchRedisRoundtripsTotal.labels(mode, liveMatchRedisRoundtripOutcome(read)).inc();
+	metrics.liveMatchDeliveryTotal
+		.labels(mode, response.delivery.state, response.delivery.servedFrom ?? "UNAVAILABLE")
+		.inc();
+	if (read.desk && read.desk.servedFrom !== "REDIS_CURRENT") {
+		metrics.liveMatchFallbackTotal.labels("desk", read.desk.servedFrom).inc();
+	}
+	if (read.detail && read.detail.servedFrom !== "REDIS_CURRENT") {
+		metrics.liveMatchFallbackTotal.labels("detail", read.detail.servedFrom).inc();
+	}
+	const encodedResponse = JSON.stringify(response);
+	metrics.liveMatchPayloadBytes
+		.labels(mode, "resolver")
+		.observe(Buffer.byteLength(encodedResponse, "utf8"));
+};
+
 const toResult = (read: LiveMatchdayRead) => {
 	if (!read.desk) return toUnavailable(read);
+	const mode = read.readMode ?? "FULL";
 	const final = finalPublication(read);
 	const finalCheckpointPending =
 		!final &&
 		(read.desk.publication.state === "FINALIZED" || read.detail?.publication.finalized === true);
-	const state = deliveryState(read.desk, read.detail, final);
-	const detailDeliveryState = detailState(read.desk, read.detail, final);
+	const state = deliveryState(read.desk, read.detail, final, mode);
+	const detailDeliveryState = detailState(read.desk, read.detail, final, mode);
 	const reasonCodes = [servedFromReason(read.desk.servedFrom)];
 	if (read.redisReadFailed) reasonCodes.push("REDIS_READ_FAILED");
 	if (read.postgresReadFailed) reasonCodes.push("POSTGRES_CHECKPOINT_UNAVAILABLE");
@@ -250,7 +375,7 @@ const toResult = (read: LiveMatchdayRead) => {
 							: [detailServedFromReason(read.detail.servedFrom)]
 						: [detailDeliveryState === "PENDING" ? "DETAIL_PENDING" : "DETAIL_UNAVAILABLE"],
 			},
-			matches: toMatches(read.desk, read.detail),
+			matches: toMatches(read.desk, read.detail, mode),
 		},
 	};
 };
@@ -260,7 +385,15 @@ export const liveMatchesResolvers = {
 		liveMatchday: async (
 			_parent: unknown,
 			args: { eventId?: number | null },
-			context: GraphQLContext
-		) => toResult(await readLiveMatchday(context, args.eventId ?? undefined)),
+			context: GraphQLContext,
+			info: GraphQLResolveInfo
+		) => {
+			const mode = liveMatchReadModeFromInfo(info);
+			const startedAt = performance.now();
+			const read = await readLiveMatchday(context, args.eventId ?? undefined, mode);
+			const response = toResult(read);
+			observeLiveMatchRead(mode, read, response, performance.now() - startedAt);
+			return response;
+		},
 	},
 };

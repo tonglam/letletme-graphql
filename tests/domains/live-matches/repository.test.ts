@@ -4,7 +4,8 @@ import { graphql } from "graphql";
 
 import { schema } from "../../../src/graphql/schema";
 import {
-	LIVE_MATCHES_READ_BUNDLE_LUA,
+	LIVE_MATCHES_READ_POINTER_LUA,
+	LIVE_MATCH_CHECKPOINT_SQL,
 	LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS,
 	LIVE_MATCH_EXPLICIT_CHECKPOINT_MISS_BUDGET,
 	LIVE_MATCH_PROCESS_EVENT_CHECKED_AT_LIMIT,
@@ -59,7 +60,7 @@ type DetailBundleSlot = {
 };
 
 type LiveMatchTestBundle = {
-	eventId: number;
+	eventId: number | null;
 	desk: { active: DeskBundleSlot; previous: DeskBundleSlot };
 	detail: { active: DetailBundleSlot; previous: DetailBundleSlot };
 };
@@ -122,9 +123,7 @@ const player = (totalPoints: number) => ({
 	teamId: 1,
 	price: 55,
 	totalPoints,
-	stats: [
-		{ identifier: "bps", value: totalPoints * 10, points: totalPoints, pointsModification: null },
-	],
+	stats: [{ identifier: "bps", value: totalPoints * 10, awardedPoints: totalPoints }],
 });
 
 const publicationId = (generation: number): string =>
@@ -166,7 +165,7 @@ const buildBundle = (
 		},
 	};
 	const deskPublication = {
-		contractVersion: "live-matches-v2",
+		contractVersion: "live-matches-v3",
 		publicationId: publicationId(deskGeneration),
 		generation: deskGeneration,
 		season: "2627",
@@ -180,7 +179,7 @@ const buildBundle = (
 		revisions,
 		desk: {
 			name: "desk",
-			key: `llm:data:v2:fpl:live-match:desk:2627:${eventId}:${deskGeneration}:desk`,
+			key: `llm:data:v3:fpl:live-match:desk:2627:${eventId}:${deskGeneration}:desk`,
 			type: "string",
 			count: deskFixtures.length,
 			bytes: Buffer.byteLength(deskPayload, "utf8"),
@@ -198,7 +197,7 @@ const buildBundle = (
 		const sha = digest(payload);
 		return {
 			fixtureId: detail.fixtureId,
-			key: `llm:data:v2:fpl:live-match:detail:2627:${eventId}:${detailItemGeneration}:${detail.fixtureId}:${sha}`,
+			key: `llm:data:v3:fpl:live-match:detail:2627:${eventId}:${detailItemGeneration}:${detail.fixtureId}:${sha}`,
 			type: "string",
 			count: payload.length,
 			bytes: Buffer.byteLength(encode(payload), "utf8"),
@@ -208,7 +207,7 @@ const buildBundle = (
 		};
 	});
 	const detailPublication = {
-		contractVersion: "live-matches-v2",
+		contractVersion: "live-matches-v3",
 		publicationId: publicationId(detailGeneration),
 		generation: detailGeneration,
 		season: "2627",
@@ -275,6 +274,7 @@ const buildCheckpointRow = (
 	return {
 		event_id: built.deskPublication.eventId,
 		desk: {
+			contract_version: "live-matches-v3",
 			publication_id: built.deskPublication.publicationId,
 			generation: built.deskPublication.generation,
 			state: built.deskPublication.state,
@@ -291,6 +291,7 @@ const buildCheckpointRow = (
 			stale_at: built.deskPublication.staleAt,
 		},
 		detail: {
+			contract_version: "live-matches-v3",
 			publication_id: built.detailPublication.publicationId,
 			generation: built.detailPublication.generation,
 			state: built.detailPublication.finalized ? "FINALIZED" : "PROVISIONAL",
@@ -321,7 +322,7 @@ const attachBundle = (redis: TestRedis, bundle: unknown): { set: (value: unknown
 	};
 };
 
-describe("Live Matches V2 read path", () => {
+describe("Live Matches V3 read path", () => {
 	beforeEach(() => resetLiveMatchProcessStateForTests());
 
 	it("does not expose lifecycle context as a fabricated match-publication field", () => {
@@ -343,7 +344,7 @@ describe("Live Matches V2 read path", () => {
 					throw new Error("warm Live Matches reads must not touch PostgreSQL");
 				},
 			}),
-			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id price totalPoints stats { identifier points } } } } } }`,
+			source: `query { liveMatchday(eventId: 1) { availability delivery { state servedFrom } snapshot { eventId matches { fixtureId players { id price totalPoints stats { identifier awardedPoints } } } } } }`,
 		});
 
 		expect(result.errors).toBeUndefined();
@@ -361,7 +362,126 @@ describe("Live Matches V2 read path", () => {
 		expect(databaseReads).toBe(0);
 	});
 
-	it("rejects a publication with an invalid V2 identity", async () => {
+	it("selects HEAD, DESK, and FULL from the actual selection tree", async () => {
+		const redis = new TestRedis();
+		const bundle = buildBundle().bundle;
+		const modes: unknown[] = [];
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async (
+			...args
+		) => {
+			modes.push(args.at(-1));
+			return JSON.stringify(bundle);
+		};
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				throw new Error("selection-mode reads must not touch PostgreSQL");
+			},
+		});
+
+		const head = await graphql({
+			schema,
+			contextValue: context,
+			source: `query AnyOperation { liveMatchday(eventId: 1) { snapshot { eventId revisions { deskGeneration } } } }`,
+		});
+		const desk = await graphql({
+			schema,
+			contextValue: context,
+			source: `query Renamed { liveMatchday(eventId: 1) { snapshot { matches { fixtureId homeScore } } } }`,
+		});
+		const full = await graphql({
+			schema,
+			contextValue: context,
+			source: `query WithAlias { liveMatchday(eventId: 1) { snapshot { matches { fixtureId players { id stats { identifier awardedPoints } } } } } }`,
+		});
+
+		expect(head.errors).toBeUndefined();
+		expect(desk.errors).toBeUndefined();
+		expect(full.errors).toBeUndefined();
+		expect(modes).toEqual(["HEAD", "DESK", "FULL"]);
+	});
+
+	it("keeps HEAD metadata-only and does not cold-read detail or desk payloads", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+		let databaseReads = 0;
+
+		const result = await readLiveMatchday(
+			buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseReads += 1;
+					throw new Error("HEAD reads must not touch PostgreSQL");
+				},
+			}),
+			1,
+			"HEAD"
+		);
+
+		expect(result.desk?.payloadLoaded).toBe(false);
+		expect(result.desk?.fixtures).toEqual([]);
+		expect(result.detail?.payloadLoaded).toBe(false);
+		expect(result.detail?.fixtures).toEqual([]);
+		expect(databaseReads).toBe(0);
+	});
+
+	it("does not advertise manifest-only detail as a full HEAD LKG", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis),
+			source: `query { liveMatchday(eventId: 1) { delivery { state } snapshot { detailDelivery { state servedFrom } } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toMatchObject({
+			delivery: { state: "FRESH" },
+			snapshot: {
+				detailDelivery: { state: "DEGRADED", servedFrom: "REDIS_CURRENT" },
+			},
+		});
+	});
+
+	it("applies fragment aliases and runtime include/skip directives to read mode", async () => {
+		const redis = new TestRedis();
+		const bundle = buildBundle().bundle;
+		const modes: unknown[] = [];
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async (
+			...args
+		) => {
+			modes.push(args.at(-1));
+			return JSON.stringify(bundle);
+		};
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				throw new Error("directive reads must not touch PostgreSQL");
+			},
+		});
+
+		const result = await graphql({
+			schema,
+			contextValue: context,
+			variableValues: { includePlayers: false, includeMatches: true },
+			source: `query DirectiveModes($includePlayers: Boolean!, $includeMatches: Boolean!) {
+				liveMatchday(eventId: 1) {
+					snapshot {
+						...SnapshotFields @include(if: $includeMatches)
+					}
+				}
+			}
+			fragment SnapshotFields on LiveMatchdaySnapshot {
+				matches {
+					fixtureId
+					players @include(if: $includePlayers) { id }
+				}
+			}`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(modes).toEqual(["DESK"]);
+	});
+
+	it("rejects a publication with an invalid V3 identity", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		if (bundle.desk.active.publication === null) throw new Error("missing active desk");
@@ -374,6 +494,73 @@ describe("Live Matches V2 read path", () => {
 
 		expect(result.desk).toBeNull();
 		expect(result.detail).toBeNull();
+	});
+
+	it("never selects sealed V2 rows during PostgreSQL cold fallback", () => {
+		expect(LIVE_MATCH_CHECKPOINT_SQL).toContain("checkpoint.contract_version = 'live-matches-v3'");
+		expect(LIVE_MATCH_CHECKPOINT_SQL.match(/contract_version = 'live-matches-v3'/g)).toHaveLength(
+			3
+		);
+	});
+
+	it("rejects case-insensitive duplicate stat identifiers before serving detail", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		bundle.detail.previous = structuredClone(bundle.detail.active);
+		if (bundle.detail.active.publication === null || bundle.detail.active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(bundle.detail.active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const first = publication.fixtures[0];
+		if (!first) throw new Error("missing first detail descriptor");
+		const invalidPlayers = [
+			{
+				...player(3),
+				stats: [
+					{ identifier: "bps", value: 30, awardedPoints: 1 },
+					{ identifier: "BPS", value: 30, awardedPoints: 2 },
+				],
+			},
+		];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = bundle.detail.active.items[0];
+		const invalidDescriptor = {
+			...first,
+			count: invalidPlayers.length,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+			key: first.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`),
+		};
+		publication.fixtures[0] = invalidDescriptor;
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		bundle.detail.active.items[0] = {
+			...item,
+			fixtureId: invalidDescriptor.fixtureId,
+			key: invalidDescriptor.key,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		bundle.detail.active.publication = JSON.stringify(publication);
+		bundle.detail.active.manifest = bundle.detail.active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
+		expect(result.detail?.publication.generation).toBe(12);
 	});
 
 	it("rejects publication timestamps that GraphQL DateTime cannot serialize", async () => {
@@ -393,9 +580,9 @@ describe("Live Matches V2 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
-	it("does not let an explicit event read populate the active-event fallback", async () => {
+	it("seeds the active-event process fallback from a valid explicit event read", async () => {
 		const redis = new TestRedis();
-		const bundle = { ...buildBundle().bundle, eventId: 2 };
+		const bundle = { ...buildBundle({ eventId: 2 }).bundle, eventId: 2 };
 		let available = true;
 		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async () => {
 			if (!available) throw new Error("redis unavailable");
@@ -407,7 +594,9 @@ describe("Live Matches V2 read path", () => {
 		available = false;
 
 		const fallback = await readLiveMatchday(context);
-		expect(fallback.eventId).toBeNull();
+		expect(fallback.eventId).toBe(2);
+		expect(fallback.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(fallback.detail?.servedFrom).toBe("PROCESS_LKG");
 	});
 
 	it("requires detail coverage for every started fixture", async () => {
@@ -594,13 +783,13 @@ describe("Live Matches V2 read path", () => {
 	});
 
 	it("caps Redis detail fan-out before reading immutable item keys", () => {
-		expect(LIVE_MATCHES_READ_BUNDLE_LUA).toContain(
+		expect(LIVE_MATCHES_READ_POINTER_LUA).toContain(
 			`#decoded.fixtures > ${LIVE_MATCH_MAX_FIXTURES}`
 		);
-		expect(LIVE_MATCHES_READ_BUNDLE_LUA).toContain(`total_bytes > ${2 * 1024 * 1024}`);
-		expect(LIVE_MATCHES_READ_BUNDLE_LUA).not.toContain("manifest_decoded.fixtures");
-		const detailScript = LIVE_MATCHES_READ_BUNDLE_LUA.slice(
-			LIVE_MATCHES_READ_BUNDLE_LUA.indexOf("local function detail_candidate")
+		expect(LIVE_MATCHES_READ_POINTER_LUA).toContain(`total_bytes > ${2 * 1024 * 1024}`);
+		expect(LIVE_MATCHES_READ_POINTER_LUA).not.toContain("manifest_decoded.fixtures");
+		const detailScript = LIVE_MATCHES_READ_POINTER_LUA.slice(
+			LIVE_MATCHES_READ_POINTER_LUA.indexOf("local function detail_candidate")
 		);
 		expect(detailScript.indexOf("local prefix =")).toBeLessThan(
 			detailScript.indexOf("payload = read_string(item.key)")
@@ -615,6 +804,27 @@ describe("Live Matches V2 read path", () => {
 
 		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
 		expect(result.detail).toBeNull();
+	});
+
+	it("tries previous detail when the active detail leads the served desk", async () => {
+		const redis = new TestRedis();
+		const built = buildBundle({ detailDeskGeneration: 3 });
+		built.bundle.detail.previous = structuredClone(built.bundle.detail.active);
+		if (built.bundle.detail.previous.publication === null) {
+			throw new Error("missing previous detail");
+		}
+		const previousPublication = JSON.parse(built.bundle.detail.previous.publication) as {
+			observedDeskGeneration: number;
+		};
+		previousPublication.observedDeskGeneration = 1;
+		built.bundle.detail.previous.publication = JSON.stringify(previousPublication);
+		built.bundle.detail.previous.manifest = built.bundle.detail.previous.publication;
+		attachBundle(redis, built.bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1);
+
+		expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(result.detail?.servedFrom).toBe("REDIS_PREVIOUS");
 	});
 
 	it("rejects detail players outside the served fixture teams", async () => {
@@ -787,16 +997,14 @@ describe("Live Matches V2 read path", () => {
 		expect(retained.eventId).toBe(1);
 	});
 
-	it("revalidates an explicit event after Redis loses a complete active LKG", async () => {
+	it("serves the process LKG before attempting PostgreSQL after Redis loss", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
-		const newerCheckpoint = buildCheckpointRow({ eventId: 1, deskGeneration: 3 });
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
-			databaseQuery: async (_query, values) => {
+			databaseQuery: async () => {
 				databaseReads += 1;
-				expect(values).toEqual([2026, 1]);
-				return { rows: [newerCheckpoint] };
+				return { rows: [] };
 			},
 		});
 
@@ -809,23 +1017,20 @@ describe("Live Matches V2 read path", () => {
 
 		const recovered = await readLiveMatchday(context, 1);
 
-		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(recovered.desk?.publication.generation).toBe(3);
-		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(recovered.detail?.publication.generation).toBe(13);
-		expect(databaseReads).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.desk?.publication.generation).toBe(2);
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(0);
 	});
 
-	it("revalidates the cached active event during a Redis outage", async () => {
+	it("serves the cached active-event LKG during a Redis outage", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
-		const nextCheckpoint = buildCheckpointRow({ eventId: 2 });
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
-			databaseQuery: async (_query, values) => {
+			databaseQuery: async () => {
 				databaseReads += 1;
-				expect(values).toEqual([2026, null]);
-				return { rows: [nextCheckpoint] };
+				return { rows: [] };
 			},
 		});
 
@@ -839,52 +1044,54 @@ describe("Live Matches V2 read path", () => {
 		const recovered = await readLiveMatchday(context);
 		const retained = await readLiveMatchday(context);
 
-		expect(recovered.eventId).toBe(2);
-		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(retained.eventId).toBe(2);
+		expect(recovered.eventId).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(retained.eventId).toBe(1);
 		expect(retained.desk?.servedFrom).toBe("PROCESS_LKG");
-		expect(databaseReads).toBe(1);
+		expect(databaseReads).toBe(0);
 		expect(LIVE_MATCH_ACTIVE_EVENT_REVALIDATION_MS).toBeGreaterThan(0);
 	});
 
-	it("revalidates the active event when Redis returns no pointer", async () => {
+	it("serves the cached active event when Redis returns no pointer", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ eventId: 1 }).bundle);
-		const nextCheckpoint = buildCheckpointRow({ eventId: 2 });
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
-			databaseQuery: async (_query, values) => {
+			databaseQuery: async () => {
 				databaseReads += 1;
-				expect(values).toEqual([2026, null]);
-				return { rows: [nextCheckpoint] };
+				return { rows: [] };
 			},
 		});
 
 		const warm = await readLiveMatchday(context);
 		expect(warm.eventId).toBe(1);
-		control.set({ ...buildBundle({ eventId: 1 }).bundle, eventId: null });
+		const missingPointer = structuredClone(buildBundle({ eventId: 1 }).bundle);
+		missingPointer.eventId = null;
+		missingPointer.desk.active = emptyDesk;
+		missingPointer.desk.previous = emptyDesk;
+		missingPointer.detail.active = emptyDetail;
+		missingPointer.detail.previous = emptyDetail;
+		control.set(missingPointer);
 
 		const recovered = await readLiveMatchday(context);
 
-		expect(recovered.eventId).toBe(2);
-		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(databaseReads).toBe(1);
+		expect(recovered.eventId).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(0);
 	});
 
-	it("prefers a newer same-desk detail checkpoint over process LKG", async () => {
+	it("keeps process LKG ahead of PostgreSQL on a Redis outage", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(
 			redis,
 			buildBundle({ deskGeneration: 2, detailGeneration: 12 }).bundle
 		);
-		const newerCheckpoint = buildCheckpointRow({ deskGeneration: 2, detailGeneration: 13 });
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
-			databaseQuery: async (_query, values) => {
+			databaseQuery: async () => {
 				databaseReads += 1;
-				expect(values).toEqual([2026, null]);
-				return { rows: [newerCheckpoint] };
+				return { rows: [] };
 			},
 		});
 
@@ -899,21 +1106,19 @@ describe("Live Matches V2 read path", () => {
 		const recovered = await readLiveMatchday(context);
 
 		expect(recovered.desk?.publication.generation).toBe(2);
-		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(recovered.detail?.publication.generation).toBe(13);
-		expect(databaseReads).toBe(1);
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.detail?.publication.generation).toBe(12);
+		expect(databaseReads).toBe(0);
 	});
 
-	it("prefers a newer same-event checkpoint over an older process LKG", async () => {
+	it("does not let a newer PostgreSQL checkpoint displace process LKG", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(redis, buildBundle({ deskGeneration: 2 }).bundle);
-		const newerCheckpoint = buildCheckpointRow({ deskGeneration: 3 });
 		let databaseReads = 0;
 		const context = buildSnapshotContext(redis, {
-			databaseQuery: async (_query, values) => {
+			databaseQuery: async () => {
 				databaseReads += 1;
-				expect(values).toEqual([2026, null]);
-				return { rows: [newerCheckpoint] };
+				return { rows: [] };
 			},
 		});
 
@@ -926,10 +1131,10 @@ describe("Live Matches V2 read path", () => {
 
 		const recovered = await readLiveMatchday(context);
 
-		expect(recovered.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(recovered.desk?.publication.generation).toBe(3);
-		expect(recovered.detail?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(databaseReads).toBe(1);
+		expect(recovered.desk?.servedFrom).toBe("PROCESS_LKG");
+		expect(recovered.desk?.publication.generation).toBe(2);
+		expect(recovered.detail?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseReads).toBe(0);
 	});
 
 	it("reserves the active event LKG from explicit historical reads", async () => {
@@ -1203,7 +1408,7 @@ describe("Live Matches V2 read path", () => {
 				const checksum = digest(detail.players);
 				return {
 					fixtureId: detail.fixtureId,
-					key: `llm:data:v2:fpl:live-match:detail:2627:1:${row.detail.generation}:${detail.fixtureId}:${checksum}`,
+					key: `llm:data:v3:fpl:live-match:detail:2627:1:${row.detail.generation}:${detail.fixtureId}:${checksum}`,
 					type: "string",
 					count: detail.players.length,
 					bytes: Buffer.byteLength(encode(detail.players), "utf8"),
