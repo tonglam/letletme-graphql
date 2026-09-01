@@ -456,6 +456,30 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		}
 	});
 
+	it("does not trust a fresh lease when the serving PID is gone", async () => {
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const date = "2099-02-05";
+		const generation = "dead-serving-generation";
+		const deadPid = 2_147_483_647;
+		const identityPath = join(spoolDirectory, "serving-process.green.json");
+		const markerPath = join(spoolDirectory, `dirty.v3.${date}.${deadPid}.${generation}`);
+		await mkdir(spoolDirectory, { recursive: true });
+		await writeFile(
+			identityPath,
+			JSON.stringify({ pid: deadPid, generation, heartbeatAt: new Date().toISOString() }) + "\n",
+			{ encoding: "utf8" }
+		);
+		await writeFile(markerPath, "dead\n", { encoding: "utf8" });
+		try {
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [date])).toEqual([date]);
+		} finally {
+			await unlink(identityPath).catch(() => undefined);
+			await unlink(markerPath).catch(() => undefined);
+		}
+	});
+
 	it("retries a dirty-window marker after a transient spool write failure", async () => {
 		const spoolDirectory =
 			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??

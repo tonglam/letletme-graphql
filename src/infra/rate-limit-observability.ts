@@ -358,6 +358,20 @@ const isServingProcessLeaseLive = (
 	);
 };
 
+const isServingProcessAlive = (pid: number): boolean => {
+	try {
+		// Reports run inside the same GraphQL container/PID namespace as the
+		// serving process. A fresh heartbeat alone is not enough: SIGKILL can
+		// leave the identity file leased until it expires.
+		process.kill(pid, 0);
+		return true;
+	} catch (error: unknown) {
+		// EPERM still proves that a process with this PID exists; every other
+		// failure means the identity cannot be treated as a live owner.
+		return isNodeErrorWithCode(error, "EPERM");
+	}
+};
+
 const readTelemetryMarkerEntries = async (): Promise<readonly TelemetryMarkerEntry[]> => {
 	let names: string[];
 	try {
@@ -404,8 +418,8 @@ const readOrphanedDirtyWindowDates = async (
 			(allowedDates === null || allowedDates.has(entry.date))
 	);
 	const servingIdentities = await readServingProcessIdentities();
-	const liveServingIdentities = servingIdentities.filter((identity) =>
-		isServingProcessLeaseLive(identity)
+	const liveServingIdentities = servingIdentities.filter(
+		(identity) => isServingProcessLeaseLive(identity) && isServingProcessAlive(identity.pid)
 	);
 	return [
 		...new Set(
