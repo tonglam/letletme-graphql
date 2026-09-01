@@ -2192,12 +2192,21 @@ function seasonCountMetadataValid(row: SeasonMetadataRow): boolean {
 	const rowCount = row.row_count === null ? NaN : Number(row.row_count);
 	const readySubjectCount =
 		row.ready_subject_count === null ? NaN : Number(row.ready_subject_count);
+	const format = reviewFormat(row.format) ?? reviewFormat(row.obligation_format);
 	return (
 		Number.isSafeInteger(rowCount) &&
 		rowCount > 0 &&
 		Number.isSafeInteger(readySubjectCount) &&
 		readySubjectCount >= 0 &&
-		readySubjectCount <= rowCount
+		// POINTS rows are one-per-subject, so applicability cannot exceed the
+		// row count. H2H and KNOCKOUT use row_count for matches/fixtures while
+		// ready_subject_count counts participating entries and may be larger;
+		// H2H still has a hard two-sides-per-match coverage bound.
+		(format === "POINTS"
+			? readySubjectCount <= rowCount
+			: format === "H2H"
+				? readySubjectCount <= rowCount * 2
+				: true)
 	);
 }
 
