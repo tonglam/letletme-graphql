@@ -1298,6 +1298,29 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
+	it("does not share PostgreSQL revalidation cooldown across read modes", async () => {
+		const redis = new TestRedis();
+		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {
+			throw new Error("redis unavailable");
+		};
+		const queries: string[] = [];
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async (sql) => {
+				queries.push(String(sql));
+				return { rows: [buildCheckpointRow()] };
+			},
+		});
+
+		const head = await readLiveMatchday(context, 1, "HEAD");
+		const full = await readLiveMatchday(context, 1, "FULL");
+
+		expect(head.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(head.desk?.payloadLoaded).toBe(false);
+		expect(full.desk?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(full.detail?.fixtures).toHaveLength(2);
+		expect(queries).toEqual([LIVE_MATCH_CHECKPOINT_HEAD_SQL, LIVE_MATCH_CHECKPOINT_SQL]);
+	});
+
 	it("retains PostgreSQL metadata when Redis detail manifest is preferred", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);

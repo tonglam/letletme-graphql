@@ -416,13 +416,16 @@ export const flushRateLimitAggregateTelemetry = async (
 	timeoutMs = RATE_LIMIT_TELEMETRY_SHUTDOWN_TIMEOUT_MS
 ): Promise<void> => {
 	const running = startTelemetryFlush();
-	if (timeoutMs <= 0) return;
+	if (timeoutMs <= 0) throw new Error("rate-limit telemetry flush timed out");
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	try {
 		await Promise.race([
 			running,
-			new Promise<void>((resolve) => {
-				timeout = setTimeout(resolve, timeoutMs);
+			new Promise<never>((_, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error("rate-limit telemetry flush timed out")),
+					timeoutMs
+				);
 			}),
 		]);
 	} finally {

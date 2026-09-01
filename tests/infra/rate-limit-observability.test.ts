@@ -195,4 +195,26 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		expect(summary.enforcedDecisions).toBe(10);
 		expect(summary.shadowDecisions).toBe(0);
 	});
+
+	it("fails a shutdown flush when telemetry persistence exceeds its bound", async () => {
+		const pipeline = {
+			hincrby: () => pipeline,
+			expire: () => pipeline,
+			zincrby: () => pipeline,
+			exec: () => new Promise<never>(() => undefined),
+		};
+		enqueueRateLimitAggregate({
+			redis: { pipeline: () => pipeline } as unknown as Redis,
+			trafficClass: "web_rsc",
+			workload: "fixtures",
+			scope: "workload",
+			outcome: "allowed",
+			fingerprint: "abc123abc123",
+			logger: { warn: () => undefined } as never,
+		});
+
+		await expect(flushRateLimitAggregateTelemetry(10)).rejects.toThrow(
+			"rate-limit telemetry flush timed out"
+		);
+	});
 });

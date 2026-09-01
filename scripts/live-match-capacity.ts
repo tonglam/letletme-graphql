@@ -83,10 +83,24 @@ const parseTransport = (value: string | undefined): Transport => {
 	return transport;
 };
 
+const isLoopbackHostname = (hostname: string): boolean => {
+	const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+};
+
+export const validateCapacityEndpoint = (url: URL, transport: Transport): void => {
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new Error("LIVE_MATCH_LOAD_URL must use http or https");
+	}
+	if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+		throw new Error("plaintext capacity runs require a loopback endpoint");
+	}
+	if (transport === "warm" && url.protocol !== "https:") {
+		throw new Error("warm capacity runs require an https endpoint for HTTP/2 keep-alive");
+	}
+};
+
 const endpoint = new URL(required("LIVE_MATCH_LOAD_URL"));
-if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
-	throw new Error("LIVE_MATCH_LOAD_URL must use http or https");
-}
 const serviceToken = required("LIVE_MATCH_GRAPHQL_SERVICE_TOKEN");
 const contractHeader = "live-matches-v3";
 const eventIdValue = process.env.LIVE_MATCH_LOAD_EVENT_ID?.trim();
@@ -97,6 +111,7 @@ if (eventId !== undefined && (!Number.isSafeInteger(eventId) || eventId <= 0)) {
 
 const mode = parseMode(option("--mode"));
 const transport = parseTransport(option("--transport"));
+validateCapacityEndpoint(endpoint, transport);
 const stages = [
 	...new Set(
 		(process.env.LIVE_MATCH_LOAD_STAGES ?? "50,100,200,300")
@@ -107,9 +122,6 @@ const stages = [
 ].sort((left, right) => left - right);
 if (stages.length === 0 || stages.some((value) => value > 300)) {
 	throw new Error("LIVE_MATCH_LOAD_STAGES must contain positive integers up to 300");
-}
-if (transport === "warm" && endpoint.protocol !== "https:") {
-	throw new Error("warm capacity runs require an https endpoint for HTTP/2 keep-alive");
 }
 const stageSeconds = positiveInteger("LIVE_MATCH_LOAD_STAGE_SECONDS", 900);
 const thinkMs = nonNegativeInteger("LIVE_MATCH_LOAD_THINK_MS", 100);
@@ -164,7 +176,7 @@ const query =
 						detailDelivery { state servedFrom reasonCodes }
 						matches {
 							fixtureId eventId homeTeamId homeTeamName homeTeamShortName awayTeamId awayTeamName awayTeamShortName homeScore awayScore kickoffTime minutes started finished finishedProvisional
-							players { id webName position teamId totalPoints stats { identifier value awardedPoints } }
+							players { id webName position teamId price totalPoints stats { identifier value awardedPoints } }
 						}
 					}
 				}}`;
@@ -587,6 +599,12 @@ function semanticError(body: unknown): string | null {
 				return "player_identity_mismatch";
 			}
 			playerIds.add(playerId);
+			if (
+				typeof playerValue.price !== "number" ||
+				!Number.isSafeInteger(playerValue.price) ||
+				playerValue.price <= 0
+			)
+				return "invalid_player_price";
 			if (!Array.isArray(playerValue.stats)) return "missing_stats";
 			const identifiers = new Set<string>();
 			let awardedTotal = 0;
@@ -740,6 +758,17 @@ function metricValue(text: string, metric: string, requiredLabel: string): numbe
 	return null;
 }
 
+function metricFamilyPresent(text: string, metric: string): boolean {
+	return text
+		.split("\n")
+		.some(
+			(line) =>
+				line.startsWith(`${metric}{`) ||
+				line.startsWith(`${metric} `) ||
+				line.startsWith(`# TYPE ${metric} `)
+		);
+}
+
 function metricSum(text: string, metric: string, requiredLabel: string): number | null {
 	let matched = false;
 	let total = 0;
@@ -753,7 +782,8 @@ function metricSum(text: string, metric: string, requiredLabel: string): number 
 		matched = true;
 		total += value;
 	}
-	return matched ? total : null;
+	if (matched) return total;
+	return metricFamilyPresent(text, metric) ? 0 : null;
 }
 
 async function collectMetrics(): Promise<MetricObservation | null> {
@@ -808,6 +838,7 @@ for (const stage of stages) {
 }
 monitoring = false;
 await monitor;
+await collectMetrics();
 closeHttp2Session();
 
 const stageReports = stages.map((stage) => ({
@@ -818,22 +849,27 @@ const stageReports = stages.map((stage) => ({
 const overall = overallAccumulator.report();
 const capacityStage = stageReports.find((report) => report.concurrency === 300);
 const firstReadyStage = stageReports.find((report) => report.requests > 0);
-let globalDeniedMaximum: number | null = null;
-for (const observation of metricObservations) {
-	if (observation.globalDenied === null) continue;
-	globalDeniedMaximum =
-		globalDeniedMaximum === null
-			? observation.globalDenied
-			: Math.max(globalDeniedMaximum, observation.globalDenied);
-}
 const globalDeniedObservationsComplete =
 	globalDeniedBaseline !== null &&
 	metricObservations.length > 0 &&
 	metricObservations.every((observation) => observation.globalDenied !== null);
-const globalDeniedDelta =
-	globalDeniedObservationsComplete && globalDeniedMaximum !== null
-		? globalDeniedMaximum - globalDeniedBaseline!
-		: null;
+let globalDeniedCounterResetDetected: boolean | null = null;
+let globalDeniedDelta: number | null = null;
+if (globalDeniedObservationsComplete) {
+	let previous = globalDeniedBaseline!;
+	let positiveDelta = 0;
+	globalDeniedCounterResetDetected = false;
+	for (const observation of metricObservations) {
+		const current = observation.globalDenied!;
+		if (current < previous) {
+			globalDeniedCounterResetDetected = true;
+			break;
+		}
+		positiveDelta = Math.max(positiveDelta, current - previous);
+		previous = current;
+	}
+	if (!globalDeniedCounterResetDetected) globalDeniedDelta = positiveDelta;
+}
 const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
 	stage300DurationSeconds: capacityStage?.durationSeconds ?? 0,
@@ -847,6 +883,9 @@ const capacityGate = {
 	globalDeniedBaseline,
 	globalDeniedDelta,
 	globalDeniedObservationsComplete,
+	globalDeniedCounterResetDetected,
+	globalDeniedCounterResetFree:
+		globalDeniedObservationsComplete && globalDeniedCounterResetDetected === false,
 	globalDeniedDeltaIsZero: globalDeniedObservationsComplete && globalDeniedDelta === 0,
 	readyValidationRequired: requireReady,
 	dbPoolWaitingIsZero:
@@ -865,6 +904,7 @@ const capacityGatePassed = [
 	capacityGate.rateLimited429IsZero,
 	capacityGate.global429IsZero,
 	capacityGate.unknown429IsZero,
+	capacityGate.globalDeniedCounterResetFree,
 	capacityGate.globalDeniedDeltaIsZero,
 	capacityGate.readyValidationRequired,
 	capacityGate.dbPoolWaitingIsZero,
