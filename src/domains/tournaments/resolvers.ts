@@ -1,9 +1,26 @@
 import type { GraphQLContext } from "../../graphql/context";
+import type { Entry } from "../../contracts/entry";
 import type { Event } from "../events/repository";
 import { eventsService } from "../events/service";
 import { LeagueType } from "../leagues/repository";
 import type { Player } from "../players/repository";
 import { playersService } from "../players/service";
+import {
+	h2hLeagueDeliveryV2,
+	h2hLeagueTimesV2,
+	readH2HLeaguePublicationV2,
+	type H2HLeaguePublicationReadV2,
+	type H2HMatchPayloadV2,
+	type H2HMatchSideV2,
+	type H2HStandingsPayloadV2,
+} from "../live-desks/h2h-v2";
+import { assertLiveTournamentAccessV2 } from "../live-desks/access-v2";
+import {
+	projectLivePointsFromPublishedEntryV2,
+	readLivePublicationByRefV2,
+	type LivePublicationReadV2,
+} from "../entry-live/v2-service";
+import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 
 /**
  * Per-request memoization for event lookups to avoid N+1 Redis round-trips
@@ -51,12 +68,10 @@ const getCaptainByIdMemoized = async (
 
 import type {
 	EntryH2HMatchResult,
-	EntryOfficialH2HDeskItem,
 	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
 	TournamentInfo,
-	TournamentOfficialH2H,
 	TournamentMode,
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
@@ -83,7 +98,6 @@ import {
 } from "./service";
 import { normalizeTournamentEventResultsPagination } from "./repository";
 import { getTournamentSetupWarningSummaries } from "./repository";
-import { buildDataCompleteness } from "../../graphql/data-completeness";
 
 const warningSummaryMemo = new WeakMap<
 	GraphQLContext,
@@ -149,10 +163,6 @@ type EntryH2HMatchResultsArgs = {
 type TournamentOfficialH2HArgs = {
 	tournamentId: number;
 	eventId: number;
-};
-
-type EntryOfficialH2HDeskArgs = {
-	entryId: number;
 };
 
 export const leagueTypeToEnum = (type: LeagueType): string => {
@@ -253,6 +263,273 @@ export const tournamentResultChipToEnum = (raw: string | null): string | null =>
 	}
 
 	return null;
+};
+
+const h2hRevisionVector = (publication: H2HLeaguePublicationReadV2["publication"]) => ({
+	publicationId: publication.publicationId,
+	generation: publication.generation,
+	roster: publication.revisions.roster,
+	scoreCore: publication.revisions.scoreCore,
+	fixtureIdentity: publication.revisions.fixtureIdentity,
+	entryInputSet: publication.revisions.entryInputSet,
+	identity: publication.revisions.identity,
+	officialRank: publication.revisions.officialRank,
+	rules: publication.revisions.rules,
+	algorithm: publication.revisions.algorithm,
+	content: publication.revisions.content,
+});
+
+const syntheticH2HEntry = (side: H2HMatchSideV2): Entry => ({
+	id: side.entryId ?? 0,
+	entryName: side.entryName,
+	playerName: side.playerName ?? "",
+	region: null,
+	startedEvent: null,
+	overallPoints: null,
+	overallRank: null,
+	bank: null,
+	teamValue: null,
+	totalTransfers: null,
+	lastEventId: null,
+	lastOverallPoints: null,
+	lastOverallRank: null,
+	lastTeamValue: null,
+	lastBank: null,
+});
+
+const unavailableH2HSide = (side: H2HMatchSideV2, availability: string) => ({
+	availability,
+	entryId: side.entryId,
+	entryName: side.entryName,
+	playerName: side.playerName,
+	isAverage: side.isAverage,
+	points: null,
+	netPoints: null,
+});
+
+const projectH2HSide = async (
+	context: GraphQLContext,
+	global: LivePublicationReadV2 | null,
+	match: H2HMatchPayloadV2,
+	side: H2HMatchSideV2
+) => {
+	if (match.state !== "READY") return unavailableH2HSide(side, match.state);
+	if (side.entryId === null || side.isAverage) {
+		return side.officialNetPoints === null
+			? unavailableH2HSide(side, "PENDING")
+			: {
+					availability: "READY",
+					entryId: side.entryId,
+					entryName: side.entryName,
+					playerName: side.playerName,
+					isAverage: side.isAverage,
+					points: side.officialNetPoints,
+					netPoints: side.officialNetPoints,
+				};
+	}
+	if (
+		!global ||
+		global.publication.publicationId !== match.globalRef.publicationId ||
+		global.publication.generation !== match.globalRef.generation ||
+		side.input === null
+	)
+		return unavailableH2HSide(side, "ERROR");
+	try {
+		const projected = await projectLivePointsFromPublishedEntryV2(
+			context,
+			global,
+			side.input,
+			{
+				publicationId: side.inputPublicationId ?? match.globalRef.publicationId,
+				generation: side.inputGeneration ?? match.globalRef.generation,
+				sourceCheckedAt: side.inputContentUpdatedAt ?? match.sourceCheckedAt,
+			},
+			syntheticH2HEntry(side)
+		);
+		return {
+			availability: "READY",
+			entryId: side.entryId,
+			entryName: side.entryName,
+			playerName: side.playerName,
+			isAverage: false,
+			points: projected.score.eventPoints,
+			netPoints: projected.score.netEventPoints,
+		};
+	} catch (error) {
+		context.logger.warn(
+			{ err: error, eventId: match.eventId, tournamentId: match.tournamentId },
+			"H2H live side projection unavailable"
+		);
+		return unavailableH2HSide(side, "ERROR");
+	}
+};
+
+const unavailableH2HDelivery = () => ({
+	state: "UNAVAILABLE",
+	servedFrom: "UNAVAILABLE",
+	reasonCodes: ["PUBLICATION_UNAVAILABLE"],
+});
+
+const readTournamentOfficialH2HV2 = async (
+	context: GraphQLContext,
+	tournamentId: number,
+	eventId: number
+) => {
+	const [headRead, standingsRead] = await Promise.all([
+		readH2HLeaguePublicationV2(context, tournamentId, eventId, "H2H_HEAD"),
+		readH2HLeaguePublicationV2(context, tournamentId, eventId, "H2H_STANDINGS"),
+	]);
+	const viewerEntryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
+	const publicationMembership =
+		viewerEntryId && headRead
+			? headRead.index.some((indexRow) => {
+					if (!("matchId" in indexRow)) return false;
+					const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
+					return match?.home.entryId === viewerEntryId || match?.away.entryId === viewerEntryId;
+				})
+			: null;
+	await assertLiveTournamentAccessV2(
+		context,
+		tournamentId,
+		viewerEntryId ?? 0,
+		publicationMembership
+	);
+	if (!headRead) {
+		return {
+			eventId,
+			availability: "MISSING",
+			delivery: unavailableH2HDelivery(),
+			revisions: null,
+			times: null,
+			standings: standingsRead
+				? {
+						throughEventId: (standingsRead.payload.standings as H2HStandingsPayloadV2)
+							.throughEventId,
+						state:
+							(standingsRead.payload.standings as H2HStandingsPayloadV2).state === "UPDATING"
+								? "UPDATING"
+								: (standingsRead.payload.standings as H2HStandingsPayloadV2).state === "UNAVAILABLE"
+									? "UNAVAILABLE"
+									: "READY",
+						sourceCheckedAt: (standingsRead.payload.standings as H2HStandingsPayloadV2)
+							.sourceCheckedAt,
+						rows: (standingsRead.payload.standings as H2HStandingsPayloadV2).rows,
+					}
+				: null,
+			matches: [],
+		};
+	}
+	const publication = headRead.publication;
+	const global = await readLivePublicationByRefV2(context, eventId, publication.globalRef).catch(
+		() => null
+	);
+	const delivery = h2hLeagueDeliveryV2(headRead);
+	const revisions = h2hRevisionVector(publication);
+	const times = h2hLeagueTimesV2(publication);
+	const globalByRef = new Map<string, Promise<LivePublicationReadV2 | null>>();
+	if (global) {
+		globalByRef.set(
+			`${global.publication.publicationId}:${global.publication.generation}`,
+			Promise.resolve(global)
+		);
+	}
+	const globalForMatch = async (
+		match: H2HMatchPayloadV2
+	): Promise<LivePublicationReadV2 | null> => {
+		const key = `${match.globalRef.publicationId}:${match.globalRef.generation}`;
+		const existing = globalByRef.get(key);
+		if (existing) return existing;
+		const load = readLivePublicationByRefV2(context, eventId, match.globalRef).catch(() => null);
+		globalByRef.set(key, load);
+		return load;
+	};
+	const matches = await Promise.all(
+		headRead.index.flatMap((indexRow) => {
+			if (!("matchId" in indexRow)) return [];
+			const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
+			if (!match) return [];
+			return [
+				(async () => {
+					const matchGlobal = await globalForMatch(match);
+					const [home, away] = await Promise.all([
+						projectH2HSide(context, matchGlobal, match, match.home),
+						projectH2HSide(context, matchGlobal, match, match.away),
+					]);
+					const availability =
+						match.state !== "READY"
+							? match.state
+							: home.availability === "ERROR" || away.availability === "ERROR"
+								? "ERROR"
+								: home.availability === "PENDING" || away.availability === "PENDING"
+									? "PENDING"
+									: "READY";
+					return {
+						officialMatchId: match.officialMatchId,
+						eventId: match.eventId,
+						groupId: match.groupId,
+						sourceOrder: match.sourceOrder,
+						phase: match.phase,
+						knockoutName: match.knockoutName,
+						tiebreak: match.tiebreak,
+						isBye: match.isBye,
+						availability,
+						delivery: {
+							...delivery,
+							reasonCodes:
+								availability === "READY"
+									? delivery.reasonCodes
+									: [...delivery.reasonCodes, "MATCH_PROJECTION_INCOMPLETE"],
+						},
+						revisions: matchGlobal
+							? {
+									...revisions,
+									publicationId: matchGlobal.publication.publicationId,
+									generation: matchGlobal.publication.generation,
+									scoreCore: matchGlobal.publication.revisions.scoreCore.revision,
+									fixtureIdentity: matchGlobal.publication.revisions.fixtureIdentity.revision,
+									algorithm: "live-points-v2-algorithm-1",
+								}
+							: revisions,
+						times: {
+							...times,
+							sourceCheckedAt: match.sourceCheckedAt,
+							contentUpdatedAt: match.sourceCheckedAt,
+						},
+						home,
+						away,
+					};
+				})(),
+			];
+		})
+	);
+	const standingsPayload = standingsRead?.payload.standings as H2HStandingsPayloadV2 | undefined;
+	const standingsState = standingsPayload
+		? standingsPayload.state === "UPDATING"
+			? "UPDATING"
+			: standingsPayload.state === "UNAVAILABLE"
+				? "UNAVAILABLE"
+				: global?.publication.state !== "FINALIZED"
+					? "UPDATING"
+					: delivery.state === "STALE" || delivery.state === "DEGRADED"
+						? "STALE"
+						: "READY"
+		: "UNAVAILABLE";
+	return {
+		eventId,
+		availability: "READY",
+		delivery,
+		revisions,
+		times,
+		standings: standingsPayload
+			? {
+					throughEventId: standingsPayload.throughEventId,
+					state: standingsState,
+					sourceCheckedAt: standingsPayload.sourceCheckedAt,
+					rows: standingsPayload.rows,
+				}
+			: null,
+		matches,
+	};
 };
 
 export const tournamentsResolvers = {
@@ -370,17 +647,7 @@ export const tournamentsResolvers = {
 			_parent: unknown,
 			args: TournamentOfficialH2HArgs,
 			context: GraphQLContext
-		): Promise<TournamentOfficialH2H> => {
-			await assertTournamentStandingsReady(context, args.tournamentId);
-			return tournamentsService.getTournamentOfficialH2H(context, args.tournamentId, args.eventId);
-		},
-
-		entryOfficialH2HDesk: async (
-			_parent: unknown,
-			args: EntryOfficialH2HDeskArgs,
-			context: GraphQLContext
-		): Promise<EntryOfficialH2HDeskItem[]> =>
-			tournamentsService.getEntryOfficialH2HDesk(context, args.entryId),
+		) => readTournamentOfficialH2HV2(context, args.tournamentId, args.eventId),
 
 		tournamentDetailDesk: async (
 			_parent: unknown,
@@ -469,44 +736,6 @@ export const tournamentsResolvers = {
 	},
 	TournamentDetailDesk: {
 		kind: (parent: TournamentDetailDesk): string => parent.kind.toUpperCase(),
-	},
-	TournamentOfficialH2H: {
-		completeness: (parent: TournamentOfficialH2H) =>
-			buildDataCompleteness({
-				contractKey: "official-h2h",
-				scopeKey: `tournament:${parent.tournament.id}:event:${parent.eventId}`,
-				revision: parent.scoreRevision,
-				sourceCheckedAt: parent.scoreCheckedAt,
-				expectedCount: parent.matches.length,
-				observedCount: parent.matches.length,
-				complete:
-					!parent.awaitingSchedule &&
-					parent.scoreSource !== "UNAVAILABLE" &&
-					parent.scoreRevision !== null,
-			}),
-	},
-	TournamentOfficialH2HBoard: {
-		completeness: (parent: {
-			tournament: TournamentInfo;
-			eventId: number;
-			awaitingSchedule: boolean;
-			scoreSource: string;
-			scoreRevision: string | null;
-			scoreCheckedAt: string | null;
-			matches: unknown[];
-		}) =>
-			buildDataCompleteness({
-				contractKey: "official-h2h",
-				scopeKey: `tournament:${parent.tournament.id}:event:${parent.eventId}`,
-				revision: parent.scoreRevision,
-				sourceCheckedAt: parent.scoreCheckedAt,
-				expectedCount: parent.matches.length,
-				observedCount: parent.matches.length,
-				complete:
-					!parent.awaitingSchedule &&
-					parent.scoreSource !== "UNAVAILABLE" &&
-					parent.scoreRevision !== null,
-			}),
 	},
 	TournamentSetupDesk: {
 		status: (parent: NonNullable<TournamentDetailDesk["setup"]>): string =>

@@ -170,30 +170,6 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		warningSummaries: [TournamentSetupWarningSummary!]!
 	}
 
-	type TournamentOfficialH2HBoard {
-		eventId: Int!
-		awaitingSchedule: Boolean!
-		scoreSource: OfficialH2HScoreSource!
-		scoreRevision: String
-		completeness: DataCompletenessMeta
-		scoreCheckedAt: DateTime
-		standings: [OfficialH2HStanding!]!
-		matches: [OfficialH2HMatch!]!
-	}
-
-	type TournamentLiveBoard {
-		eventId: Int!
-		scoreCoreRevision: String
-		state: LiveSnapshotState!
-		partial: Boolean!
-		failedEntryIds: [Int!]!
-		totalEntries: Int!
-		revisions: LiveRevisionVector
-		times: LiveTimes
-		delivery: LiveDelivery
-		rows: [LiveCalcData!]!
-	}
-
 	type TournamentDetailDesk {
 		revision: String!
 		kind: TournamentDetailKind!
@@ -204,8 +180,6 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		participants: [TournamentParticipant!]!
 		unavailableSections: [TournamentDetailSection!]!
 		setup: TournamentSetupDesk
-		officialH2H: TournamentOfficialH2HBoard
-		live: TournamentLiveBoard
 	}
 
 	type ManagedTournamentStatus {
@@ -422,76 +396,68 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		KNOCKOUT
 	}
 
-	enum OfficialH2HScoreSource {
-		FPL_EVENT_LIVE
-		FPL_H2H_FINAL
+	type TournamentOfficialH2H {
+		eventId: Int!
+		availability: LeagueLiveAvailability!
+		delivery: LiveDelivery!
+		revisions: LeagueLiveRevisionVector
+		times: LiveTimes
+		standings: TournamentOfficialH2HStandings
+		matches: [TournamentOfficialH2HLiveMatch!]!
+	}
+
+	enum LeagueOverlayState {
+		READY
+		STALE
+		UPDATING
 		UNAVAILABLE
 	}
 
-	type OfficialH2HStanding {
-		entryId: Int!
-		entryName: String
-		playerName: String
-		rank: Int
-		matchPoints: Int!
-		played: Int!
-		won: Int!
-		drawn: Int!
-		lost: Int!
-		pointsFor: Int!
+	type TournamentOfficialH2HStandings {
+		throughEventId: Int!
+		state: LeagueOverlayState!
+		sourceCheckedAt: DateTime
+		rows: [TournamentOfficialH2HStanding!]!
 	}
 
-	type OfficialH2HMatchSide {
+	type TournamentOfficialH2HStanding {
+		entryId: Int!
+		entryName: String!
+		playerName: String
+		rank: Int
+		matchPoints: Int
+		played: Int
+		won: Int
+		drawn: Int
+		lost: Int
+		pointsFor: Int
+	}
+
+	type TournamentOfficialH2HLiveMatchSide {
+		availability: LeagueLiveAvailability!
 		entryId: Int
 		entryName: String!
 		playerName: String
 		isAverage: Boolean!
 		points: Int
-		matchPoints: Int
+		netPoints: Int
 	}
 
-	type OfficialH2HMatch {
+	type TournamentOfficialH2HLiveMatch {
 		officialMatchId: Int!
 		eventId: Int!
+		groupId: Int!
 		sourceOrder: Int!
 		phase: OfficialH2HMatchPhase!
 		knockoutName: String
-		isBye: Boolean!
-		home: OfficialH2HMatchSide!
-		away: OfficialH2HMatchSide!
-		winnerEntryId: Int
 		tiebreak: String
-		sourceCheckedAt: DateTime
-	}
-
-	type TournamentOfficialH2H {
-		tournament: TournamentInfo!
-		eventId: Int!
-		awaitingSchedule: Boolean!
-		scoreSource: OfficialH2HScoreSource!
-		scoreRevision: String
-		completeness: DataCompletenessMeta
-		scoreCheckedAt: DateTime
-		standings: [OfficialH2HStanding!]!
-		matches: [OfficialH2HMatch!]!
-	}
-
-	type EntryOfficialH2HDeskItem {
-		tournamentId: Int!
-		tournamentName: String!
-		totalTeams: Int!
-		eventId: Int!
-		awaitingSchedule: Boolean!
-		isLive: Boolean!
-		isFinal: Boolean!
-		scoreSource: OfficialH2HScoreSource!
-		scoreRevision: String
-		scoreCheckedAt: DateTime
-		rank: Int
-		lastRank: Int
-		matchPoints: Int!
-		match: OfficialH2HMatch
-		matches: [OfficialH2HMatch!]!
+		isBye: Boolean!
+		availability: LeagueLiveAvailability!
+		delivery: LiveDelivery!
+		revisions: LeagueLiveRevisionVector!
+		times: LiveTimes!
+		home: TournamentOfficialH2HLiveMatchSide!
+		away: TournamentOfficialH2HLiveMatchSide!
 	}
 
 	extend type Query {
@@ -520,7 +486,6 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		tournamentBattleGroupResults(tournamentId: Int!, eventId: Int!): [TournamentBattleGroupResult!]!
 		entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
 		tournamentOfficialH2H(tournamentId: Int!, eventId: Int!): TournamentOfficialH2H!
-		entryOfficialH2HDesk(entryId: Int!): [EntryOfficialH2HDeskItem!]!
 		tournamentDetailDesk(tournamentId: Int!, entryId: Int!, eventId: Int): TournamentDetailDesk
 		managedTournamentStatus(tournamentId: Int!, entryId: Int!): ManagedTournamentStatus
 	}

@@ -2,85 +2,43 @@ query GetEntryLiveCompetitionBoard(
 	$entryId: Int!
 	$tournamentId: Int!
 	$eventId: Int!
-	$ref: LivePublicationRefInput
-	$page: Int
-	$pageSize: Int
-	$sort: EntryLiveCompetitionBoardSort
-	$direction: EntryLiveCompetitionBoardSortDirection
-	$search: String
-	$chips: [String!]
-	$captainPlayerIds: [Int!]
-	$ownership: EntryLiveCompetitionOwnershipFilterInput
-	$teamCountRules: [EntryLiveCompetitionTeamCountRuleInput!]
-	$expectedBoardRevision: String
+	$input: EntryLiveCompetitionBoardInput
 ) {
 	entryLiveCompetitionBoard(
 		entryId: $entryId
 		tournamentId: $tournamentId
 		eventId: $eventId
-		ref: $ref
-		page: $page
-		pageSize: $pageSize
-		sort: $sort
-		direction: $direction
-		search: $search
-		chips: $chips
-		captainPlayerIds: $captainPlayerIds
-		ownership: $ownership
-		teamCountRules: $teamCountRules
-		expectedBoardRevision: $expectedBoardRevision
+		input: $input
 	) {
-		season
-		eventId
-		tournamentId
-		boardRevision
-		scoreCoreRevision
-		dataAvailability
-		revisions {
-			publicationId
-			generation
-			lifecycle
-			fixtureIdentity
-			scoreCore
-			displayStats
-			explain
-			picksBase
-			officialAdjustment
-			previousTotals
-			finalResult
-			rules
-			algorithm
-			input
-		}
-		times {
-			sourceCheckedAt
-			contentUpdatedAt
-			publishedAt
-			checkpointedAt
-			servedAt
-			staleAt
+		head {
+			season
+			eventId
+			tournamentId
+			mode
+			availability
+			contentRevision
 			nextRefreshAt
+			publication {
+				revisions {
+					publicationId
+					generation
+					scoreCore
+				}
+				times {
+					contentUpdatedAt
+					nextRefreshAt
+				}
+			}
+			delivery {
+				state
+			}
 		}
-		delivery {
-			state
-			servedFrom
-			reasonCodes
-		}
-		coverageState
-		rankScope
-		computedEntries
-		deferredEntryCount
-		failedEntryCount
-		unavailableEntryCount
-		officialCoverage
-		unavailableEntryIds
-		failedEntryIds
-		partial
 		totalEntries
 		filteredEntries
-		page
-		pageSize
-		hasMore
+		pageInfo {
+			hasNextPage
+			endCursor
+		}
 		highestEventPoints
 		averageEventPoints
 		rows {
@@ -93,10 +51,11 @@ query GetEntryLiveCompetitionBoard(
 }
 
 fragment EntryLiveCompetitionBoardRowFields on EntryLiveCompetitionBoardRow {
+	availability
 	entry
 	entryName
 	playerName
-	rank
+	liveRank
 	overallRank
 	teamValue
 	chip
@@ -106,43 +65,18 @@ fragment EntryLiveCompetitionBoardRowFields on EntryLiveCompetitionBoardRow {
 	captainId
 	captainName
 	captainPoints
-	score {
-		eventPoints
-		netEventPoints
-		totalPoints
-		totalScope
-		transferCost
-		source
-		calculationMode
-		revisions {
-			publicationId
-			generation
-			lifecycle
-			fixtureIdentity
-			scoreCore
-			displayStats
-			explain
-			picksBase
-			officialAdjustment
-			previousTotals
-			finalResult
-			rules
-			algorithm
-			input
-		}
-		times {
-			sourceCheckedAt
-			contentUpdatedAt
-			publishedAt
-			checkpointedAt
-			servedAt
-			staleAt
-			nextRefreshAt
-		}
-		delivery {
-			state
-			servedFrom
-			reasonCodes
-		}
-	}
+	score { ...LivePointsScoreSummaryFields }
+}
+
+fragment LivePointsScoreSummaryFields on LiveScore {
+	eventPoints
+	netEventPoints
+	totalPoints
+	totalScope
+	transferCost
+	source
+	calculationMode
+	revisions { input }
+	times { sourceCheckedAt contentUpdatedAt nextRefreshAt }
+	delivery { state }
 }

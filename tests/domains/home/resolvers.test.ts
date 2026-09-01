@@ -3,12 +3,13 @@ import { graphql } from "graphql";
 import { movementFromRanks, type HomePersonalDesk } from "../../../src/domains/home/repository";
 import {
 	applyHomePairScores,
+	applyHomeOfficialH2HRanksV2,
 	applyHomeRankLifecycle,
 	applyHomeScoreLifecycle,
 	compactHomeMarketPulse,
-	reconcileHomeOfficialH2HRanks,
 	settleHomeTransfers,
 } from "../../../src/domains/home/service";
+import type { H2HStandingsPayloadV2 } from "../../../src/domains/live-desks/h2h-v2";
 import type { LiveCalcDataV2 as LiveCalcData } from "../../../src/domains/entry-live/v2-service";
 import type { Event } from "../../../src/domains/events/repository";
 import { gameweekService } from "../../../src/domains/gameweek/service";
@@ -444,6 +445,59 @@ describe("Home GraphQL contracts", () => {
 		expect(movementFromRanks(-1, 3)).toEqual({ direction: "UNKNOWN", places: null });
 	});
 
+	it("applies only exact finalized V2 H2H standings to Home", () => {
+		const finalized: H2HStandingsPayloadV2 = {
+			contractVersion: "live-points-v2",
+			season: "2627",
+			eventId: 1,
+			tournamentId: 8,
+			throughEventId: 1,
+			state: "READY",
+			sourceCheckedAt: "2026-08-25T01:00:00.000Z",
+			rows: [
+				{
+					entryId: 123,
+					entryName: "Lifecycle XI",
+					playerName: "Lifecycle Manager",
+					rank: 4,
+					matchPoints: 9,
+					played: 3,
+					won: 3,
+					drawn: 0,
+					lost: 0,
+					pointsFor: 87,
+				},
+			],
+		};
+		const ranked = applyHomeOfficialH2HRanksV2(lifecycleDesk(), 1, new Map([[8, finalized]]));
+
+		expect(ranked.leagueRanks[0]).toMatchObject({
+			rank: 4,
+			rankState: "READY",
+			rankCheckedAt: "2026-08-25T01:00:00.000Z",
+			movement: { direction: "UP", places: 6 },
+		});
+	});
+
+	it("keeps a previous H2H rank while V2 standings are not finalized", () => {
+		const updating: H2HStandingsPayloadV2 = {
+			contractVersion: "live-points-v2",
+			season: "2627",
+			eventId: 1,
+			tournamentId: 8,
+			throughEventId: 1,
+			state: "UPDATING",
+			sourceCheckedAt: "2026-08-25T01:00:00.000Z",
+			rows: [],
+		};
+		const ranked = applyHomeOfficialH2HRanksV2(lifecycleDesk(), 1, new Map([[8, updating]]));
+
+		expect(ranked.leagueRanks[0]).toMatchObject({
+			rank: 10,
+			rankState: "UPDATING",
+		});
+	});
+
 	it("shows the projected live total while preserving the last official ranks", () => {
 		const event = lifecycleEvent(false);
 		const ranked = applyHomeRankLifecycle(lifecycleDesk(), event);
@@ -711,168 +765,6 @@ describe("Home GraphQL contracts", () => {
 			],
 		});
 		expect(databaseQuery).toHaveBeenCalledTimes(1);
-	});
-
-	it("reconciles Home H2H ranks only from the official mirror desk", () => {
-		const desk: HomePersonalDesk = {
-			entryId: 123,
-			state: "READY",
-			entryName: "Compact XI",
-			playerName: "Ada Manager",
-			region: null,
-			bank: 15,
-			overallPoints: 49,
-			pointsState: "FINAL",
-			pointsCheckedAt: "2026-08-23T01:00:00.000Z",
-			overallRank: 90_000,
-			rankState: "READY",
-			rankCheckedAt: "2026-08-23T01:00:00.000Z",
-			teamValue: 1000,
-			sourceCheckedAt: "2026-08-23T01:00:00.000Z",
-			leagueRanks: [
-				{
-					key: "classic:7",
-					name: "Classic",
-					leagueType: "CLASSIC",
-					visibility: "PRIVATE",
-					rank: 7,
-					rankState: "READY",
-					rankCheckedAt: "2026-08-23T01:00:00.000Z",
-					movement: { direction: "FLAT", places: 0 },
-					tournamentId: 5,
-					h2hMatchup: null,
-				},
-				{
-					key: "h2h:8",
-					name: "Official H2H",
-					leagueType: "H2H",
-					visibility: "PRIVATE",
-					rank: null,
-					rankState: "UNAVAILABLE",
-					rankCheckedAt: null,
-					movement: { direction: "UNKNOWN", places: null },
-					tournamentId: 6,
-					h2hMatchup: null,
-				},
-				{
-					key: "h2h:9",
-					name: "Custom H2H",
-					leagueType: "H2H",
-					visibility: "PRIVATE",
-					rank: 4,
-					rankState: "READY",
-					rankCheckedAt: "2026-08-23T01:00:00.000Z",
-					movement: { direction: "FLAT", places: 0 },
-					tournamentId: 7,
-					h2hMatchup: null,
-				},
-				{
-					key: "h2h:10",
-					name: "Waiting Official H2H",
-					leagueType: "H2H",
-					visibility: "PRIVATE",
-					rank: null,
-					rankState: "UNAVAILABLE",
-					rankCheckedAt: null,
-					movement: { direction: "UNKNOWN", places: null },
-					tournamentId: 8,
-					h2hMatchup: null,
-				},
-				{
-					key: "h2h:11",
-					name: "Settled Official H2H",
-					leagueType: "H2H",
-					visibility: "PRIVATE",
-					rank: 3,
-					rankState: "READY",
-					rankCheckedAt: "2026-08-23T01:00:00.000Z",
-					movement: { direction: "UP", places: 2 },
-					tournamentId: 9,
-					h2hMatchup: null,
-				},
-			],
-		};
-		const officialDesk = [
-			{
-				tournamentId: 6,
-				tournamentName: "Official H2H",
-				totalTeams: 21,
-				eventId: 1,
-				awaitingSchedule: false,
-				isLive: true,
-				isFinal: false,
-				scoreSource: "FPL_EVENT_LIVE" as const,
-				scoreRevision: "live:1",
-				scoreCheckedAt: "2026-08-24T06:00:00.000Z",
-				rank: 2,
-				lastRank: null,
-				matchPoints: 3,
-				standingsPublished: true,
-				standingsCurrentEventComplete: true,
-				match: null,
-				matches: [],
-			},
-			{
-				tournamentId: 8,
-				tournamentName: "Waiting Official H2H",
-				totalTeams: 21,
-				eventId: 1,
-				awaitingSchedule: false,
-				isLive: true,
-				isFinal: false,
-				scoreSource: "UNAVAILABLE" as const,
-				scoreRevision: null,
-				scoreCheckedAt: null,
-				rank: 1,
-				lastRank: null,
-				matchPoints: 0,
-				standingsPublished: false,
-				standingsCurrentEventComplete: false,
-				match: null,
-				matches: [],
-			},
-			{
-				tournamentId: 9,
-				tournamentName: "Settled Official H2H",
-				totalTeams: 21,
-				eventId: 2,
-				awaitingSchedule: false,
-				isLive: false,
-				isFinal: true,
-				scoreSource: "FPL_H2H_FINAL" as const,
-				scoreRevision: "final:2",
-				scoreCheckedAt: "2026-08-24T07:00:00.000Z",
-				rank: 2,
-				lastRank: 3,
-				matchPoints: 3,
-				standingsPublished: true,
-				standingsCurrentEventComplete: true,
-				match: null,
-				matches: [],
-			},
-		];
-
-		const reconciled = reconcileHomeOfficialH2HRanks(desk, officialDesk);
-
-		expect(reconciled.leagueRanks).toEqual([
-			desk.leagueRanks[0],
-			{
-				...desk.leagueRanks[1],
-				rankState: "UPDATING",
-			},
-			desk.leagueRanks[2],
-			{
-				...desk.leagueRanks[3],
-				rankState: "UPDATING",
-			},
-			{
-				...desk.leagueRanks[4],
-				rank: 2,
-				rankState: "READY",
-				rankCheckedAt: "2026-08-24T07:00:00.000Z",
-				movement: { direction: "UP", places: 1 },
-			},
-		]);
 	});
 
 	it("keeps the settled official rank during a later live event", async () => {

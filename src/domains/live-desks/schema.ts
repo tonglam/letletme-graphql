@@ -76,26 +76,47 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		delivery: LiveDelivery!
 	}
 
-	type EntryLiveCompetitionsDesk {
+	enum LeagueLiveAvailability {
+		READY
+		PENDING
+		MISSING
+		ERROR
+	}
+
+	enum LeagueLiveMode {
+		CLASSIC
+		H2H
+	}
+
+	type LeagueLiveRevisionVector {
+		publicationId: ID!
+		generation: Int!
+		roster: String!
+		scoreCore: String!
+		fixtureIdentity: String!
+		entryInputSet: String!
+		identity: String!
+		officialRank: String
+		rules: String!
+		algorithm: String!
+		content: String!
+	}
+
+	type LeagueLivePublicationMeta {
+		revisions: LeagueLiveRevisionVector!
+		times: LiveTimes!
+	}
+
+	type LeagueLiveHead {
 		season: String!
 		eventId: Int!
-		scoreCoreRevision: String
-		state: LiveSnapshotState!
-		windowState: LiveWindowState!
-		dataAvailability: LiveDataAvailability!
+		tournamentId: Int!
+		mode: LeagueLiveMode!
+		availability: LeagueLiveAvailability!
+		contentRevision: String
+		publication: LeagueLivePublicationMeta
+		delivery: LiveDelivery!
 		nextRefreshAt: DateTime
-		tournaments: [TournamentInfo!]!
-		selectedTournamentId: Int
-		board: [LiveCalcData!]!
-		officialCoverage: Float!
-		revisions: LiveRevisionVector
-		times: LiveTimes
-		delivery: LiveDelivery
-		unavailableEntryIds: [Int!]!
-		partial: Boolean!
-		failedEntryIds: [Int!]!
-		deferredEntryCount: Int!
-		totalEntries: Int!
 	}
 
 	enum EntryLiveCompetitionBoardSort {
@@ -126,18 +147,6 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		VICE
 	}
 
-	enum EntryLiveCompetitionBoardCoverageState {
-		WARMING
-		COMPLETE
-		PARTIAL
-		UNAVAILABLE
-	}
-
-	enum EntryLiveCompetitionRankScope {
-		FULL_FIELD
-		AVAILABLE_ROWS
-	}
-
 	input EntryLiveCompetitionOwnershipFilterInput {
 		playerIds: [Int!]!
 		scope: EntryLiveCompetitionPickScope = ANY
@@ -150,48 +159,46 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		scope: EntryLiveCompetitionPickScope = ANY
 	}
 
+	input EntryLiveCompetitionBoardInput {
+		first: Int = 20
+		after: String
+		sort: EntryLiveCompetitionBoardSort = EVENT_POINTS
+		direction: EntryLiveCompetitionBoardSortDirection = DESC
+		search: String
+		chips: [String!]
+		captainPlayerIds: [Int!]
+		ownership: EntryLiveCompetitionOwnershipFilterInput
+		teamCountRules: [EntryLiveCompetitionTeamCountRuleInput!]
+	}
+
 	type EntryLiveCompetitionBoardRow {
+		availability: LeagueLiveAvailability!
 		entry: Int!
 		entryName: String!
 		playerName: String!
-		rank: Int!
+		liveRank: Int
 		overallRank: Int
-		teamValue: Float!
-		chip: String!
-		transferCost: Int!
-		played: Int!
-		toPlay: Int!
-		captainId: Int!
-		captainName: String!
-		captainPoints: Int!
-		score: LiveScore!
+		teamValue: Float
+		chip: String
+		transferCost: Int
+		played: Int
+		toPlay: Int
+		captainId: Int
+		captainName: String
+		captainPoints: Int
+		score: LiveScore
+	}
+
+	type CursorPageInfo {
+		hasNextPage: Boolean!
+		endCursor: String
 	}
 
 	type EntryLiveCompetitionBoardPage {
-		season: String!
-		eventId: Int!
-		tournamentId: Int!
-		boardRevision: String!
-		scoreCoreRevision: String
-		dataAvailability: LiveDataAvailability!
-		revisions: LiveRevisionVector!
-		times: LiveTimes!
-		delivery: LiveDelivery!
-		coverageState: EntryLiveCompetitionBoardCoverageState!
-		rankScope: EntryLiveCompetitionRankScope!
-		computedEntries: Int!
-		deferredEntryCount: Int!
-		failedEntryCount: Int!
-		unavailableEntryCount: Int!
-		officialCoverage: Float!
-		unavailableEntryIds: [Int!]!
-		failedEntryIds: [Int!]!
-		partial: Boolean!
+		head: LeagueLiveHead!
 		totalEntries: Int!
 		filteredEntries: Int!
-		page: Int!
-		pageSize: Int!
-		hasMore: Boolean!
+		pageInfo: CursorPageInfo!
 		highestEventPoints: Int
 		averageEventPoints: Float
 		rows: [EntryLiveCompetitionBoardRow!]!
@@ -226,26 +233,17 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 
 	extend type Query {
 		liveContext: LiveContext!
-		entryLiveCompetitionsDesk(
+		leagueLiveHead(
 			entryId: Int!
-			selectedTournamentId: Int
-			ref: LivePublicationRefInput
-		): EntryLiveCompetitionsDesk!
+			tournamentId: Int!
+			eventId: Int!
+			mode: LeagueLiveMode!
+		): LeagueLiveHead!
 		entryLiveCompetitionBoard(
 			entryId: Int!
 			tournamentId: Int!
 			eventId: Int!
-			ref: LivePublicationRefInput
-			page: Int = 1
-			pageSize: Int = 20
-			sort: EntryLiveCompetitionBoardSort = EVENT_POINTS
-			direction: EntryLiveCompetitionBoardSortDirection = DESC
-			search: String
-			chips: [String!]
-			captainPlayerIds: [Int!]
-			ownership: EntryLiveCompetitionOwnershipFilterInput
-			teamCountRules: [EntryLiveCompetitionTeamCountRuleInput!]
-			expectedBoardRevision: String
+			input: EntryLiveCompetitionBoardInput
 		): EntryLiveCompetitionBoardPage!
 		tournamentSelectionIndex(
 			entryId: Int!

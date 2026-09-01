@@ -135,6 +135,7 @@ export const buildGraphQLRuntimeContext = async ({
 			schema,
 			requestScope,
 			authorizedTournamentMemberships,
+			deferLiveTournamentMembership: readOnlyHotPath,
 		})
 	);
 	if (!authorization.ok) {

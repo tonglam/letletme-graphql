@@ -974,12 +974,17 @@ describe("GraphQL request limits", () => {
 		let astNodes = 0;
 		visit(parse(query), { enter: () => void (astNodes += 1) });
 
-		expect(astNodes).toBe(360);
+		expect(astNodes).toBe(188);
 		expect(
 			validateGraphQLRequestLimits(
 				{
 					query,
-					variables: { entryId: 1, tournamentId: 1, eventId: 1, page: 1, pageSize: 20 },
+					variables: {
+						entryId: 1,
+						tournamentId: 1,
+						eventId: 1,
+						input: { first: 20 },
+					},
 				},
 				schema
 			)
@@ -1247,7 +1252,7 @@ describe("GraphQL request limits", () => {
 	it("sums heavy root floors, including aliases", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
-				"query { first: liveMatchday { snapshot { eventId } } second: liveMatchday { snapshot { eventId } } entryLiveCompetitionsDesk(entryId: 1) { eventId } }",
+				"query { first: liveMatchday { snapshot { eventId } } second: liveMatchday { snapshot { eventId } } leagueLiveHead(entryId: 1, tournamentId: 1, eventId: 1, mode: CLASSIC) { eventId } }",
 		});
 		expect(result).toMatchObject({ ok: true });
 	});
@@ -1268,12 +1273,12 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 40 });
 	});
 
-	it("charges official H2H detail and Team Desk roots for their multi-read projections", () => {
+	it("charges the V2 official H2H publication root", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
-				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } entryOfficialH2HDesk(entryId: 7) { tournamentId } }",
+				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } leagueLiveHead(entryId: 7, tournamentId: 1, eventId: 3, mode: H2H) { eventId } }",
 		});
-		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 60 });
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 6 });
 	});
 
 	it("charges every aliased liveScores full-event lookup", () => {

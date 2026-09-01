@@ -2,12 +2,10 @@ import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
 import type {
 	EntryH2HMatchResult,
-	EntryOfficialH2HDeskItem,
 	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
 	TournamentInfo,
-	TournamentOfficialH2H,
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
 	TournamentDetailDesk,
@@ -143,21 +141,6 @@ export const tournamentsService = {
 		entryId: number
 	): Promise<EntryH2HMatchResult[]> {
 		return tournamentsRepository.getEntryH2HMatchResults(context, entryId);
-	},
-
-	getTournamentOfficialH2H(
-		context: GraphQLContext,
-		tournamentId: number,
-		eventId: number
-	): Promise<TournamentOfficialH2H> {
-		return tournamentsRepository.getTournamentOfficialH2H(context, tournamentId, eventId);
-	},
-
-	getEntryOfficialH2HDesk(
-		context: GraphQLContext,
-		entryId: number
-	): Promise<EntryOfficialH2HDeskItem[]> {
-		return tournamentsRepository.getEntryOfficialH2HDesk(context, entryId);
 	},
 
 	getTournamentDetailDesk(

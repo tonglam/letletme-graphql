@@ -236,6 +236,29 @@ describe("authorizeGraphQLRequest", () => {
 		}
 	});
 
+	it("defers V2 live membership to the publication on the Redis-first path", async () => {
+		const failingData = {
+			read: () => {
+				throw new Error("Data membership API is unavailable");
+			},
+		} as never;
+		for (const query of [
+			`query { leagueLiveHead(entryId: 123, tournamentId: 7, eventId: 1, mode: CLASSIC) { availability } }`,
+			`query { entryLiveCompetitionBoard(entryId: 123, tournamentId: 7, eventId: 1) { totalEntries } }`,
+			`query { tournamentOfficialH2H(tournamentId: 7, eventId: 1) { availability } }`,
+		]) {
+			const result = await authorizeGraphQLRequest({
+				body: { query },
+				principal: websitePrincipal,
+				data: failingData,
+				logger,
+				schema,
+				deferLiveTournamentMembership: true,
+			});
+			expect(result).toEqual({ ok: true });
+		}
+	});
+
 	it("reuses a freshly proven tournament membership across protected roots", async () => {
 		let membershipReads = 0;
 		const countedData = {

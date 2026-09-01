@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { graphql } from "graphql";
 import { schema } from "../../../src/graphql/schema";
+import { clearLivePointsV2Lkg } from "../../../src/domains/entry-live/v2-service";
 import {
 	buildCorePublication,
 	buildLivePublication,
@@ -56,6 +57,8 @@ const withDurableBoardRows = (
 };
 
 describe("gameweekDesk", () => {
+	beforeEach(() => clearLivePointsV2Lkg());
+
 	it("keeps the current gameweek scheduled until a fixture starts", async () => {
 		const core = buildTestCoreData(1);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
