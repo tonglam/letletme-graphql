@@ -568,14 +568,20 @@ local function detail_candidate(pointer)
       return { publication = publication, manifest = manifest, items = {} }
     end
   end
+  if mode ~= "FULL" then
+    -- HEAD and DESK use the publication plus manifest for revision
+    -- observation only. Do not load immutable player-detail bodies on the
+    -- heartbeat path; FULL is the only mode that verifies their bytes.
+    return { publication = publication, manifest = manifest, items = items }
+  end
+
+  -- FULL reads the immutable item bytes so the TypeScript reader can verify
+  -- SHA256/length/count before constructing player projections.
   for _, item in ipairs(decoded.fixtures) do
     local expected_metadata = tostring(item.count) .. "|" .. tostring(item.bytes) .. "|" .. item.sha256
     if redis_type(item.key) ~= "string" or redis.call("STRLEN", item.key) ~= item.bytes or read_string(item.key .. ":meta") ~= expected_metadata then
       return { publication = publication, manifest = manifest, items = {} }
     end
-    -- Metadata reads return the immutable item bytes solely so the
-    -- TypeScript reader can verify SHA256/length/count before accepting
-    -- the manifest. They are not deserialized into player projections.
     table.insert(items, {
       fixtureId = item.fixtureId,
       key = item.key,
@@ -1005,31 +1011,6 @@ const parsePayload = <T>(
 	return value;
 };
 
-/**
- * Verify an immutable detail item without constructing its player projection.
- * HEAD/DESK still need the body checksum: a same-length mutation must not make
- * a manifest-only candidate look coherent.
- */
-const validDetailMetadataPayload = (
-	raw: string | null,
-	item: Readonly<{ count: number; bytes: number; sha256: string }>
-): readonly MatchDetailPlayer[] | null => {
-	if (
-		raw === null ||
-		Buffer.byteLength(raw, "utf8") !== item.bytes ||
-		sha256Raw(raw) !== item.sha256
-	)
-		return null;
-	const value = parsedJson(raw);
-	return Array.isArray(value) &&
-		value.length === item.count &&
-		canonicalBytes(value) === item.bytes &&
-		new Set(value.map((player) => (isRecord(player) ? player.id : null))).size === value.length &&
-		value.every(validDetailPlayer)
-		? (value as readonly MatchDetailPlayer[])
-		: null;
-};
-
 const validDeskFixture = (value: unknown, eventId: number): value is MatchDeskFixture => {
 	if (!isRecord(value) || !hasExactKeys(value, LIVE_MATCH_DESK_FIXTURE_KEYS)) return false;
 	const fixtureId = safeInteger(value.fixtureId);
@@ -1313,35 +1294,13 @@ const decodeDetailMetadataCandidate = (
 		!publication ||
 		!manifest ||
 		!sameDetailMetadata(publication, manifest) ||
-		raw.items.length !== publication.fixtures.length
+		publication.fixtures.length > LIVE_MATCH_MAX_FIXTURES
 	)
 		return null;
-	const fixturesForRevision: Array<{ fixtureId: number; players: readonly MatchDetailPlayer[] }> =
-		[];
-	const fixturePlayerTeamIds = new Map<number, readonly number[]>();
-	for (const item of publication.fixtures) {
-		const rawItem = raw.items.find(
-			(candidate) => candidate.fixtureId === item.fixtureId && candidate.key === item.key
-		);
-		const players = rawItem ? validDetailMetadataPayload(rawItem.payload, item) : null;
-		if (
-			!rawItem ||
-			rawItem.metadata !== `${item.count}|${item.bytes}|${item.sha256}` ||
-			players === null
-		)
-			return null;
-		fixturesForRevision.push({ fixtureId: item.fixtureId, players });
-		fixturePlayerTeamIds.set(
-			item.fixtureId,
-			players.map((player) => player.teamId)
-		);
-	}
-	if (sha256(fixturesForRevision) !== publication.detail.revision) return null;
 	return {
 		publication,
 		fixtures: [],
 		payloadLoaded: false,
-		fixturePlayerTeamIds,
 		servedFrom,
 	};
 };
@@ -1568,9 +1527,11 @@ const compatibleDetailMetadata = (
 			detail.fixtures
 				.find((fixture) => fixture.fixtureId === fixtureId)
 				?.players.map((player) => player.teamId);
-		if (!deskTeamIds || playerTeamIds === undefined) return false;
-		const allowedTeamIds = new Set(deskTeamIds);
-		if (playerTeamIds.some((teamId) => !allowedTeamIds.has(teamId))) return false;
+		if (playerTeamIds !== undefined) {
+			if (!deskTeamIds) return false;
+			const allowedTeamIds = new Set(deskTeamIds);
+			if (playerTeamIds.some((teamId) => !allowedTeamIds.has(teamId))) return false;
+		}
 	}
 	return (
 		detail.publication.observedDeskGeneration <= desk.publication.generation &&

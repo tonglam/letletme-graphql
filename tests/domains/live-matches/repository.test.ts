@@ -494,6 +494,22 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(0);
 	});
 
+	it("does not require immutable detail bodies for HEAD or DESK metadata reads", async () => {
+		for (const mode of ["HEAD", "DESK"] as const) {
+			resetLiveMatchProcessStateForTests();
+			const redis = new TestRedis();
+			const bundle = structuredClone(buildBundle().bundle);
+			bundle.detail.active.items = [];
+			attachBundle(redis, bundle);
+
+			const result = await readLiveMatchday(buildSnapshotContext(redis), 1, mode);
+
+			expect(result.desk).not.toBeNull();
+			expect(result.detail?.payloadLoaded).toBe(false);
+			expect(result.detail?.fixtures).toEqual([]);
+		}
+	});
+
 	it("rejects a corrupt desk item before accepting a HEAD metadata candidate", async () => {
 		const redis = new TestRedis();
 		attachBundle(redis, buildBundle({ corruptDesk: true }).bundle);
@@ -597,7 +613,7 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
-	it("rejects same-length detail corruption before accepting HEAD metadata", async () => {
+	it("rejects same-length detail corruption before accepting a FULL candidate", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		const item = bundle.detail.active.items[0];
@@ -613,13 +629,13 @@ describe("Live Matches V3 read path", () => {
 		item.payload = corruptedPayload;
 		attachBundle(redis, bundle);
 
-		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
 
 		expect(result.desk).not.toBeNull();
 		expect(result.detail).toBeNull();
 	});
 
-	it("rejects an invalid detail player before accepting HEAD metadata", async () => {
+	it("rejects an invalid detail player before accepting a FULL candidate", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		const active = bundle.detail.active;
@@ -661,13 +677,13 @@ describe("Live Matches V3 read path", () => {
 		active.manifest = active.publication;
 		attachBundle(redis, bundle);
 
-		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
 
 		expect(result.desk).not.toBeNull();
 		expect(result.detail).toBeNull();
 	});
 
-	it("rejects a metadata player whose team is outside the desk fixture", async () => {
+	it("rejects a detail player whose team is outside the desk fixture", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		const active = bundle.detail.active;
@@ -709,13 +725,13 @@ describe("Live Matches V3 read path", () => {
 		active.manifest = active.publication;
 		attachBundle(redis, bundle);
 
-		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
 
 		expect(result.desk).not.toBeNull();
 		expect(result.detail).toBeNull();
 	});
 
-	it("rejects a detail metadata candidate with a mismatched aggregate revision", async () => {
+	it("rejects a detail candidate with a mismatched aggregate revision", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);
 		const active = bundle.detail.active;
@@ -728,7 +744,7 @@ describe("Live Matches V3 read path", () => {
 		active.manifest = active.publication;
 		attachBundle(redis, bundle);
 
-		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "FULL");
 
 		expect(result.desk).not.toBeNull();
 		expect(result.detail).toBeNull();
@@ -1385,8 +1401,11 @@ describe("Live Matches V3 read path", () => {
 		expect(detailScript.indexOf('read_string(item.key .. ":meta")')).toBeLessThan(
 			detailScript.indexOf("payload = read_string(item.key)")
 		);
+		expect(detailScript).toContain('if mode ~= "FULL" then');
+		expect(detailScript.indexOf('if mode ~= "FULL" then')).toBeLessThan(
+			detailScript.indexOf("payload = read_string(item.key)")
+		);
 		expect(detailScript).toContain("table.insert(items");
-		expect(detailScript).not.toContain('if mode ~= "HEAD" and mode ~= "DESK" then');
 	});
 
 	it("rejects a leading detail publication and keeps the desk available", async () => {
