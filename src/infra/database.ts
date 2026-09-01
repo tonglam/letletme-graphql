@@ -1,5 +1,6 @@
 import type { QueryResult, QueryResultRow } from "pg";
 import { dbPool } from "./db-pool";
+import { postgresPoolWaitEvents } from "./metrics";
 
 export type DatabaseHealthClient = {
 	query: (text: string, values?: readonly unknown[]) => Promise<unknown>;
@@ -13,6 +14,11 @@ export interface QueryExecutor {
 	): Promise<QueryResult<Row>>;
 }
 
+const recordNewlyQueuedPoolWaits = (waitingBefore: number): void => {
+	const newlyQueued = Math.max(0, dbPool.waitingCount - waitingBefore);
+	if (newlyQueued > 0) postgresPoolWaitEvents.inc(newlyQueued);
+};
+
 /**
  * The only PostgreSQL capability exposed to GraphQL application code.
  * It deliberately has no transaction or mutation helper surface.
@@ -21,7 +27,12 @@ export const database: QueryExecutor = {
 	query: <Row extends QueryResultRow = QueryResultRow>(
 		text: string,
 		values: readonly unknown[] = []
-	): Promise<QueryResult<Row>> => dbPool.query<Row>(text, [...values]),
+	): Promise<QueryResult<Row>> => {
+		const waitingBefore = dbPool.waitingCount;
+		const result = dbPool.query<Row>(text, [...values]);
+		recordNewlyQueuedPoolWaits(waitingBefore);
+		return result;
+	},
 };
 
 /**
@@ -53,4 +64,9 @@ export const runDatabaseHealthCheck = async (
 };
 
 export const databaseHealthCheck = async (): Promise<void> =>
-	runDatabaseHealthCheck(() => dbPool.connect() as unknown as Promise<DatabaseHealthClient>, 2_000);
+	runDatabaseHealthCheck(() => {
+		const waitingBefore = dbPool.waitingCount;
+		const client = dbPool.connect() as unknown as Promise<DatabaseHealthClient>;
+		recordNewlyQueuedPoolWaits(waitingBefore);
+		return client;
+	}, 2_000);

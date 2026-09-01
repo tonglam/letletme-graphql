@@ -1699,6 +1699,9 @@ const rememberScopedEventCheckpointCheck = (
 const checkpointCheckKey = (season: string, eventId: number, mode: LiveMatchReadMode): string =>
 	`${mode}:${lkgKey(season, eventId)}`;
 
+const unscopedCheckpointCheckKey = (season: string, mode: LiveMatchReadMode): string =>
+	`UNSCOPED:${mode}:${season}`;
+
 const reserveExplicitEventCheckpointBudget = (season: string, now = Date.now()): boolean => {
 	const budget = processEventCheckpointBudget.get(season);
 	if (!budget) {
@@ -1823,7 +1826,13 @@ export const readLiveMatchday = async (
 		processActiveEvent.set(season, activeBundle.eventId);
 	}
 
-	if (selectedEventId === null) {
+	const recentUnscopedCheckpointCheck =
+		selectedEventId === null && cachedActiveEvent === undefined
+			? recentScopedEventCheckpointCheck(unscopedCheckpointCheckKey(season, mode))
+			: null;
+	if (recentUnscopedCheckpointCheck !== null)
+		postgresReadFailed = recentUnscopedCheckpointCheck.failed;
+	if (selectedEventId === null && recentUnscopedCheckpointCheck === null) {
 		unscopedPostgres = await readPostgresCheckpoint(
 			context,
 			context.currentSeason.seasonId,
@@ -1832,6 +1841,10 @@ export const readLiveMatchday = async (
 			mode
 		);
 		postgresReadFailed = unscopedPostgres === null;
+		rememberScopedEventCheckpointCheck(
+			unscopedCheckpointCheckKey(season, mode),
+			postgresReadFailed
+		);
 		selectedEventId = unscopedPostgres?.eventId ?? cachedActiveEvent ?? null;
 		if (selectedEventId !== null) {
 			rememberActiveEvent(season, selectedEventId);
@@ -1933,7 +1946,11 @@ export const readLiveMatchday = async (
 			mode
 		);
 		postgresReadFailed = postgres === null;
-		if (detailNeedsPostgres && effectiveDesk !== null && postgres?.detail === null) {
+		if (
+			detailNeedsPostgres &&
+			effectiveDesk !== null &&
+			(postgres === null || postgres.detail === null)
+		) {
 			rememberMissingDetailCheckpoint(season, selectedEventId, effectiveDesk);
 		}
 		rememberScopedEventCheckpointCheck(scopedCheckpointCheckKey, postgresReadFailed);

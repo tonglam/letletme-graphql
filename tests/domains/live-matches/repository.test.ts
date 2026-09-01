@@ -366,6 +366,30 @@ describe("Live Matches V3 read path", () => {
 		});
 	});
 
+	it("caches an empty unscoped checkpoint result during an eventless window", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, {
+			eventId: null,
+			pointer: "active",
+			desk: { active: emptyDesk, previous: emptyDesk },
+			detail: { active: emptyDetail, previous: emptyDetail },
+		});
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [] };
+			},
+		});
+
+		const first = await readLiveMatchday(context);
+		const second = await readLiveMatchday(context);
+
+		expect(first.eventId).toBeNull();
+		expect(second.eventId).toBeNull();
+		expect(databaseReads).toBe(1);
+	});
+
 	it("serves one root with fixture-specific DGW detail", async () => {
 		const redis = new TestRedis();
 		attachBundle(redis, buildBundle().bundle);
@@ -1172,6 +1196,27 @@ describe("Live Matches V3 read path", () => {
 		control.set(buildBundle().bundle);
 		const refreshed = await readLiveMatchday(context, 1);
 		expect(refreshed.detail?.fixtures).toHaveLength(2);
+		expect(databaseReads).toBe(1);
+	});
+
+	it("cools down a scoped detail miss when PostgreSQL has no valid desk row", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle({ omitDetail: true }).bundle);
+		let databaseReads = 0;
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				return { rows: [{ event_id: 1, desk: null, detail: null }] };
+			},
+		});
+
+		const first = await readLiveMatchday(context, 1);
+		const second = await readLiveMatchday(context, 1);
+
+		expect(first.desk).not.toBeNull();
+		expect(first.detail).toBeNull();
+		expect(second.desk).not.toBeNull();
+		expect(second.detail).toBeNull();
 		expect(databaseReads).toBe(1);
 	});
 

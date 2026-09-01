@@ -117,7 +117,8 @@ only through its process environment. It executes the exact 180 Mini / 60 RSC /
 10-second burst, the one-device abuse isolation check, and
 five-minute higher-throughput probes that stop at the first failed level. The
 report gates GraphQL 429 and non-429 errors, p95/p99, readiness, PostgreSQL pool
-waiting, CPU, memory, NAT-peer isolation, and the required 40% headroom. It
+waiting and the monotonic PostgreSQL pool wait-event counter, CPU, memory,
+NAT-peer isolation, and the required 40% headroom. It
 derives `S` from the highest passing probe; profile generation has no manual
 `S` override. `LOAD_SESSION_COOKIES_JSON` must contain 45 distinct temporary
 test sessions; neither sessions nor signing credentials are written to the

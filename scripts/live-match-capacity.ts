@@ -29,6 +29,7 @@ type ResponseSample = {
 type MetricObservation = {
 	at: string;
 	poolWaiting: number | null;
+	poolWaitEvents: number | null;
 	globalDenied: number | null;
 };
 
@@ -269,9 +270,13 @@ const agent = false;
 
 let http2Session: ClientHttp2Session | null = null;
 let http2SessionPromise: Promise<ClientHttp2Session> | null = null;
+const http2UnusableSessions = new WeakSet<ClientHttp2Session>();
+
+const isHttp2SessionUsable = (session: ClientHttp2Session): boolean =>
+	!session.closed && !session.destroyed && !http2UnusableSessions.has(session);
 
 function getHttp2Session(): Promise<ClientHttp2Session> {
-	if (http2Session && !http2Session.closed && !http2Session.destroyed) {
+	if (http2Session && isHttp2SessionUsable(http2Session)) {
 		return Promise.resolve(http2Session);
 	}
 	if (http2SessionPromise) return http2SessionPromise;
@@ -305,6 +310,13 @@ function getHttp2Session(): Promise<ClientHttp2Session> {
 		});
 		session.once("close", () => {
 			if (http2Session === session) http2Session = null;
+		});
+		session.on("goaway", () => {
+			http2UnusableSessions.add(session);
+			if (http2Session === session) {
+				http2Session = null;
+				if (!session.closed && !session.destroyed) session.close();
+			}
 		});
 		timer = setTimeout(() => {
 			const error = new Error("http2 session timeout");
@@ -444,6 +456,7 @@ function requestOnceHttp2(): Promise<RawResponse> {
 		let status = 0;
 		let timeout: ReturnType<typeof setTimeout> | null = null;
 		let settled = false;
+		let sessionRetryUsed = false;
 		const finish = (value: RawResponse) => {
 			if (settled) return;
 			settled = true;
@@ -464,77 +477,93 @@ function requestOnceHttp2(): Promise<RawResponse> {
 			});
 		};
 
-		void getHttp2Session()
-			.then((session) => {
-				let stream;
-				try {
-					stream = session.request({
-						":method": "POST",
-						":path": `${endpoint.pathname}${endpoint.search}`,
-						":authority": endpoint.host,
-						"content-type": "application/json",
-						accept: "application/json",
-						"accept-encoding": "gzip, br",
-						"content-length": String(Buffer.byteLength(requestBody)),
-						"x-graphql-service-token": serviceToken,
-						"x-letletme-contract": contractHeader,
-						"x-request-id": `lm-${runId}-${randomUUID().slice(0, 8)}`.slice(0, 64),
-						"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
-					});
-				} catch (error) {
-					fail(error);
+		const assignStream = (session: ClientHttp2Session): void => {
+			if (!isHttp2SessionUsable(session)) {
+				if (sessionRetryUsed) {
+					fail(new Error("http2 session became unusable before request assignment"));
 					return;
 				}
+				sessionRetryUsed = true;
+				if (http2Session === session) http2Session = null;
+				void getHttp2Session().then(assignStream).catch(fail);
+				return;
+			}
 
-				const chunks: Buffer[] = [];
-				let rateLimitScope: string | null = null;
-				let contentEncoding: string | undefined;
-				stream.once("response", (responseHeaders) => {
-					headersAt = performance.now();
-					status = Number(headerValue(responseHeaders, ":status") ?? 0);
-					rateLimitScope = headerValue(responseHeaders, "x-ratelimit-scope") ?? null;
-					contentEncoding = headerValue(responseHeaders, "content-encoding");
+			let stream;
+			try {
+				stream = session.request({
+					":method": "POST",
+					":path": `${endpoint.pathname}${endpoint.search}`,
+					":authority": endpoint.host,
+					"content-type": "application/json",
+					accept: "application/json",
+					"accept-encoding": "gzip, br",
+					"content-length": String(Buffer.byteLength(requestBody)),
+					"x-graphql-service-token": serviceToken,
+					"x-letletme-contract": contractHeader,
+					"x-request-id": `lm-${runId}-${randomUUID().slice(0, 8)}`.slice(0, 64),
+					"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
 				});
-				stream.on("data", (chunk: Buffer | string) => {
-					chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-				});
-				stream.once("end", () => {
-					const endedAt = performance.now();
-					const encoded = Buffer.concat(chunks);
-					let decoded: Buffer = encoded;
-					let decodeError: string | null = null;
-					try {
-						decoded = decodeBody(encoded, contentEncoding);
-					} catch (error) {
-						decodeError = error instanceof Error ? error.message : String(error);
-					}
-					finish({
-						status,
-						ttfbMs: Math.max(0, (headersAt ?? endedAt) - startedAt),
-						bodyDownloadMs: Math.max(0, endedAt - (headersAt ?? endedAt)),
-						durationMs: Math.max(0, endedAt - startedAt),
-						encoded,
-						decoded,
-						decodeError,
-						globalRateLimit: status === 429 && rateLimitScope === "global",
-						rateLimitScope,
-					});
-				});
-				stream.once("error", fail);
-				stream.once("close", () => {
-					if (!settled) fail(new Error("http2 stream closed before response body completed"));
-				});
-				timeout = setTimeout(() => {
-					stream.close(http2Constants.NGHTTP2_CANCEL);
-					fail(new Error("request timeout"));
-				}, timeoutMs);
-				try {
-					stream.end(requestBody);
-				} catch (error) {
-					fail(error);
+			} catch (error) {
+				if (!sessionRetryUsed && !isHttp2SessionUsable(session)) {
+					sessionRetryUsed = true;
+					if (http2Session === session) http2Session = null;
+					void getHttp2Session().then(assignStream).catch(fail);
+					return;
 				}
-			})
-			.catch((error) => fail(error));
+				fail(error);
+				return;
+			}
+
+			const chunks: Buffer[] = [];
+			let rateLimitScope: string | null = null;
+			let contentEncoding: string | undefined;
+			stream.once("response", (responseHeaders) => {
+				headersAt = performance.now();
+				status = Number(headerValue(responseHeaders, ":status") ?? 0);
+				rateLimitScope = headerValue(responseHeaders, "x-ratelimit-scope") ?? null;
+				contentEncoding = headerValue(responseHeaders, "content-encoding");
+			});
+			stream.on("data", (chunk: Buffer | string) => {
+				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+			});
+			stream.once("end", () => {
+				const endedAt = performance.now();
+				const encoded = Buffer.concat(chunks);
+				let decoded: Buffer = encoded;
+				let decodeError: string | null = null;
+				try {
+					decoded = decodeBody(encoded, contentEncoding);
+				} catch (error) {
+					decodeError = error instanceof Error ? error.message : String(error);
+				}
+				finish({
+					status,
+					ttfbMs: Math.max(0, (headersAt ?? endedAt) - startedAt),
+					bodyDownloadMs: Math.max(0, endedAt - (headersAt ?? endedAt)),
+					durationMs: Math.max(0, endedAt - startedAt),
+					encoded,
+					decoded,
+					decodeError,
+					globalRateLimit: status === 429 && rateLimitScope === "global",
+					rateLimitScope,
+				});
+			});
+			stream.once("error", fail);
+			stream.once("close", () => {
+				if (!settled) fail(new Error("http2 stream closed before response body completed"));
+			});
+			timeout = setTimeout(() => {
+				stream.close(http2Constants.NGHTTP2_CANCEL);
+				fail(new Error("request timeout"));
+			}, timeoutMs);
+			try {
+				stream.end(requestBody);
+			} catch (error) {
+				fail(error);
+			}
+		};
+		void getHttp2Session().then(assignStream).catch(fail);
 	});
 }
 
@@ -764,12 +793,12 @@ async function runWorker(stage: number, deadline: number): Promise<void> {
 	}
 }
 
-function metricValue(text: string, metric: string, requiredLabel: string): number | null {
+function metricValue(text: string, metric: string, requiredLabel?: string): number | null {
 	for (const line of text.split("\n")) {
 		const match = line.match(/^([A-Za-z_:][A-Za-z0-9_:]*)(\{([^}]*)\})?\s+([-+0-9.eE]+)$/);
 		if (!match || match[1] !== metric) continue;
 		const labels = match[3] ?? "";
-		if (!labels.includes(requiredLabel)) continue;
+		if (requiredLabel !== undefined && !labels.includes(requiredLabel)) continue;
 		const value = Number(match[4]);
 		if (Number.isFinite(value)) return value;
 	}
@@ -879,6 +908,7 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 		observation = {
 			at: new Date().toISOString(),
 			poolWaiting: metricValue(text, "postgres_pool_clients", 'state="waiting"'),
+			poolWaitEvents: metricValue(text, "postgres_pool_wait_events_total"),
 			// The capacity gate covers enforced and shadow global denials. A
 			// shadow would_deny is still evidence that the selected profile would
 			// throttle this traffic, so it cannot disappear from this gate.
@@ -889,6 +919,7 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 		observation = {
 			at: new Date().toISOString(),
 			poolWaiting: null,
+			poolWaitEvents: null,
 			globalDenied: null,
 		};
 	}
@@ -901,6 +932,7 @@ if (!(await verifyAllDeploymentIdentities("before-run"))) {
 }
 const initialMetrics = await collectMetrics();
 const globalDeniedBaseline = initialMetrics?.globalDenied ?? null;
+const poolWaitEventsBaseline = initialMetrics?.poolWaitEvents ?? null;
 let monitoring = true;
 const monitor = (async () => {
 	while (monitoring) {
@@ -956,6 +988,10 @@ const globalDeniedObservationsComplete =
 	globalDeniedBaseline !== null &&
 	metricObservations.length > 0 &&
 	metricObservations.every((observation) => observation.globalDenied !== null);
+const poolWaitEventObservationsComplete =
+	poolWaitEventsBaseline !== null &&
+	metricObservations.length > 0 &&
+	metricObservations.every((observation) => observation.poolWaitEvents !== null);
 let globalDeniedCounterResetDetected: boolean | null = null;
 let globalDeniedDelta: number | null = null;
 if (globalDeniedObservationsComplete) {
@@ -972,6 +1008,23 @@ if (globalDeniedObservationsComplete) {
 		previous = current;
 	}
 	if (!globalDeniedCounterResetDetected) globalDeniedDelta = positiveDelta;
+}
+let poolWaitEventCounterResetDetected: boolean | null = null;
+let poolWaitEventsDelta: number | null = null;
+if (poolWaitEventObservationsComplete) {
+	let previous = poolWaitEventsBaseline!;
+	let positiveDelta = 0;
+	poolWaitEventCounterResetDetected = false;
+	for (const observation of metricObservations) {
+		const current = observation.poolWaitEvents!;
+		if (current < previous) {
+			poolWaitEventCounterResetDetected = true;
+			break;
+		}
+		positiveDelta = Math.max(positiveDelta, current - previous);
+		previous = current;
+	}
+	if (!poolWaitEventCounterResetDetected) poolWaitEventsDelta = positiveDelta;
 }
 const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
@@ -993,6 +1046,10 @@ const capacityGate = {
 		globalDeniedObservationsComplete && globalDeniedCounterResetDetected === false,
 	globalDeniedDeltaIsZero: globalDeniedObservationsComplete && globalDeniedDelta === 0,
 	globalDeniedIncludesShadow: true,
+	poolWaitEventsBaseline,
+	poolWaitEventsDelta,
+	poolWaitEventObservationsComplete,
+	poolWaitEventCounterResetDetected,
 	deploymentIdentityPinned:
 		deploymentIdentityFailure === null &&
 		["graphql", ...(metricsEndpoint === null ? [] : ["metrics"])].every((source) => {
@@ -1003,6 +1060,10 @@ const capacityGate = {
 	readyValidationRequired: requireReady,
 	dbPoolWaitingIsZero:
 		metricObservations.length > 0 && metricObservations.every((sample) => sample.poolWaiting === 0),
+	dbPoolWaitEventsZero:
+		poolWaitEventObservationsComplete &&
+		poolWaitEventCounterResetDetected === false &&
+		poolWaitEventsDelta === 0,
 	metricsObserved: metricObservations.length > 0,
 	headroomEvidence:
 		"requires the versioned rate-limit capacity profile; this harness does not invent headroom",
@@ -1023,6 +1084,7 @@ const capacityGatePassed = [
 	capacityGate.deploymentIdentityPinned,
 	capacityGate.readyValidationRequired,
 	capacityGate.dbPoolWaitingIsZero,
+	capacityGate.dbPoolWaitEventsZero,
 	capacityGate.metricsObserved,
 ].every(Boolean);
 
@@ -1064,6 +1126,7 @@ const report = {
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",
 		"Every capacity stage is bounded by /health/deploy identity checks for LIVE_MATCH_LOAD_DEPLOY_SHA; a mismatch aborts the run and fails the gate.",
 		"When metrics are configured, the metrics origin is independently pinned to the same deploy SHA before and around every required stage.",
+		"Pool waiting is gated by both the sampled waiting gauge and the monotonic postgres_pool_wait_events_total counter; transient queue waits cannot disappear between scrapes.",
 		"Any semantic, non-429, or client/workload 429 failure in a required stage fails the stepped capacity gate even if a later stage recovers.",
 		"Quantiles use a bounded uniform reservoir; request counters, status counts, semantic failures, and maxima remain exact.",
 	],

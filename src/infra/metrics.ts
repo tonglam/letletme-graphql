@@ -201,6 +201,11 @@ const postgresPoolClients = new Gauge({
 	},
 });
 
+export const postgresPoolWaitEvents = new Counter({
+	name: "postgres_pool_wait_events_total",
+	help: "PostgreSQL pool checkout requests that entered the pending queue",
+});
+
 registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
@@ -227,6 +232,7 @@ registry.registerMetric(liveMatchFallbackTotal);
 registry.registerMetric(liveMatchDeliveryTotal);
 registry.registerMetric(rateLimitTelemetryOverflows);
 registry.registerMetric(postgresPoolClients);
+registry.registerMetric(postgresPoolWaitEvents);
 
 export const registerDatabasePoolMetrics = (provider: () => DatabasePoolMetrics): void => {
 	readDatabasePoolMetrics = provider;
@@ -261,6 +267,7 @@ export const metrics = {
 	liveMatchDeliveryTotal,
 	rateLimitTelemetryOverflows,
 	postgresPoolClients,
+	postgresPoolWaitEvents,
 };
 
 export const metricsResponse = async (): Promise<Response> => {
