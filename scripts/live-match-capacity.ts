@@ -139,6 +139,11 @@ if (requestedRunId && !/^[A-Za-z0-9._-]{1,48}$/.test(requestedRunId)) {
 const runId = requestedRunId || `match-${Date.now().toString(36)}`;
 const outputPath = option("--output") ?? process.env.LIVE_MATCH_LOAD_OUTPUT;
 const requireReady = process.env.LIVE_MATCH_LOAD_REQUIRE_READY !== "false";
+const expectedDeploySha = required("LIVE_MATCH_LOAD_DEPLOY_SHA").toLowerCase();
+if (!/^[0-9a-f]{40}$/.test(expectedDeploySha)) {
+	throw new Error("LIVE_MATCH_LOAD_DEPLOY_SHA must be the exact 40-character lowercase Git SHA");
+}
+const deployHealthEndpoint = new URL("/health/deploy", endpoint.origin);
 
 const query =
 	mode === "HEAD"
@@ -545,17 +550,17 @@ function semanticError(body: unknown): string | null {
 	if (!root) return "missing_live_matchday";
 	if (root.availability !== "READY") return requireReady ? "availability_not_ready" : null;
 	const delivery = isRecord(root.delivery) ? root.delivery : null;
+	const deliveryState = delivery?.state;
+	if (deliveryState !== "FRESH" && deliveryState !== "FINAL") return "unhealthy_delivery";
 	if (delivery?.servedFrom !== "REDIS_CURRENT") return "fallback_delivery";
-	if (mode === "FULL") {
-		const detailDelivery = isRecord(root.snapshot)
-			? isRecord(root.snapshot.detailDelivery)
-				? root.snapshot.detailDelivery
-				: null
-			: null;
-		if (detailDelivery?.servedFrom !== "REDIS_CURRENT") return "fallback_detail_delivery";
-	}
 	const snapshot = isRecord(root.snapshot) ? root.snapshot : null;
 	if (!snapshot) return "ready_without_snapshot";
+	if (mode === "FULL") {
+		const detailDelivery = isRecord(snapshot.detailDelivery) ? snapshot.detailDelivery : null;
+		const detailState = detailDelivery?.state;
+		if (detailState !== "FRESH" && detailState !== "FINAL") return "unhealthy_detail_delivery";
+		if (detailDelivery?.servedFrom !== "REDIS_CURRENT") return "fallback_detail_delivery";
+	}
 	if (eventId !== undefined && snapshot.eventId !== eventId) return "event_mismatch";
 	if (mode === "HEAD") {
 		return Object.prototype.hasOwnProperty.call(snapshot, "matches")
@@ -579,6 +584,8 @@ function semanticError(body: unknown): string | null {
 		fixtureIds.add(fixtureId);
 	}
 	if (mode === "DESK") return null;
+	let startedFixtureCount = 0;
+	let playerRowCount = 0;
 	for (const fixtureValue of matches) {
 		if (!isRecord(fixtureValue)) return "invalid_fixture";
 		const players = Array.isArray(fixtureValue.players) ? fixtureValue.players : null;
@@ -588,6 +595,7 @@ function semanticError(body: unknown): string | null {
 			fixtureValue.finished === true ||
 			fixtureValue.finishedProvisional === true ||
 			(typeof fixtureValue.minutes === "number" && fixtureValue.minutes > 0);
+		if (detailRequired) startedFixtureCount += 1;
 		if (detailRequired && players.length === 0) return "started_fixture_without_players";
 		const playerIds = new Set<number>();
 		for (const playerValue of players) {
@@ -632,8 +640,11 @@ function semanticError(body: unknown): string | null {
 				Math.abs(awardedTotal - playerValue.totalPoints) > 1e-9
 			)
 				return "player_total_mismatch";
+			playerRowCount += 1;
 		}
 	}
+	if (startedFixtureCount === 0) return "full_requires_started_fixture";
+	if (playerRowCount === 0) return "full_without_players";
 	return null;
 }
 
@@ -789,6 +800,41 @@ function metricSum(text: string, metric: string, requiredLabel: string): number 
 	return metricFamilyPresent(text, metric) ? 0 : null;
 }
 
+type DeploymentIdentitySample = {
+	phase: string;
+	observedSha: string | null;
+	ok: boolean;
+};
+
+const deploymentIdentitySamples: DeploymentIdentitySample[] = [];
+let deploymentIdentityFailure: string | null = null;
+
+const verifyDeploymentIdentity = async (phase: string): Promise<boolean> => {
+	if (deploymentIdentityFailure !== null) return false;
+	try {
+		const response = await fetch(deployHealthEndpoint, {
+			headers: { accept: "application/json" },
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		const payload = (await response.json()) as unknown;
+		const observedSha =
+			isRecord(payload) && typeof payload.deploySha === "string"
+				? payload.deploySha.toLowerCase()
+				: null;
+		const ok = response.ok && observedSha === expectedDeploySha;
+		deploymentIdentitySamples.push({ phase, observedSha, ok });
+		if (!ok) {
+			deploymentIdentityFailure = `${phase}: /health/deploy did not report expected deploy SHA`;
+			return false;
+		}
+		return true;
+	} catch (error) {
+		deploymentIdentitySamples.push({ phase, observedSha: null, ok: false });
+		deploymentIdentityFailure = `${phase}: /health/deploy identity check failed (${error instanceof Error ? error.message : String(error)})`;
+		return false;
+	}
+};
+
 async function collectMetrics(): Promise<MetricObservation | null> {
 	if (metricsEndpoint === null) return null;
 	let observation: MetricObservation;
@@ -802,14 +848,24 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 		const text = await response.text();
+		const denied = metricSum(
+			text,
+			"graphql_rate_limit_v3_decisions_total",
+			'scope="global",outcome="denied"'
+		);
+		const wouldDenied = metricSum(
+			text,
+			"graphql_rate_limit_v3_decisions_total",
+			'scope="global",outcome="would_deny"'
+		);
 		observation = {
 			at: new Date().toISOString(),
 			poolWaiting: metricValue(text, "postgres_pool_clients", 'state="waiting"'),
-			globalDenied: metricSum(
-				text,
-				"graphql_rate_limit_v3_decisions_total",
-				'scope="global",outcome="denied"'
-			),
+			// The capacity gate covers enforced and shadow global denials. A
+			// shadow would_deny is still evidence that the selected profile would
+			// throttle this traffic, so it cannot disappear from this gate.
+			globalDenied:
+				denied === null && wouldDenied === null ? null : (denied ?? 0) + (wouldDenied ?? 0),
 		};
 	} catch {
 		observation = {
@@ -822,6 +878,9 @@ async function collectMetrics(): Promise<MetricObservation | null> {
 	return observation;
 }
 
+if (!(await verifyDeploymentIdentity("before-run"))) {
+	throw new Error(deploymentIdentityFailure ?? "deployment identity check failed");
+}
 const initialMetrics = await collectMetrics();
 const globalDeniedBaseline = initialMetrics?.globalDenied ?? null;
 let monitoring = true;
@@ -834,14 +893,26 @@ const monitor = (async () => {
 
 if (transport === "warm") await getHttp2Session();
 const startedAt = new Date().toISOString();
+let stageExecutionAborted = false;
 for (const stage of stages) {
+	if (!(await verifyDeploymentIdentity(`before-stage-${stage}`))) {
+		stageExecutionAborted = true;
+		break;
+	}
 	const deadline = Date.now() + stageSeconds * 1000;
 	await Promise.all(Array.from({ length: stage }, () => runWorker(stage, deadline)));
+	if (!(await verifyDeploymentIdentity(`after-stage-${stage}`))) {
+		stageExecutionAborted = true;
+		break;
+	}
 }
 monitoring = false;
 await monitor;
 await collectMetrics();
 closeHttp2Session();
+if (!stageExecutionAborted && deploymentIdentityFailure === null) {
+	await verifyDeploymentIdentity("after-run");
+}
 
 const stageReports = stages.map((stage) => ({
 	concurrency: stage,
@@ -889,6 +960,12 @@ const capacityGate = {
 	globalDeniedCounterResetFree:
 		globalDeniedObservationsComplete && globalDeniedCounterResetDetected === false,
 	globalDeniedDeltaIsZero: globalDeniedObservationsComplete && globalDeniedDelta === 0,
+	globalDeniedIncludesShadow: true,
+	deploymentIdentityPinned:
+		deploymentIdentityFailure === null &&
+		deploymentIdentitySamples.length >= 2 &&
+		deploymentIdentitySamples.every((sample) => sample.ok),
+	stageExecutionAborted: stageExecutionAborted,
 	readyValidationRequired: requireReady,
 	dbPoolWaitingIsZero:
 		metricObservations.length > 0 && metricObservations.every((sample) => sample.poolWaiting === 0),
@@ -908,6 +985,7 @@ const capacityGatePassed = [
 	capacityGate.unknown429IsZero,
 	capacityGate.globalDeniedCounterResetFree,
 	capacityGate.globalDeniedDeltaIsZero,
+	capacityGate.deploymentIdentityPinned,
 	capacityGate.readyValidationRequired,
 	capacityGate.dbPoolWaitingIsZero,
 	capacityGate.metricsObserved,
@@ -923,6 +1001,12 @@ const report = {
 	eventId: eventId ?? null,
 	startedAt,
 	finishedAt: new Date().toISOString(),
+	deploymentIdentity: {
+		expectedSha: expectedDeploySha,
+		healthEndpoint: `${deployHealthEndpoint.origin}${deployHealthEndpoint.pathname}`,
+		samples: deploymentIdentitySamples,
+		failure: deploymentIdentityFailure,
+	},
 	requestCount,
 	oneRequestPerSample: true,
 	request: {
@@ -939,6 +1023,8 @@ const report = {
 		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses one HTTPS HTTP/2 session with multiplexed keep-alive streams.",
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
+		"Global denial evidence includes enforced denied and shadow would_deny counters.",
+		"Every capacity stage is bounded by /health/deploy identity checks for LIVE_MATCH_LOAD_DEPLOY_SHA; a mismatch aborts the run and fails the gate.",
 		"Quantiles use a bounded uniform reservoir; request counters, status counts, semantic failures, and maxima remain exact.",
 	],
 };

@@ -129,6 +129,12 @@ anonymous/session mix required by v4 observation.
 bun run rate-limit:load --output load-test/run-123.json
 ```
 
+For Live Matches V3, run `bun run live-match:capacity` separately for each
+`HEAD` and `FULL` mode. The harness requires `LIVE_MATCH_LOAD_DEPLOY_SHA` to
+be the exact deployed Git SHA and verifies `/health/deploy` before and after
+every stage; a missing or changing identity fails the run. Short stage
+overrides remain smoke diagnostics and are not capacity evidence.
+
 Required environment names are `LOAD_WEB_ORIGIN`, `LOAD_GRAPHQL_ORIGIN`,
 `BACKEND_PROXY_SECRET`, `GRAPHQL_SERVICE_TOKEN`, `LOAD_METRICS_TOKEN`,
 `LOAD_MEMORY_LIMIT_BYTES`, `LOAD_CPU_CORES`, and

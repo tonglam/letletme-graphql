@@ -464,12 +464,21 @@ export const enqueueRateLimitAggregate = (input: {
 export const flushRateLimitAggregateTelemetry = async (
 	timeoutMs = RATE_LIMIT_TELEMETRY_SHUTDOWN_TIMEOUT_MS
 ): Promise<void> => {
-	const running = startTelemetryFlush();
 	if (timeoutMs <= 0) throw new Error("rate-limit telemetry flush timed out");
+	const drain = async (): Promise<void> => {
+		await startTelemetryFlush();
+		// Overflow markers are deliberately fire-and-forget on the request path,
+		// but shutdown must settle them before closing the rate-limit Redis. Take
+		// repeated snapshots so a marker created while the aggregate batch is
+		// draining is not silently lost.
+		while (overflowMarkerFlights.size > 0) {
+			await Promise.allSettled([...overflowMarkerFlights.values()]);
+		}
+	};
 	let timeout: ReturnType<typeof setTimeout> | undefined;
 	try {
 		await Promise.race([
-			running,
+			drain(),
 			new Promise<never>((_, reject) => {
 				timeout = setTimeout(
 					() => reject(new Error("rate-limit telemetry flush timed out")),

@@ -1309,6 +1309,41 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(1);
 	});
 
+	it("reuses a failed PostgreSQL checkpoint check after an eventless Redis pointer disappears", async () => {
+		const redis = new TestRedis();
+		const control = attachBundle(redis, buildBundle().bundle);
+		const warmContext = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				throw new Error("the warm metadata read must not touch PostgreSQL");
+			},
+		});
+
+		await readLiveMatchday(warmContext, 1, "HEAD");
+		const missingPointer = structuredClone(buildBundle().bundle);
+		missingPointer.eventId = null;
+		missingPointer.desk.active = emptyDesk;
+		missingPointer.desk.previous = emptyDesk;
+		missingPointer.detail.active = emptyDetail;
+		missingPointer.detail.previous = emptyDetail;
+		control.set(missingPointer);
+
+		let databaseReads = 0;
+		const failedContext = buildSnapshotContext(redis, {
+			databaseQuery: async () => {
+				databaseReads += 1;
+				throw new Error("checkpoint unavailable");
+			},
+		});
+		const first = await readLiveMatchday(failedContext);
+		const second = await readLiveMatchday(failedContext);
+
+		expect(first.desk).toBeNull();
+		expect(second.desk).toBeNull();
+		expect(first.postgresReadFailed).toBe(true);
+		expect(second.postgresReadFailed).toBe(true);
+		expect(databaseReads).toBe(1);
+	});
+
 	it("retains PostgreSQL metadata in a separate process LKG for HEAD reads", async () => {
 		const redis = new TestRedis();
 		(redis as unknown as { eval: () => Promise<string> }).eval = async () => {

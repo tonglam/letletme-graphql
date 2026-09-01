@@ -10,6 +10,7 @@ import {
 	enqueueRateLimitAggregate,
 	flushRateLimitAggregateTelemetry,
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
+	RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE,
 	recordRateLimitAggregate,
 	summarizeRateLimitTotals,
 } from "../../src/infra/rate-limit-observability";
@@ -152,6 +153,45 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 
 	it("exports GraphQL outcomes with only one controlled result dimension", () => {
 		expect(GRAPHQL_REQUEST_OUTCOME_LABELS).toEqual(["result"]);
+	});
+
+	it("waits for an overflow marker during bounded shutdown flush", async () => {
+		let releasePipeline!: () => void;
+		let releaseMarker!: () => void;
+		const pipelineBlocked = new Promise<void>((resolve) => {
+			releasePipeline = resolve;
+		});
+		const markerBlocked = new Promise<"OK">((resolve) => {
+			releaseMarker = () => resolve("OK");
+		});
+		const pipeline = {
+			hincrby: () => pipeline,
+			expire: () => pipeline,
+			zincrby: () => pipeline,
+			exec: () => pipelineBlocked,
+		};
+		const redis = {
+			pipeline: () => pipeline,
+			set: () => markerBlocked,
+		} as unknown as Redis;
+		for (let index = 0; index <= RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE; index += 1) {
+			enqueueRateLimitAggregate({
+				redis,
+				trafficClass: "web_rsc",
+				workload: "fixtures",
+				scope: "workload",
+				outcome: "allowed",
+				fingerprint: "abc123abc123",
+				logger: { warn: () => undefined } as never,
+			});
+		}
+
+		await expect(flushRateLimitAggregateTelemetry(10)).rejects.toThrow(
+			"rate-limit telemetry flush timed out"
+		);
+		releaseMarker();
+		releasePipeline();
+		await flushRateLimitAggregateTelemetry(100);
 	});
 
 	it("reports enforced and shadow rollout alarms independently", () => {

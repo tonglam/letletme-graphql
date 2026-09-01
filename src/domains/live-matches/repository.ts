@@ -1895,10 +1895,13 @@ export const readLiveMatchday = async (
 		effectiveDesk === null ||
 		(detailNeedsPostgres && detailCheckpointMayBeRetried(season, selectedEventId, effectiveDesk));
 	let scopedPostgresAttempted = unscopedPostgres !== undefined;
-	const recentScopedCheck =
-		requested !== undefined && !redisDeskAvailable
+	const recentScopedCheck = !redisDeskAvailable
+		? requested !== undefined
 			? recentScopedEventCheckpointCheck(scopedCheckpointCheckKey)
-			: null;
+			: selectedEventId === cachedActiveEvent && recentActiveEventCheck !== null
+				? recentActiveEventCheck
+				: null
+		: null;
 	if (recentScopedCheck !== null) {
 		scopedPostgresAttempted = true;
 		postgresReadFailed = recentScopedCheck.failed;
