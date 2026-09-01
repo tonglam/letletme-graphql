@@ -515,8 +515,7 @@ function semanticError(body: unknown): string | null {
 			fixtureValue.finished === true ||
 			fixtureValue.finishedProvisional === true ||
 			(typeof fixtureValue.minutes === "number" && fixtureValue.minutes > 0);
-		if (detailRequired && players.length === 0)
-			return "started_fixture_without_players";
+		if (detailRequired && players.length === 0) return "started_fixture_without_players";
 		const playerIds = new Set<number>();
 		for (const playerValue of players) {
 			if (!isRecord(playerValue)) return "invalid_player";
