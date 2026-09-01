@@ -553,6 +553,54 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("rejects an invalid detail player before accepting HEAD metadata", async () => {
+		const redis = new TestRedis();
+		const bundle = structuredClone(buildBundle().bundle);
+		const active = bundle.detail.active;
+		if (active.publication === null || active.items[0] === undefined)
+			throw new Error("missing active detail");
+		const publication = JSON.parse(active.publication) as {
+			fixtures: Array<{
+				fixtureId: number;
+				key: string;
+				count: number;
+				bytes: number;
+				sha256: string;
+			}>;
+			detail: { revision: string };
+		};
+		const invalidPlayers = [{ ...player(3), retiredField: true }];
+		const payload = encode(invalidPlayers);
+		const checksum = digest(invalidPlayers);
+		const item = publication.fixtures[0];
+		if (!item) throw new Error("missing first detail descriptor");
+		const nextKey = item.key.replace(/:[0-9a-f]{64}$/, `:${checksum}`);
+		publication.fixtures[0] = {
+			...item,
+			key: nextKey,
+			bytes: Buffer.byteLength(payload, "utf8"),
+			sha256: checksum,
+		};
+		active.items[0] = {
+			...active.items[0],
+			key: nextKey,
+			payload,
+			metadata: itemMeta(invalidPlayers),
+		};
+		publication.detail.revision = digest([
+			{ fixtureId: 101, players: invalidPlayers },
+			{ fixtureId: 102, players: [player(8)] },
+		]);
+		active.publication = JSON.stringify(publication);
+		active.manifest = active.publication;
+		attachBundle(redis, bundle);
+
+		const result = await readLiveMatchday(buildSnapshotContext(redis), 1, "HEAD");
+
+		expect(result.desk).not.toBeNull();
+		expect(result.detail).toBeNull();
+	});
+
 	it("rejects a detail metadata candidate with a mismatched aggregate revision", async () => {
 		const redis = new TestRedis();
 		const bundle = structuredClone(buildBundle().bundle);

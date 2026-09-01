@@ -201,6 +201,7 @@ candidate_env_next=""
 
 compose() {
   APP_ENV_FILE="$candidate_env" APP_IMAGE="$IMAGE_REF" GRAPHQL_PORT="$candidate_port" \
+    RATE_LIMIT_TELEMETRY_SLOT="$inactive_slot" \
     docker compose -p "$candidate_project" "$@"
 }
 

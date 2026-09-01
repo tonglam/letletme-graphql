@@ -324,6 +324,11 @@ describe("production deployment workflow", () => {
 		expect(monitorWorkflow).toContain("project=letletme_graphql_green");
 	});
 
+	test("gives each blue/green slot its own telemetry identity", () => {
+		expect(compose).toContain("RATE_LIMIT_TELEMETRY_SLOT: ${RATE_LIMIT_TELEMETRY_SLOT:-default}");
+		expect(deployScript).toContain('RATE_LIMIT_TELEMETRY_SLOT="$inactive_slot"');
+	});
+
 	test("attaches both slots to the shared primary Redis network", () => {
 		expect(compose).toContain("- graphql_shared");
 		// The shared network is also the primary Redis egress path. An implicit

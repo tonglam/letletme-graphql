@@ -369,6 +369,51 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		}
 	});
 
+	it("keeps dirty markers owned by either blue/green serving process", async () => {
+		const spoolDirectory =
+			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??
+			join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`);
+		const blueGeneration = "blue-serving-generation";
+		const greenGeneration = "green-serving-generation";
+		const blueIdentityPath = join(spoolDirectory, "serving-process.blue.json");
+		const greenIdentityPath = join(spoolDirectory, "serving-process.green.json");
+		const blueDate = "2099-02-01";
+		const greenDate = "2099-02-02";
+		const orphanDate = "2099-02-03";
+		const markerPath = (date: string, generation: string) =>
+			join(spoolDirectory, `dirty.v3.${date}.${process.pid}.${generation}`);
+		await mkdir(spoolDirectory, { recursive: true });
+		await writeFile(
+			blueIdentityPath,
+			JSON.stringify({ pid: process.pid, generation: blueGeneration }) + "\n",
+			{ encoding: "utf8" }
+		);
+		await writeFile(
+			greenIdentityPath,
+			JSON.stringify({ pid: process.pid, generation: greenGeneration }) + "\n",
+			{ encoding: "utf8" }
+		);
+		const markerPaths = [
+			markerPath(blueDate, blueGeneration),
+			markerPath(greenDate, greenGeneration),
+			markerPath(orphanDate, "old-serving-generation"),
+		];
+		await Promise.all(markerPaths.map((path) => writeFile(path, "marker\n", { encoding: "utf8" })));
+		try {
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [blueDate])).toEqual([]);
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [greenDate])).toEqual([]);
+			expect(await readRateLimitTelemetryDirtyWindowSpool("graphql-v3", [orphanDate])).toEqual([
+				orphanDate,
+			]);
+		} finally {
+			await Promise.all([
+				unlink(blueIdentityPath).catch(() => undefined),
+				unlink(greenIdentityPath).catch(() => undefined),
+				...markerPaths.map((path) => unlink(path).catch(() => undefined)),
+			]);
+		}
+	});
+
 	it("retries a dirty-window marker after a transient spool write failure", async () => {
 		const spoolDirectory =
 			process.env.RATE_LIMIT_TELEMETRY_SPOOL_DIR ??

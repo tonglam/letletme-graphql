@@ -16,6 +16,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       TZ: Asia/Shanghai
+      RATE_LIMIT_TELEMETRY_SLOT: ${RATE_LIMIT_TELEMETRY_SLOT:-default}
     networks:
       - graphql_shared
     volumes:

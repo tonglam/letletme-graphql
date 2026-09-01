@@ -101,8 +101,12 @@ const rateLimitTelemetrySpoolDirectory =
 		: join(tmpdir(), `letletme-graphql-rate-limit-${process.pid}`));
 export const rateLimitTelemetryServingProcessIdentityFile = join(
 	rateLimitTelemetrySpoolDirectory,
-	"serving-process.json"
+	`serving-process.${env.RATE_LIMIT_TELEMETRY_SLOT}.json`
 );
+
+const servingProcessIdentitySlots = env.isProduction
+	? ["blue", "green"]
+	: [...new Set(["default", "blue", "green", env.RATE_LIMIT_TELEMETRY_SLOT])];
 
 type TelemetryMarkerKind = "overflow" | "persistence-failure" | "dirty-window";
 
@@ -227,32 +231,46 @@ const isProcessAlive = (pid: number | null): boolean => {
 	}
 };
 
-const readServingProcessIdentity =
-	async (): Promise<RateLimitTelemetryServingProcessIdentity | null> => {
-		try {
-			const raw = await readFile(rateLimitTelemetryServingProcessIdentityFile, {
-				encoding: "utf8",
-			});
-			const value: unknown = JSON.parse(raw);
-			if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-			const record = value as Record<string, unknown>;
-			const pid = record.pid;
-			const generation = record.generation;
-			if (
-				Object.keys(record).length !== 2 ||
-				typeof pid !== "number" ||
-				!Number.isSafeInteger(pid) ||
-				pid <= 0 ||
-				typeof generation !== "string" ||
-				!/^[A-Za-z0-9-]+$/.test(generation)
-			)
-				return null;
-			return { pid, generation };
-		} catch (error: unknown) {
-			if (isNodeErrorWithCode(error, "ENOENT")) return null;
+const readServingProcessIdentity = async (
+	identityFile: string
+): Promise<RateLimitTelemetryServingProcessIdentity | null> => {
+	try {
+		const raw = await readFile(identityFile, { encoding: "utf8" });
+		const value: unknown = JSON.parse(raw);
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+		const record = value as Record<string, unknown>;
+		const pid = record.pid;
+		const generation = record.generation;
+		if (
+			Object.keys(record).length !== 2 ||
+			typeof pid !== "number" ||
+			!Number.isSafeInteger(pid) ||
+			pid <= 0 ||
+			typeof generation !== "string" ||
+			!/^[A-Za-z0-9-]+$/.test(generation)
+		)
 			return null;
-		}
-	};
+		return { pid, generation };
+	} catch (error: unknown) {
+		if (isNodeErrorWithCode(error, "ENOENT")) return null;
+		return null;
+	}
+};
+
+const readServingProcessIdentities = async (): Promise<
+	readonly RateLimitTelemetryServingProcessIdentity[]
+> => {
+	const identities = await Promise.all(
+		servingProcessIdentitySlots.map((slot) =>
+			readServingProcessIdentity(
+				join(rateLimitTelemetrySpoolDirectory, `serving-process.${slot}.json`)
+			)
+		)
+	);
+	return identities.filter(
+		(identity): identity is RateLimitTelemetryServingProcessIdentity => identity !== null
+	);
+};
 
 const readTelemetryMarkerEntries = async (): Promise<readonly TelemetryMarkerEntry[]> => {
 	let names: string[];
@@ -299,18 +317,21 @@ const readOrphanedDirtyWindowDates = async (
 			entry.policyVersion === policyVersion &&
 			(allowedDates === null || allowedDates.has(entry.date))
 	);
-	const servingIdentity = await readServingProcessIdentity();
+	const servingIdentities = await readServingProcessIdentities();
+	const liveServingIdentities = servingIdentities.filter((identity) =>
+		isProcessAlive(identity.pid)
+	);
 	return [
 		...new Set(
 			entries
 				.filter((entry) => {
-					// The serving process identity is persisted by the long-lived
-					// server. The report command is a separate Bun process and its
-					// PID/module generation must never be used as the owner identity.
-					if (servingIdentity && isProcessAlive(servingIdentity.pid))
-						return (
-							entry.ownerPid !== servingIdentity.pid ||
-							entry.ownerGeneration !== servingIdentity.generation
+					// Each blue/green slot owns a distinct identity file. The report
+					// command is a separate Bun process and must compare markers with
+					// every live serving owner, not one last writer in the shared volume.
+					if (liveServingIdentities.length > 0)
+						return !liveServingIdentities.some(
+							(identity) =>
+								entry.ownerPid === identity.pid && entry.ownerGeneration === identity.generation
 						);
 					// Keep the local/test fallback when no serving identity has been
 					// registered yet; production startup registers it before serving.

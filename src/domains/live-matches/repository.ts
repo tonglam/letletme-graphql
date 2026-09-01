@@ -957,7 +957,11 @@ const validDetailMetadataPayload = (
 	)
 		return null;
 	const value = parsedJson(raw);
-	return Array.isArray(value) && value.length === item.count && canonicalBytes(value) === item.bytes
+	return Array.isArray(value) &&
+		value.length === item.count &&
+		canonicalBytes(value) === item.bytes &&
+		new Set(value.map((player) => (isRecord(player) ? player.id : null))).size === value.length &&
+		value.every(validDetailPlayer)
 		? value
 		: null;
 };

@@ -21,7 +21,8 @@ type EnvKey =
 	| "METRICS_TOKEN"
 	| "CORS_ORIGIN"
 	| "GRAPHQL_RATE_LIMIT_MODE"
-	| "RATE_LIMIT_TELEMETRY_SPOOL_DIR";
+	| "RATE_LIMIT_TELEMETRY_SPOOL_DIR"
+	| "RATE_LIMIT_TELEMETRY_SLOT";
 
 const readEnv = (key: EnvKey): string | undefined => readRuntimeEnv(key);
 
@@ -82,6 +83,12 @@ const isProduction = NODE_ENV === "production";
 const DEPLOY_SHA = readEnv("DEPLOY_SHA")?.trim() || "unknown";
 if (isProduction && !/^[0-9a-f]{40}$/.test(DEPLOY_SHA)) {
 	throw new Error("DEPLOY_SHA must be the exact 40-character lowercase Git SHA in production");
+}
+
+const RATE_LIMIT_TELEMETRY_SLOT =
+	readEnv("RATE_LIMIT_TELEMETRY_SLOT")?.trim() ?? (isProduction ? "" : "default");
+if (isProduction && !/^(blue|green)$/.test(RATE_LIMIT_TELEMETRY_SLOT)) {
+	throw new Error("RATE_LIMIT_TELEMETRY_SLOT must be blue or green in production");
 }
 
 // These names were accepted by the pre-hard-cut runtime. Keeping them in the
@@ -223,4 +230,5 @@ export const env = {
 	// supplies the production path; development and tests use the adapter's
 	// process-scoped default when this is empty.
 	RATE_LIMIT_TELEMETRY_SPOOL_DIR: readEnv("RATE_LIMIT_TELEMETRY_SPOOL_DIR")?.trim() ?? "",
+	RATE_LIMIT_TELEMETRY_SLOT,
 } as const;
