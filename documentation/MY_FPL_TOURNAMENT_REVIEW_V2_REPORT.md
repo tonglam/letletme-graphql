@@ -16,7 +16,7 @@
 
 本次实现按 V2 单轨硬切完成了五个运行时资产的代码改造：
 
-- Data 增加 0083 破坏性迁移、publication chunks、语义 SHA、READY 冻结、显式 correction、repair 关联和自定义赛事 targeted bootstrap。
+- Data 增加 0084 破坏性迁移（0083 已被上游 Live Matches V3 占用）、publication chunks、语义 SHA、READY 冻结、显式 correction、repair 关联和自定义赛事 targeted bootstrap。
 - GraphQL 只暴露 V2.1 roots，旧 V1 roots 从 schema 和 runtime policy 移除；V2.1 contract gate、授权、分页、chunk 完整性校验和 revision-keyed query cache 已对齐。
 - Web 以 Season 为默认视图，按 latest finalized 选择，支持显式 previous-ready 历史入口、phase timeline、Points/H2H/KO sections、Admin ALL 分页和 custom setup 状态。
 - 小程序删除旧 V1 review 分支、旧 operations 与持久化 review cache，使用同一 V2.1 字段、Gross/Cost/Net 口径、phase tabs、分页和 426 升级处理。
@@ -83,9 +83,9 @@ flowchart LR
 
 ## 4. Data 与存储实现
 
-### 4.1 0083 迁移和破坏性边界
+### 4.1 0084 迁移和破坏性边界
 
-`migrations/0083_my_tournament_review_v2_1_hard_cut.sql` 由 Data 单独执行，目标是一次性清理当前赛季旧 review 状态并建立可恢复的 V2.1 结构：
+`migrations/0084_my_tournament_review_v2_1_hard_cut.sql` 由 Data 单独执行（0083 已被上游 Live Matches V3 占用，不能复用），目标是一次性清理当前赛季旧 review 状态并建立可恢复的 V2.1 结构：
 
 1. 备份 publication、head、obligation 三张表，记录 season 行数、revision 分布、head parity、SHA 清单和恢复演练标记。
 2. 非当前赛季 `descriptive-v1` 作为只读历史证据保留；当前赛季旧 publication/head/obligation 删除，revision 从 1 重新开始。
@@ -275,7 +275,7 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 | chunks/publication/head 任意点崩溃不暴露 partial | 同一事务/advisory lock | crash injection |
 | 并发 publisher、lease 丢失、repair dedupe | 现有队列约束复用 | 生产结构副本并发演练 |
 | custom setup READY 立即 bootstrap，历史按 GW 升序 | targeted enqueue 已实现 | staging controlled fixture |
-| migration forward/backup restore/RLS/grant | migration 与 schema 已提交 | 执行 0083 之前必须完成 |
+| migration forward/backup restore/RLS/grant | migration 与 schema 已提交 | 执行 0084 之前必须完成 |
 
 ### 8.2 GraphQL
 
@@ -359,7 +359,7 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 2. Data、GraphQL、Web、Mini、Ops 各自完成 exact-head review、CI 和 P0–P3 finding disposition，生成统一 contract/migration/SHA matrix。
 3. 先部署 Web 最终代码并设置 `MY_TOURNAMENT_REVIEW_MAINTENANCE_MODE=true`；仅关闭 review 页面和带 review contract 的 GraphQL 请求，其他功能继续运行；旧 contract 返回 426。
 4. 暂停 `tournament-review-v2` scheduler/worker lane，等待 lease/queue quiescence；不暂停其他 Data queue。
-5. 完成备份恢复演练后执行 0083，删除当前赛季旧 review rows。
+5. 完成备份恢复演练后执行 0084，删除当前赛季旧 review rows。
 6. 部署 Data exact SHA，seed eligible obligations，运行 bounded backfill，直到 `eligible=ready` 且 incoherent=0。
 7. 部署 GraphQL inactive slot，验证 startup DB contract、新 contract、代表性查询和 Redis bypass，再切 active slot。
 8. 关闭 Web maintenance，发布已验收的小程序；立刻做现有 Chrome 登录态 6953 和 Mini 体验/线上版验收。
@@ -382,7 +382,7 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 剩余动作按优先级：
 
-1. **发布前阻断**：五个 PR exact-head review/CI；migration 0083 备份恢复演练；生产结构副本 reset/backfill；旧 V1 runtime dead code 最终清理确认。
+1. **发布前阻断**：五个 PR exact-head review/CI；migration 0084 备份恢复演练；生产结构副本 reset/backfill；旧 V1 runtime dead code 最终清理确认。
 2. **切换窗口**：maintenance、lane quiescence、Data migration/rebuild、GraphQL inactive-slot contract 验证、Web/Mini/Ops 同窗发布。
 3. **消费验收**：现有 Chrome 登录态 6953，不开新实例、不记录凭据；ACCESSIBLE/ALL、Points/H2H/KO/custom、latest finalized 状态、revision/SHA、section/chunk 对账。
 4. **运行验收**：30 分钟 2× 峰值负载、zero timeout/pool/integrity、24 小时 shadow-v4，再决定 enforce-v4。
