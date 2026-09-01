@@ -332,6 +332,38 @@ describe("Live Matches V3 read path", () => {
 		).toBeUndefined();
 	});
 
+	it("labels an empty active-event window explicitly instead of as infrastructure failure", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, {
+			eventId: null,
+			pointer: "active",
+			desk: {
+				active: { publication: null, payload: null, metadata: null },
+				previous: { publication: null, payload: null, metadata: null },
+			},
+			detail: {
+				active: { publication: null, manifest: null, items: [] },
+				previous: { publication: null, manifest: null, items: [] },
+			},
+		});
+		const result = await graphql({
+			schema,
+			contextValue: buildSnapshotContext(redis, { databaseQuery: async () => ({ rows: [] }) }),
+			source: `query { liveMatchday { availability delivery { state servedFrom reasonCodes } snapshot { eventId } } }`,
+		});
+
+		expect(result.errors).toBeUndefined();
+		expect(result.data?.liveMatchday).toEqual({
+			availability: "UNAVAILABLE",
+			delivery: {
+				state: "UNAVAILABLE",
+				servedFrom: null,
+				reasonCodes: ["NO_ACTIVE_EVENT"],
+			},
+			snapshot: null,
+		});
+	});
+
 	it("serves one root with fixture-specific DGW detail", async () => {
 		const redis = new TestRedis();
 		attachBundle(redis, buildBundle().bundle);

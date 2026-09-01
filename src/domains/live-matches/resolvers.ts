@@ -208,7 +208,10 @@ const toMatches = (
 };
 
 const toUnavailable = (read: LiveMatchdayRead) => {
-	const reasonCodes = ["DESK_UNAVAILABLE"];
+	const reasonCodes =
+		read.eventId === null && !read.redisReadFailed && !read.postgresReadFailed
+			? ["NO_ACTIVE_EVENT"]
+			: ["DESK_UNAVAILABLE"];
 	if (read.redisReadFailed) reasonCodes.push("REDIS_READ_FAILED");
 	if (read.postgresReadFailed) reasonCodes.push("POSTGRES_CHECKPOINT_UNAVAILABLE");
 	return {
