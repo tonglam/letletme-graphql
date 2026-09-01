@@ -4,6 +4,7 @@ import {
 	createMyFplRepository,
 	myFplTestables,
 	parseSnapshotEntryPayload,
+	parseSnapshotPublicationRow,
 	type MyFplRepository,
 	type MyFplRepositoryDependencies,
 	type MyFplReviewState,
@@ -516,7 +517,7 @@ const snapshotPublicationRow = {
 	score_source: "FPL_EVENT_LIVE" as const,
 	live_publication_id: "00000000-0000-4000-8000-000000000007",
 	live_revision: "8",
-	algorithm_version: "fpl-projected-autosubs-v1",
+	algorithm_version: "live-points-v2-algorithm-1",
 	source_min_checked_at: "2026-08-22T10:45:00.000Z",
 	source_max_checked_at: "2026-08-22T10:45:00.000Z",
 };
@@ -1000,6 +1001,16 @@ const makeFixture = (options: FixtureOptions = {}) => {
 };
 
 describe("My FPL review repository", () => {
+	it("pins provisional My FPL snapshots to the Live Points V2 algorithm", () => {
+		expect(parseSnapshotPublicationRow(snapshotPublicationRow)).not.toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				algorithm_version: "fpl-projected-autosubs-v1",
+			})
+		).toBeNull();
+	});
+
 	it("rejects internally contradictory v2 manager payloads", () => {
 		const wrongGameweek = snapshotPayload();
 		wrongGameweek.gameweek.result.eventId = 2;
