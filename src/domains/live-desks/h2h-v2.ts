@@ -365,6 +365,15 @@ const validSide = (
 			value.input === null
 		);
 	}
+	if (value.input === null) {
+		return (
+			value.isAverage === false &&
+			value.inputPublicationId === null &&
+			value.inputGeneration === null &&
+			value.inputRevision === null &&
+			value.inputContentUpdatedAt === null
+		);
+	}
 	return (
 		value.isAverage === false &&
 		value.inputPublicationId !== null &&
