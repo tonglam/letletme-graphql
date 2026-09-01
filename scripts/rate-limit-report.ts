@@ -6,6 +6,7 @@ import {
 	rateLimitRecentAggregateKey,
 	rateLimitTelemetryOverflowKey,
 	rateLimitTelemetryPersistenceFailureKey,
+	retryRateLimitTelemetryPersistenceFailureMarkers,
 	parseRateLimitStorageFailureTotal,
 	parseRateLimitTelemetryOverflowTotal,
 	summarizeRateLimitTotals,
@@ -99,6 +100,14 @@ const readLiveRateLimitMetrics = async (
 	persistedTelemetryPersistenceFailureDates: readonly string[];
 }> => {
 	if (!env.METRICS_TOKEN) throw new Error("METRICS_TOKEN is required for live metrics");
+	// A previous process may have persisted a marker obligation locally after
+	// Redis was unavailable. The report process is also a safe recovery worker:
+	// retry those obligations before deciding whether the window is healthy.
+	const localSpoolRemainingDates = await retryRateLimitTelemetryPersistenceFailureMarkers({
+		redis,
+		policyVersion,
+		dates,
+	});
 	const response = await fetch(`http://127.0.0.1:${env.PORT}/metrics`, {
 		headers: { "X-Metrics-Token": env.METRICS_TOKEN },
 		signal: AbortSignal.timeout(5_000),
@@ -122,6 +131,9 @@ const readLiveRateLimitMetrics = async (
 	const persistedTelemetryPersistenceFailureDates = persistedMarkers
 		.filter((marker) => marker.persistenceFailure)
 		.map((marker) => marker.date);
+	const allTelemetryPersistenceFailureDates = [
+		...new Set([...persistedTelemetryPersistenceFailureDates, ...localSpoolRemainingDates]),
+	].sort();
 	const liveTelemetryOverflows = parseRateLimitTelemetryOverflowTotal(metricsText);
 	return {
 		rateLimitStorageFailures: parseRateLimitStorageFailureTotal(metricsText),
@@ -130,8 +142,8 @@ const readLiveRateLimitMetrics = async (
 			persistedTelemetryOverflowDates.length
 		),
 		persistedTelemetryOverflowDates,
-		rateLimitTelemetryPersistenceFailures: persistedTelemetryPersistenceFailureDates.length,
-		persistedTelemetryPersistenceFailureDates,
+		rateLimitTelemetryPersistenceFailures: allTelemetryPersistenceFailureDates.length,
+		persistedTelemetryPersistenceFailureDates: allTelemetryPersistenceFailureDates,
 	};
 };
 

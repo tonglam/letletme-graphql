@@ -27,6 +27,11 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("http2CapacityTarget");
 		expect(capacitySource).toContain("ensureHttp2Capacity");
 		expect(capacitySource).toContain("remoteMaxConcurrentStreams");
+		expect(capacitySource).toContain("beginNetworkRequest");
+		expect(capacitySource).toContain("endNetworkRequest");
+		expect(capacitySource).toContain("maxNetworkInFlight");
+		expect(capacitySource).toContain("maxProcessingInFlight");
+		expect(capacitySource).not.toContain("report.maxInFlight");
 		expect(capacitySource).not.toContain("gunzipSync");
 		expect(capacitySource).not.toContain("brotliDecompressSync");
 		expect(capacitySource).not.toContain("inflateSync");

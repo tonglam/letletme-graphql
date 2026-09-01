@@ -14,6 +14,8 @@ import {
 	RATE_LIMIT_TELEMETRY_BATCH_SIZE,
 	RATE_LIMIT_TELEMETRY_MAX_QUEUE_SIZE,
 	recordRateLimitAggregate,
+	readRateLimitTelemetryPersistenceFailureSpool,
+	retryRateLimitTelemetryPersistenceFailureMarkers,
 	summarizeRateLimitTotals,
 } from "../../src/infra/rate-limit-observability";
 import { GRAPHQL_REQUEST_OUTCOME_LABELS } from "../../src/infra/metrics";
@@ -279,6 +281,57 @@ rate_limit_telemetry_overflows_total{policy="graphql-v4"} 3
 		expect(markerArguments?.[0] as string | undefined).toBe(
 			rateLimitTelemetryPersistenceFailureKey(rateLimitAggregateDate(date))
 		);
+	});
+
+	it("retains a failed marker across restart and retries it after Redis recovers", async () => {
+		const date = new Date("2026-08-21T00:00:00.000Z");
+		let markerAttempts = 0;
+		const pipeline = {
+			hincrby: () => pipeline,
+			expire: () => pipeline,
+			zincrby: () => pipeline,
+			exec: async () => {
+				throw new Error("redis unavailable");
+			},
+		};
+		const redis = {
+			pipeline: () => pipeline,
+			set: () => {
+				markerAttempts += 1;
+				return markerAttempts === 1
+					? Promise.reject(new Error("redis unavailable"))
+					: Promise.resolve("OK");
+			},
+		} as unknown as Redis;
+
+		enqueueRateLimitAggregate({
+			redis,
+			trafficClass: "web_rsc",
+			workload: "fixtures",
+			scope: "workload",
+			outcome: "allowed",
+			fingerprint: "abc123abc123",
+			date,
+			logger: { warn: () => undefined } as never,
+		});
+		await expect(flushRateLimitAggregateTelemetry(100)).rejects.toThrow(
+			"rate-limit telemetry persistence failed"
+		);
+
+		expect(
+			await readRateLimitTelemetryPersistenceFailureSpool("graphql-v3", ["2026-08-21"])
+		).toEqual(["2026-08-21"]);
+		await expect(
+			retryRateLimitTelemetryPersistenceFailureMarkers({
+				redis,
+				policyVersion: "graphql-v3",
+				dates: ["2026-08-21"],
+			})
+		).resolves.toEqual([]);
+		expect(markerAttempts).toBe(2);
+		expect(
+			await readRateLimitTelemetryPersistenceFailureSpool("graphql-v3", ["2026-08-21"])
+		).toEqual([]);
 	});
 
 	it("fails a shutdown flush when telemetry persistence exceeds its bound", async () => {

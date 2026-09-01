@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type ClientRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import {
 	connect as http2Connect,
@@ -513,13 +513,19 @@ function closeHttp2Session(): void {
 	}
 }
 
-function requestOnceHttp1(): Promise<RawResponse> {
+function requestOnceHttp1(stage: number): Promise<RawResponse> {
 	return new Promise((resolve) => {
 		const startedAt = performance.now();
 		let headersAt: number | null = null;
 		let settled = false;
 		let bodyEnded = false;
+		let networkEnded = false;
 		let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+		const completeNetworkRequest = (): void => {
+			if (networkEnded) return;
+			networkEnded = true;
+			endNetworkRequest(stage);
+		};
 		const finish = (value: RawResponse) => {
 			if (settled) return;
 			settled = true;
@@ -530,90 +536,113 @@ function requestOnceHttp1(): Promise<RawResponse> {
 			resolve(value);
 		};
 		const requester = endpoint.protocol === "https:" ? httpsRequest : httpRequest;
-		const request = requester(
-			{
-				protocol: endpoint.protocol,
-				hostname: endpoint.hostname,
-				port: endpoint.port || undefined,
-				path: `${endpoint.pathname}${endpoint.search}`,
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					accept: "application/json",
-					"accept-encoding": "gzip, br",
-					"content-length": Buffer.byteLength(requestBody),
-					"x-graphql-service-token": serviceToken,
-					"x-letletme-contract": contractHeader,
-					"x-request-id": `lm-${runId}-${randomUUID().slice(0, 8)}`.slice(0, 64),
-					"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
-					...(transport === "cold" ? { connection: "close" } : {}),
+		beginNetworkRequest(stage);
+		let request: ClientRequest;
+		try {
+			request = requester(
+				{
+					protocol: endpoint.protocol,
+					hostname: endpoint.hostname,
+					port: endpoint.port || undefined,
+					path: `${endpoint.pathname}${endpoint.search}`,
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						accept: "application/json",
+						"accept-encoding": "gzip, br",
+						"content-length": Buffer.byteLength(requestBody),
+						"x-graphql-service-token": serviceToken,
+						"x-letletme-contract": contractHeader,
+						"x-request-id": `lm-${runId}-${randomUUID().slice(0, 8)}`.slice(0, 64),
+						"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
+						...(transport === "cold" ? { connection: "close" } : {}),
+					},
+					agent,
+					...(endpoint.protocol === "https:" ? { rejectUnauthorized: true } : {}),
 				},
-				agent,
-				...(endpoint.protocol === "https:" ? { rejectUnauthorized: true } : {}),
-			},
-			(response) => {
-				headersAt = performance.now();
-				const chunks: Buffer[] = [];
-				response.on("data", (chunk: Buffer | string) => {
-					chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-				});
-				response.on("end", () => {
-					bodyEnded = true;
-					const endedAt = performance.now();
-					const encoded = Buffer.concat(chunks);
-					const status = response.statusCode ?? 0;
-					const rateLimitScope = headerValue(response.headers, "x-ratelimit-scope") ?? null;
-					const timing = {
-						ttfbMs: Math.max(0, (headersAt ?? endedAt) - startedAt),
-						bodyDownloadMs: Math.max(0, endedAt - (headersAt ?? endedAt)),
-						durationMs: Math.max(0, endedAt - startedAt),
-					};
-					void decodeBody(encoded, headerValue(response.headers, "content-encoding")).then(
-						(decoded) => {
-							finish({
-								status,
-								...timing,
-								encoded,
-								decoded,
-								decodeError: null,
-								globalRateLimit: status === 429 && rateLimitScope === "global",
-								rateLimitScope,
-							});
-						},
-						(error) => {
-							finish({
-								status,
-								...timing,
-								encoded,
-								decoded: Buffer.alloc(0),
-								decodeError: error instanceof Error ? error.message : String(error),
-								globalRateLimit: status === 429 && rateLimitScope === "global",
-								rateLimitScope,
-							});
-						}
-					);
-				});
-				response.on("error", (error) => {
-					if (bodyEnded) return;
-					const now = performance.now();
-					finish({
-						status: 0,
-						ttfbMs: Math.max(0, (headersAt ?? now) - startedAt),
-						bodyDownloadMs: 0,
-						durationMs: Math.max(0, now - startedAt),
-						encoded: Buffer.alloc(0),
-						decoded: Buffer.alloc(0),
-						decodeError: error instanceof Error ? error.message : String(error),
-						globalRateLimit: false,
-						rateLimitScope: null,
+				(response) => {
+					headersAt = performance.now();
+					const chunks: Buffer[] = [];
+					response.on("data", (chunk: Buffer | string) => {
+						chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
 					});
-				});
-			}
-		);
+					response.on("end", () => {
+						bodyEnded = true;
+						completeNetworkRequest();
+						const endedAt = performance.now();
+						const encoded = Buffer.concat(chunks);
+						const status = response.statusCode ?? 0;
+						const rateLimitScope = headerValue(response.headers, "x-ratelimit-scope") ?? null;
+						const timing = {
+							ttfbMs: Math.max(0, (headersAt ?? endedAt) - startedAt),
+							bodyDownloadMs: Math.max(0, endedAt - (headersAt ?? endedAt)),
+							durationMs: Math.max(0, endedAt - startedAt),
+						};
+						void decodeBody(encoded, headerValue(response.headers, "content-encoding")).then(
+							(decoded) => {
+								finish({
+									status,
+									...timing,
+									encoded,
+									decoded,
+									decodeError: null,
+									globalRateLimit: status === 429 && rateLimitScope === "global",
+									rateLimitScope,
+								});
+							},
+							(error) => {
+								finish({
+									status,
+									...timing,
+									encoded,
+									decoded: Buffer.alloc(0),
+									decodeError: error instanceof Error ? error.message : String(error),
+									globalRateLimit: status === 429 && rateLimitScope === "global",
+									rateLimitScope,
+								});
+							}
+						);
+					});
+					response.on("error", (error) => {
+						completeNetworkRequest();
+						if (bodyEnded) return;
+						const now = performance.now();
+						finish({
+							status: 0,
+							ttfbMs: Math.max(0, (headersAt ?? now) - startedAt),
+							bodyDownloadMs: 0,
+							durationMs: Math.max(0, now - startedAt),
+							encoded: Buffer.alloc(0),
+							decoded: Buffer.alloc(0),
+							decodeError: error instanceof Error ? error.message : String(error),
+							globalRateLimit: false,
+							rateLimitScope: null,
+						});
+					});
+				}
+			);
+		} catch (error) {
+			completeNetworkRequest();
+			const now = performance.now();
+			finish({
+				status: 0,
+				ttfbMs: Math.max(0, (headersAt ?? now) - startedAt),
+				bodyDownloadMs: 0,
+				durationMs: Math.max(0, now - startedAt),
+				encoded: Buffer.alloc(0),
+				decoded: Buffer.alloc(0),
+				decodeError: error instanceof Error ? error.message : String(error),
+				globalRateLimit: false,
+				rateLimitScope: null,
+			});
+			return;
+		}
 		request.setTimeout(timeoutMs, () => {
+			completeNetworkRequest();
 			request.destroy(new Error("request timeout"));
 		});
 		request.on("error", (error) => {
+			completeNetworkRequest();
 			const now = performance.now();
 			finish({
 				status: 0,
@@ -628,13 +657,14 @@ function requestOnceHttp1(): Promise<RawResponse> {
 			});
 		});
 		deadlineTimer = setTimeout(() => {
+			completeNetworkRequest();
 			request.destroy(new Error("request timeout"));
 		}, timeoutMs);
 		request.end(requestBody);
 	});
 }
 
-function requestOnceHttp2(): Promise<RawResponse> {
+function requestOnceHttp2(stage: number): Promise<RawResponse> {
 	return new Promise((resolve) => {
 		const startedAt = performance.now();
 		let headersAt: number | null = null;
@@ -642,8 +672,14 @@ function requestOnceHttp2(): Promise<RawResponse> {
 		let timeout: ReturnType<typeof setTimeout> | null = null;
 		let settled = false;
 		let bodyEnded = false;
+		let networkEnded = false;
 		let sessionRetryUsed = false;
 		let assignedSession: ClientHttp2Session | null = null;
+		const completeNetworkRequest = (): void => {
+			if (networkEnded) return;
+			networkEnded = true;
+			endNetworkRequest(stage);
+		};
 		const finish = (value: RawResponse) => {
 			if (settled) return;
 			settled = true;
@@ -707,6 +743,7 @@ function requestOnceHttp2(): Promise<RawResponse> {
 			}
 			reserveHttp2Stream(session);
 			assignedSession = session;
+			beginNetworkRequest(stage);
 
 			const chunks: Buffer[] = [];
 			let rateLimitScope: string | null = null;
@@ -722,6 +759,7 @@ function requestOnceHttp2(): Promise<RawResponse> {
 			});
 			stream.once("end", () => {
 				bodyEnded = true;
+				completeNetworkRequest();
 				if (assignedSession !== null) {
 					releaseHttp2Stream(assignedSession);
 					assignedSession = null;
@@ -759,19 +797,23 @@ function requestOnceHttp2(): Promise<RawResponse> {
 				);
 			});
 			stream.once("error", (error) => {
+				completeNetworkRequest();
 				if (!bodyEnded) fail(error);
 			});
 			stream.once("close", () => {
+				completeNetworkRequest();
 				if (!settled && !bodyEnded)
 					fail(new Error("http2 stream closed before response body completed"));
 			});
 			timeout = setTimeout(() => {
+				completeNetworkRequest();
 				stream.close(http2Constants.NGHTTP2_CANCEL);
 				fail(new Error("request timeout"));
 			}, timeoutMs);
 			try {
 				stream.end(requestBody);
 			} catch (error) {
+				completeNetworkRequest();
 				fail(error);
 			}
 		};
@@ -779,8 +821,8 @@ function requestOnceHttp2(): Promise<RawResponse> {
 	});
 }
 
-function requestOnce(): Promise<RawResponse> {
-	return transport === "warm" ? requestOnceHttp2() : requestOnceHttp1();
+function requestOnce(stage: number): Promise<RawResponse> {
+	return transport === "warm" ? requestOnceHttp2(stage) : requestOnceHttp1(stage);
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -964,7 +1006,24 @@ const overallAccumulator = new ResponseAccumulator();
 const metricObservations: MetricObservation[] = [];
 const inFlightByStage = new Map<number, number>();
 const maxInFlightByStage = new Map<number, number>();
+const networkInFlightByStage = new Map<number, number>();
+const maxNetworkInFlightByStage = new Map<number, number>();
 let requestCount = 0;
+
+function beginNetworkRequest(stage: number): void {
+	const inFlight = (networkInFlightByStage.get(stage) ?? 0) + 1;
+	networkInFlightByStage.set(stage, inFlight);
+	maxNetworkInFlightByStage.set(
+		stage,
+		Math.max(maxNetworkInFlightByStage.get(stage) ?? 0, inFlight)
+	);
+}
+
+function endNetworkRequest(stage: number): void {
+	const remaining = Math.max(0, (networkInFlightByStage.get(stage) ?? 1) - 1);
+	if (remaining === 0) networkInFlightByStage.delete(stage);
+	else networkInFlightByStage.set(stage, remaining);
+}
 
 async function runOne(stage: number): Promise<void> {
 	const accumulator = accumulatorsByStage.get(stage);
@@ -973,7 +1032,7 @@ async function runOne(stage: number): Promise<void> {
 	inFlightByStage.set(stage, inFlight);
 	maxInFlightByStage.set(stage, Math.max(maxInFlightByStage.get(stage) ?? 0, inFlight));
 	try {
-		const response = await requestOnce();
+		const response = await requestOnce(stage);
 		let parsed: unknown = null;
 		let parseError: string | null = response.decodeError;
 		if (!parseError) {
@@ -1187,7 +1246,8 @@ if (!stageExecutionAborted && deploymentIdentityFailure === null) {
 const stageReports = stages.map((stage) => ({
 	concurrency: stage,
 	durationSeconds: stageSeconds,
-	maxInFlight: maxInFlightByStage.get(stage) ?? 0,
+	maxProcessingInFlight: maxInFlightByStage.get(stage) ?? 0,
+	maxNetworkInFlight: maxNetworkInFlightByStage.get(stage) ?? 0,
 	...accumulatorsByStage.get(stage)!.report(),
 }));
 const overall = overallAccumulator.report();
@@ -1251,7 +1311,7 @@ const capacityGate = {
 	allRequiredStagesPresent: [50, 100, 200, 300].every((stage) => stages.includes(stage)),
 	requiredStagesSustainedConcurrency: requiredCapacityStages.every((concurrency) => {
 		const report = stageReports.find((item) => item.concurrency === concurrency);
-		return report !== undefined && report.maxInFlight >= concurrency;
+		return report !== undefined && report.maxNetworkInFlight >= concurrency;
 	}),
 	requiredStagesHaveNoErrors: requiredStageHealth.every((stage) => stage.healthy),
 	requiredStageHealth,
@@ -1315,7 +1375,7 @@ const capacityGatePassed = [
 ].every(Boolean);
 
 const report = {
-	schemaVersion: 2,
+	schemaVersion: 3,
 	contract: contractHeader,
 	runId,
 	endpoint: `${endpoint.origin}${endpoint.pathname}`,
@@ -1349,7 +1409,8 @@ const report = {
 	notes: [
 		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
 		"Warm HTTP/2 evidence records each peer maxConcurrentStreams and the summed effective capacity; the run fails before load if it cannot cover the requested stage concurrency.",
-		"Each stage keeps its target number of request workers active and immediately replaces every completed request; there is no think-time gap that lowers the advertised concurrency.",
+		"Each stage keeps its target number of request workers active and immediately replaces every completed request; there is no think-time gap that lowers the offered concurrency.",
+		"Sustained-concurrency evidence is the maximum number of active HTTP/1 bodies or HTTP/2 streams, measured from request/stream creation through network body completion; parsing and decompression are reported separately and cannot satisfy the network-concurrency gate.",
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",

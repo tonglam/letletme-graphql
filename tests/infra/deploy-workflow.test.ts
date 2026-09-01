@@ -68,6 +68,12 @@ describe("production deployment workflow", () => {
 
 	test("requires candidate readiness, image digest, revision label, ingress and contract probes", () => {
 		expect(dockerfile).toContain("COPY --chown=bun:bun scripts/lib ./scripts/lib");
+		expect(dockerfile).toContain(
+			"ENV RATE_LIMIT_TELEMETRY_SPOOL_DIR=/var/lib/letletme-graphql/rate-limit-telemetry"
+		);
+		expect(dockerfile).toContain('chown -R bun:bun "$RATE_LIMIT_TELEMETRY_SPOOL_DIR"');
+		expect(compose).toContain("rate_limit_telemetry_state");
+		expect(compose).toContain("GRAPHQL_RATE_LIMIT_TELEMETRY_VOLUME");
 		expect(deployScript).toContain("/health/ready");
 		expect(deployScript).toContain('.status == "ok" and .deploySha == $deploySha');
 		expect(deployScript).toContain("docker inspect --format '{{.Config.Image}}'");
