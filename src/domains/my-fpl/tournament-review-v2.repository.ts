@@ -10,6 +10,7 @@ import {
 	viewerEntryIdForPrincipal,
 } from "../../graphql/authorization";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { env } from "../../infra/env";
 import { readJsonQueryCache, writeJsonQueryCache } from "../../infra/query-cache";
 
 export type MyTournamentReviewScope = "ACCESSIBLE" | "MANAGED" | "ALL";
@@ -1714,7 +1715,7 @@ async function materializePublicationRow(
 	// exercise the legacy full-payload validators; keep that compatibility only
 	// there. A production row without a manifest fails closed.
 	if (!isRecord(row.payload) || !isRecord(row.payload.manifest)) {
-		if (process.env.NODE_ENV !== "production") return row;
+		if (!env.isProduction) return row;
 		throw integrityError("Review publication chunk manifest is missing");
 	}
 	const chunkResult = await database.query<PublicationChunkRow>(
