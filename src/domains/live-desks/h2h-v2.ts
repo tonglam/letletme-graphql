@@ -316,7 +316,7 @@ const parseManifest = (
 		!countsValid ||
 		published !== expected ||
 		ready > expected ||
-		noPicks > expected ||
+		noPicks !== 0 ||
 		!validItem(
 			items.index,
 			itemKey(season, eventId, tournamentId, scope, value.generation as number, "index"),
@@ -336,7 +336,8 @@ const validSide = (
 	value: unknown,
 	season: string,
 	eventId: number,
-	manifest: H2HManifestV2
+	manifest: H2HManifestV2,
+	isBye: boolean
 ): value is H2HMatchSideV2 => {
 	if (!isRecord(value)) return false;
 	const entryId = value.entryId;
@@ -355,7 +356,8 @@ const validSide = (
 		return false;
 	if (entryId === null) {
 		return (
-			value.isAverage === true &&
+			(value.isAverage === true ||
+				(isBye && value.isAverage === false && value.entryName === "Bye")) &&
 			value.inputPublicationId === null &&
 			value.inputGeneration === null &&
 			value.inputRevision === null &&
@@ -396,8 +398,8 @@ const validMatch = (value: unknown, manifest: H2HManifestV2): value is H2HMatchP
 		isRecord(value.globalRef) &&
 		validUuid(value.globalRef.publicationId) &&
 		positiveInteger(value.globalRef.generation) &&
-		validSide(value.home, manifest.season, manifest.eventId, manifest) &&
-		validSide(value.away, manifest.season, manifest.eventId, manifest) &&
+		validSide(value.home, manifest.season, manifest.eventId, manifest, value.isBye) &&
+		validSide(value.away, manifest.season, manifest.eventId, manifest, value.isBye) &&
 		(value.state !== "READY" ||
 			((value.home.entryId === null || value.home.input !== null) &&
 				(value.away.entryId === null || value.away.input !== null)))
