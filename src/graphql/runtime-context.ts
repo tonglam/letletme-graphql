@@ -1,8 +1,4 @@
-import {
-	coreDatasetRevision,
-	getCoreDataSnapshot,
-	getCoreDatasetRevision,
-} from "../infra/data-snapshot";
+import { coreDatasetRevision, getCoreDataSnapshot } from "../infra/data-snapshot";
 import { database } from "../infra/database";
 import { logger } from "../infra/logger";
 import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "../infra/principal";
@@ -13,7 +9,7 @@ import type { RequestTiming } from "../http/request-timing";
 import { authorizeGraphQLRequest, type AuthorizationResult } from "./authorization";
 import type { GraphQLContext } from "./context";
 import type { GraphQLLimitResult } from "./limits";
-import { LIGHTWEIGHT_CORE_FIELDS, REVISIONED_QUERY_CACHE_FIELDS } from "./root-field-policy";
+import { LIGHTWEIGHT_CORE_FIELDS } from "./root-field-policy";
 import { schema } from "./schema";
 
 type AcceptedGraphQLLimits = Extract<GraphQLLimitResult, { ok: true }>;
@@ -180,29 +176,6 @@ export const buildGraphQLRuntimeContext = async ({
 		limits.rootFields.every((field) => LIGHTWEIGHT_CORE_FIELDS.has(field));
 	if (lightweightCoreRead) {
 		context.fullCoreLoaded = false;
-		if (limits.rootFields.some((field) => REVISIONED_QUERY_CACHE_FIELDS.has(field))) {
-			try {
-				// Review roots remain lightweight (no Core payload transfer), but
-				// their revisioned query cache must be fenced by the current Core
-				// publication identity. Read the manifest only on the hot path.
-				context.dataRevision = await requestTiming.measure("publication", () =>
-					getCoreDatasetRevision(context)
-				);
-			} catch (error) {
-				logger.error({ err: error, requestId }, "Data publication authority is unavailable");
-				return {
-					ok: false,
-					fullCoreLoaded: false,
-					failure: {
-						kind: "publication",
-						status: 503,
-						code: "DEPENDENCY_UNAVAILABLE",
-						message: "Data publication is temporarily unavailable",
-						outcome: "publication_unavailable",
-					},
-				};
-			}
-		}
 		return { ok: true, context, fullCoreLoaded: false };
 	}
 

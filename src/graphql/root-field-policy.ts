@@ -288,17 +288,6 @@ export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 		.map(([fieldName]) => fieldName)
 );
 
-/**
- * Payload-backed review roots use their own settled-review semantic revision
- * as a cache fence. Catalog and status are intentionally PostgreSQL-only and
- * therefore do not trigger a publication read on the request hot path.
- */
-export const REVISIONED_QUERY_CACHE_FIELDS: ReadonlySet<string> = new Set([
-	"myTournamentGameweekReview",
-	"myTournamentSeasonReview",
-	"myTournamentSeasonReviewSection",
-]);
-
 export const getRootFieldPolicy = (fieldName: string): RootFieldPolicy | undefined =>
 	ROOT_FIELD_POLICIES.get(fieldName);
 
