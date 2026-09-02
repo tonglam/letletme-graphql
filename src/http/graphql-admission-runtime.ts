@@ -205,12 +205,13 @@ export const runGraphQLRateLimitStage = async ({
 		const globalChecks = v3Checks.filter((check) => check.scope === "global");
 		const observationalChecks = v3Checks.filter((check) => check.scope !== "global");
 		if (globalChecks.length > 0 && observationalChecks.length > 0) {
-			return checkV3GraphQLRateLimitsWithGlobalSafety({
+			const combined = await checkV3GraphQLRateLimitsWithGlobalSafety({
 				checks: [...globalChecks, ...observationalChecks],
 				corsHeaders,
 				enforce: false,
 				rateLimitWorkload,
 			});
+			return { response: combined.response, v3Decision: combined.decision };
 		}
 	}
 	const v3 = await checkV3GraphQLRateLimits({
