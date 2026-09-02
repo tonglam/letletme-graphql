@@ -1394,25 +1394,23 @@ export const validateGraphQLPayloadLimits = (
 		);
 	const maxAstNodes = usesTournamentDetailDesk
 		? TOURNAMENT_DETAIL_DESK_MAX_AST_NODES
-		: usesMyFplCompetitionsDesk
-			? GRAPHQL_LIMITS.maxBoundedDeskAstNodes
-			: usesPlayerStatsDesk
-				? PLAYER_STATS_DESK_MAX_AST_NODES
-				: usesPlayerStateProfile
-					? PLAYER_STATE_PROFILE_MAX_AST_NODES
-					: usesCalcLivePointsByEntry
-						? CALC_LIVE_POINTS_MAX_AST_NODES
-						: usesEntryLiveCompetitionBoard
-							? ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES
-							: usesTournamentOfficialH2H
-								? TOURNAMENT_OFFICIAL_H2H_MAX_AST_NODES
-								: usesMyFplManagerReview
-									? MY_FPL_MANAGER_REVIEW_MAX_AST_NODES
-									: usesMyFplManagerGameweek
-										? MY_FPL_MANAGER_GAMEWEEK_MAX_AST_NODES
-										: usesMyTournamentReview
-											? MY_TOURNAMENT_REVIEW_MAX_AST_NODES
-											: GRAPHQL_LIMITS.maxAstNodes;
+		: usesPlayerStatsDesk
+			? PLAYER_STATS_DESK_MAX_AST_NODES
+			: usesPlayerStateProfile
+				? PLAYER_STATE_PROFILE_MAX_AST_NODES
+				: usesCalcLivePointsByEntry
+					? CALC_LIVE_POINTS_MAX_AST_NODES
+					: usesEntryLiveCompetitionBoard
+						? ENTRY_LIVE_COMPETITION_BOARD_MAX_AST_NODES
+						: usesTournamentOfficialH2H
+							? TOURNAMENT_OFFICIAL_H2H_MAX_AST_NODES
+							: usesMyFplManagerReview
+								? MY_FPL_MANAGER_REVIEW_MAX_AST_NODES
+								: usesMyFplManagerGameweek
+									? MY_FPL_MANAGER_GAMEWEEK_MAX_AST_NODES
+									: usesMyTournamentReview
+										? MY_TOURNAMENT_REVIEW_MAX_AST_NODES
+										: GRAPHQL_LIMITS.maxAstNodes;
 	let astNodes = 0;
 	visit(document, { enter: () => void (astNodes += 1) });
 	if (astNodes > maxAstNodes) {

@@ -441,6 +441,49 @@ type ObligationRow = {
 	latest_finalized_event_id: number | null;
 };
 
+const REVIEW_POINTS_REQUIRED_NUMBER_FIELDS = [
+	"grossPoints",
+	"transferCost",
+	"netPoints",
+	"tournamentScore",
+	"seasonGrossPoints",
+	"seasonNetPoints",
+] as const;
+
+const REVIEW_POINTS_REQUIRED_POSITIVE_FIELDS = ["groupId", "rank"] as const;
+
+const REVIEW_POINTS_OPTIONAL_NUMBER_FIELDS = [
+	"previousRank",
+	"eventRank",
+	"overallPoints",
+	"overallRank",
+] as const;
+
+const REVIEW_POINTS_NON_APPLICABLE_FIELDS = [
+	"groupId",
+	"rank",
+	"previousRank",
+	"grossPoints",
+	"transferCost",
+	"netPoints",
+	"tournamentScore",
+	"seasonGrossPoints",
+	"seasonNetPoints",
+	"eventRank",
+] as const;
+
+const reviewJsonIntegerFieldInvalid = (alias: string, field: string): string =>
+	`jsonb_typeof(${alias}->'${field}') IS DISTINCT FROM 'number' OR ${alias}->>'${field}' !~ '^-?[0-9]+$'`;
+
+const reviewJsonPositiveIntegerFieldInvalid = (alias: string, field: string): string =>
+	`jsonb_typeof(${alias}->'${field}') IS DISTINCT FROM 'number' OR ${alias}->>'${field}' !~ '^[1-9][0-9]*$'`;
+
+const reviewJsonOptionalIntegerFieldInvalid = (alias: string, field: string): string =>
+	`(${alias} ? '${field}' AND (jsonb_typeof(${alias}->'${field}') IS DISTINCT FROM 'null' AND (${reviewJsonIntegerFieldInvalid(alias, field)})))`;
+
+const reviewJsonNonApplicableFieldPresent = (alias: string, field: string): string =>
+	`(${alias} ? '${field}' AND jsonb_typeof(${alias}->'${field}') IS DISTINCT FROM 'null')`;
+
 /**
  * SQL-side publication witness shared by catalog, status, Gameweek, and
  * Season metadata reads.  A READY obligation is not a readable snapshot until
@@ -449,6 +492,343 @@ type ObligationRow = {
  * for a partial publication.
  */
 function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: string): string {
+	const pointsRequiredNumberInvalid = REVIEW_POINTS_REQUIRED_NUMBER_FIELDS.map((field) =>
+		reviewJsonIntegerFieldInvalid("point_item", field)
+	).join("\n OR ");
+	const pointsRequiredPositiveInvalid = REVIEW_POINTS_REQUIRED_POSITIVE_FIELDS.map((field) =>
+		reviewJsonPositiveIntegerFieldInvalid("point_item", field)
+	).join("\n OR ");
+	const pointsOptionalNumberInvalid = REVIEW_POINTS_OPTIONAL_NUMBER_FIELDS.map((field) =>
+		reviewJsonOptionalIntegerFieldInvalid("point_item", field)
+	).join("\n OR ");
+	const pointsNonApplicablePresent = REVIEW_POINTS_NON_APPLICABLE_FIELDS.map((field) =>
+		reviewJsonNonApplicableFieldPresent("point_item", field)
+	).join("\n OR ");
+	const pointsRowsInvalid = `
+		jsonb_typeof(point_item) IS DISTINCT FROM 'object'
+		OR jsonb_typeof(point_item->'entryId') IS DISTINCT FROM 'number'
+		OR point_item->>'entryId' !~ '^[1-9][0-9]*$'
+		OR jsonb_typeof(point_item->'entryName') IS DISTINCT FROM 'string'
+		OR btrim(COALESCE(point_item->>'entryName', '')) = ''
+		OR jsonb_typeof(point_item->'playerName') IS DISTINCT FROM 'string'
+		OR btrim(COALESCE(point_item->>'playerName', '')) = ''
+		OR jsonb_typeof(point_item->'applicable') IS DISTINCT FROM 'boolean'
+		OR ${pointsOptionalNumberInvalid}
+		OR (
+			point_item->>'applicable' = 'true'
+			AND (
+				${pointsRequiredNumberInvalid}
+				OR ${pointsRequiredPositiveInvalid}
+				OR CASE
+					WHEN point_item->>'grossPoints' ~ '^-?[0-9]+$'
+					 AND point_item->>'transferCost' ~ '^[0-9]+$'
+					 AND point_item->>'netPoints' ~ '^-?[0-9]+$'
+					THEN (point_item->>'grossPoints')::numeric - (point_item->>'transferCost')::numeric <> (point_item->>'netPoints')::numeric
+					ELSE true
+				END
+				OR CASE
+					WHEN point_item->>'seasonGrossPoints' ~ '^-?[0-9]+$'
+					 AND point_item->>'seasonNetPoints' ~ '^-?[0-9]+$'
+					THEN (point_item->>'seasonGrossPoints')::numeric < (point_item->>'seasonNetPoints')::numeric
+					ELSE true
+				END
+				OR CASE
+					WHEN point_item->>'transferCost' ~ '^[0-9]+$'
+					THEN false
+					ELSE true
+				END
+			)
+		)
+		OR (
+			point_item->>'applicable' = 'false'
+			AND (${pointsNonApplicablePresent})
+		)
+	`;
+	const h2hStandingInvalid = `
+		jsonb_typeof(standing_item) IS DISTINCT FROM 'object'
+		OR jsonb_typeof(standing_item->'groupId') IS DISTINCT FROM 'number'
+		OR standing_item->>'groupId' !~ '^[1-9][0-9]*$'
+		OR jsonb_typeof(standing_item->'entryId') IS DISTINCT FROM 'number'
+		OR standing_item->>'entryId' !~ '^[1-9][0-9]*$'
+		OR jsonb_typeof(standing_item->'entryName') IS DISTINCT FROM 'string'
+		OR btrim(COALESCE(standing_item->>'entryName', '')) = ''
+		OR EXISTS (
+			SELECT 1
+			FROM unnest(ARRAY['rank','played','won','drawn','lost','matchPoints','pointsFor','pointsAgainst']) field_name
+			WHERE jsonb_typeof(standing_item->field_name) IS DISTINCT FROM 'number'
+			  OR standing_item->>field_name !~ '^-?[0-9]+$'
+		)
+		OR CASE
+			WHEN (SELECT bool_and(standing_item->>field_name ~ '^-?[0-9]+$')
+			      FROM unnest(ARRAY['rank','played','won','drawn','lost','matchPoints','pointsFor','pointsAgainst']) field_name)
+			THEN (standing_item->>'rank')::numeric < 1
+				OR (standing_item->>'played')::numeric < 0
+				OR (standing_item->>'won')::numeric < 0
+				OR (standing_item->>'drawn')::numeric < 0
+				OR (standing_item->>'lost')::numeric < 0
+				OR (standing_item->>'matchPoints')::numeric < 0
+				OR (standing_item->>'played')::numeric <> (standing_item->>'won')::numeric + (standing_item->>'drawn')::numeric + (standing_item->>'lost')::numeric
+				OR (standing_item->>'matchPoints')::numeric <> 3 * (standing_item->>'won')::numeric + (standing_item->>'drawn')::numeric
+			ELSE true
+		END
+	`;
+	const h2hMatchInvalid = () => `
+		jsonb_typeof(match_item) IS DISTINCT FROM 'object'
+		OR NOT (match_item ? 'matchId')
+		OR jsonb_typeof(match_item->'matchId') IS DISTINCT FROM 'string'
+		OR btrim(COALESCE(match_item->>'matchId', '')) = ''
+		OR jsonb_typeof(match_item->'groupId') IS DISTINCT FROM 'number'
+		OR match_item->>'groupId' !~ '^[1-9][0-9]*$'
+		OR jsonb_typeof(match_item->'isBye') IS DISTINCT FROM 'boolean'
+		OR NOT (match_item ? 'home')
+		OR NOT (match_item ? 'away')
+		OR (
+			jsonb_typeof(match_item->'home') IS DISTINCT FROM 'null'
+			AND jsonb_typeof(match_item->'home') IS DISTINCT FROM 'object'
+		)
+		OR (
+			jsonb_typeof(match_item->'away') IS DISTINCT FROM 'null'
+			AND jsonb_typeof(match_item->'away') IS DISTINCT FROM 'object'
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM (VALUES (match_item->'home'), (match_item->'away')) AS side(value)
+			WHERE jsonb_typeof(side.value) = 'object'
+			  AND (${h2hSideInvalid})
+		)
+		OR (
+			match_item->>'isBye' = 'true'
+			AND (
+				jsonb_typeof(match_item->'home') = jsonb_typeof(match_item->'away')
+				OR (jsonb_typeof(match_item->'home') = 'object' AND match_item->'home'->>'isAverage' = 'true')
+				OR (jsonb_typeof(match_item->'away') = 'object' AND match_item->'away'->>'isAverage' = 'true')
+				OR (jsonb_typeof(match_item->'home') = 'object' AND jsonb_typeof(match_item->'home'->'matchPoints') IS DISTINCT FROM 'null')
+				OR (jsonb_typeof(match_item->'away') = 'object' AND jsonb_typeof(match_item->'away'->'matchPoints') IS DISTINCT FROM 'null')
+			)
+		)
+		OR (
+			match_item->>'isBye' = 'false'
+			AND (
+				jsonb_typeof(match_item->'home') <> 'object'
+				OR jsonb_typeof(match_item->'away') <> 'object'
+				OR (
+					(match_item->'home'->>'isAverage' = 'true' AND match_item->'away'->>'isAverage' = 'true')
+					OR (
+						match_item->'home'->>'isAverage' = 'false'
+						AND match_item->'away'->>'isAverage' = 'false'
+						AND match_item->'home'->>'entryId' = match_item->'away'->>'entryId'
+					)
+				)
+				OR CASE
+					WHEN match_item->'home'->>'netPoints' ~ '^-?[0-9]+$'
+					 AND match_item->'away'->>'netPoints' ~ '^-?[0-9]+$'
+					 AND match_item->'home'->>'matchPoints' ~ '^[0-9]+$'
+					 AND match_item->'away'->>'matchPoints' ~ '^[0-9]+$'
+					THEN (
+						CASE WHEN (match_item->'home'->>'netPoints')::numeric > (match_item->'away'->>'netPoints')::numeric THEN 3
+						     WHEN (match_item->'home'->>'netPoints')::numeric < (match_item->'away'->>'netPoints')::numeric THEN 0
+						     ELSE 1 END
+						<> (match_item->'home'->>'matchPoints')::numeric
+						OR CASE WHEN (match_item->'away'->>'netPoints')::numeric > (match_item->'home'->>'netPoints')::numeric THEN 3
+						     WHEN (match_item->'away'->>'netPoints')::numeric < (match_item->'home'->>'netPoints')::numeric THEN 0
+						     ELSE 1 END
+						<> (match_item->'away'->>'matchPoints')::numeric
+					)
+					ELSE true
+				END
+			)
+		)
+	`;
+	const knockoutMatchInvalid = () => `
+		jsonb_typeof(knockout_item) IS DISTINCT FROM 'object'
+		OR jsonb_typeof(knockout_item->'matchId') IS DISTINCT FROM 'number'
+		OR knockout_item->>'matchId' !~ '^[1-9][0-9]*$'
+		OR jsonb_typeof(knockout_item->'playAgainstId') IS DISTINCT FROM 'number'
+		OR knockout_item->>'playAgainstId' !~ '^[1-9][0-9]*$'
+		OR (knockout_item ? 'round' AND jsonb_typeof(knockout_item->'round') IS DISTINCT FROM 'null' AND (jsonb_typeof(knockout_item->'round') IS DISTINCT FROM 'number' OR knockout_item->>'round' !~ '^[1-9][0-9]*$'))
+		OR (knockout_item ? 'name' AND jsonb_typeof(knockout_item->'name') IS DISTINCT FROM 'null' AND jsonb_typeof(knockout_item->'name') IS DISTINCT FROM 'string')
+		OR NOT (knockout_item ? 'home')
+		OR NOT (knockout_item ? 'away')
+		OR (jsonb_typeof(knockout_item->'home') IS DISTINCT FROM 'null' AND jsonb_typeof(knockout_item->'home') IS DISTINCT FROM 'object')
+		OR (jsonb_typeof(knockout_item->'away') IS DISTINCT FROM 'null' AND jsonb_typeof(knockout_item->'away') IS DISTINCT FROM 'object')
+		OR (jsonb_typeof(knockout_item->'home') = 'null' AND jsonb_typeof(knockout_item->'away') = 'null')
+		OR EXISTS (
+			SELECT 1
+			FROM (VALUES (knockout_item->'home'), (knockout_item->'away')) AS side(value)
+			WHERE jsonb_typeof(side.value) = 'object'
+			  AND (${knockoutSideInvalid})
+		)
+		OR (jsonb_typeof(knockout_item->'home') = 'object' AND jsonb_typeof(knockout_item->'away') = 'object' AND knockout_item->'home'->>'entryId' = knockout_item->'away'->>'entryId')
+		OR (knockout_item ? 'winnerEntryId' AND jsonb_typeof(knockout_item->'winnerEntryId') IS DISTINCT FROM 'null' AND (jsonb_typeof(knockout_item->'winnerEntryId') IS DISTINCT FROM 'number' OR knockout_item->>'winnerEntryId' !~ '^[1-9][0-9]*$'))
+		OR (knockout_item ? 'winnerEntryId' AND jsonb_typeof(knockout_item->'winnerEntryId') = 'number' AND NOT (knockout_item->>'winnerEntryId' = knockout_item->'home'->>'entryId' OR knockout_item->>'winnerEntryId' = knockout_item->'away'->>'entryId'))
+		OR CASE
+			WHEN jsonb_typeof(knockout_item->'home') = 'null' OR jsonb_typeof(knockout_item->'away') = 'null' THEN
+				CASE
+					WHEN jsonb_typeof(COALESCE(knockout_item->'home', 'null'::jsonb)->'netPoints') = 'null'
+					 AND jsonb_typeof(COALESCE(knockout_item->'home', 'null'::jsonb)->'goalsScored') = 'null'
+					 AND jsonb_typeof(COALESCE(knockout_item->'home', 'null'::jsonb)->'goalsConceded') = 'null'
+					 AND jsonb_typeof(COALESCE(knockout_item->'away', 'null'::jsonb)->'netPoints') = 'null'
+					 AND jsonb_typeof(COALESCE(knockout_item->'away', 'null'::jsonb)->'goalsScored') = 'null'
+					 AND jsonb_typeof(COALESCE(knockout_item->'away', 'null'::jsonb)->'goalsConceded') = 'null'
+					THEN jsonb_typeof(knockout_item->'winnerEntryId') IS DISTINCT FROM 'null'
+					ELSE knockout_item->>'winnerEntryId' IS DISTINCT FROM COALESCE(knockout_item->'home'->>'entryId', knockout_item->'away'->>'entryId')
+				END
+			ELSE CASE
+					WHEN jsonb_typeof(knockout_item->'home'->'netPoints') = 'null'
+					 AND jsonb_typeof(knockout_item->'home'->'goalsScored') = 'null'
+					 AND jsonb_typeof(knockout_item->'home'->'goalsConceded') = 'null'
+					 AND jsonb_typeof(knockout_item->'away'->'netPoints') = 'null'
+					 AND jsonb_typeof(knockout_item->'away'->'goalsScored') = 'null'
+					 AND jsonb_typeof(knockout_item->'away'->'goalsConceded') = 'null'
+					THEN jsonb_typeof(knockout_item->'winnerEntryId') IS DISTINCT FROM 'null'
+					ELSE
+						jsonb_typeof(knockout_item->'home'->'netPoints') IS DISTINCT FROM 'number'
+						OR jsonb_typeof(knockout_item->'away'->'netPoints') IS DISTINCT FROM 'number'
+						OR jsonb_typeof(knockout_item->'home'->'goalsScored') IS DISTINCT FROM 'number'
+						OR jsonb_typeof(knockout_item->'away'->'goalsScored') IS DISTINCT FROM 'number'
+						OR jsonb_typeof(knockout_item->'home'->'goalsConceded') IS DISTINCT FROM 'number'
+						OR jsonb_typeof(knockout_item->'away'->'goalsConceded') IS DISTINCT FROM 'number'
+						OR jsonb_typeof(knockout_item->'winnerEntryId') IS DISTINCT FROM 'number'
+						OR knockout_item->'home'->>'goalsScored' <> knockout_item->'away'->>'goalsConceded'
+						OR knockout_item->'away'->>'goalsScored' <> knockout_item->'home'->>'goalsConceded'
+						OR CASE
+							WHEN knockout_item->'home'->>'netPoints' ~ '^-?[0-9]+$'
+							 AND knockout_item->'away'->>'netPoints' ~ '^-?[0-9]+$'
+							THEN CASE
+								WHEN (knockout_item->'home'->>'netPoints')::numeric > (knockout_item->'away'->>'netPoints')::numeric
+									THEN knockout_item->>'winnerEntryId' <> knockout_item->'home'->>'entryId'
+								WHEN (knockout_item->'home'->>'netPoints')::numeric < (knockout_item->'away'->>'netPoints')::numeric
+									THEN knockout_item->>'winnerEntryId' <> knockout_item->'away'->>'entryId'
+								ELSE false
+							END
+							ELSE true
+						END
+					END
+			END
+	`;
+	const h2hSideInvalid = `
+		jsonb_typeof(side.value) IS DISTINCT FROM 'object'
+		OR jsonb_typeof(side.value->'isAverage') IS DISTINCT FROM 'boolean'
+		OR jsonb_typeof(side.value->'entryName') IS DISTINCT FROM 'string'
+		OR btrim(COALESCE(side.value->>'entryName', '')) = ''
+		OR (
+			side.value->>'isAverage' = 'true'
+			AND (side.value->'entryId' IS NULL OR jsonb_typeof(side.value->'entryId') IS DISTINCT FROM 'null')
+		)
+		OR (
+			side.value->>'isAverage' = 'false'
+			AND (
+				jsonb_typeof(side.value->'entryId') IS DISTINCT FROM 'number'
+				OR side.value->>'entryId' !~ '^[1-9][0-9]*$'
+			)
+		)
+		OR (side.value ? 'applicable' AND jsonb_typeof(side.value->'applicable') IS DISTINCT FROM 'boolean')
+		OR EXISTS (
+			SELECT 1
+			FROM unnest(ARRAY['grossPoints','transferCost','netPoints','rank']) field_name
+			WHERE side.value ? field_name
+			  AND jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'null'
+			  AND (
+				jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'number'
+				OR side.value->>field_name !~ '^-?[0-9]+$'
+			  )
+		)
+		OR EXISTS (
+			SELECT 1
+			FROM unnest(ARRAY['matchPoints']) field_name
+			WHERE side.value ? field_name
+			  AND jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'null'
+			  AND (
+				jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'number'
+				OR side.value->>field_name !~ '^[0-9]+$'
+			  )
+		)
+		OR (
+			side.value ? 'rank'
+			AND jsonb_typeof(side.value->'rank') IS DISTINCT FROM 'null'
+			AND side.value->>'rank' !~ '^[1-9][0-9]*$'
+		)
+		OR (
+			side.value->>'isAverage' = 'true'
+			AND (
+				(side.value ? 'grossPoints' AND jsonb_typeof(side.value->'grossPoints') IS DISTINCT FROM 'null')
+				OR (side.value ? 'transferCost' AND jsonb_typeof(side.value->'transferCost') IS DISTINCT FROM 'null')
+			)
+		)
+		OR (
+			side.value->>'isAverage' = 'false'
+			AND side.value ? 'grossPoints'
+			AND (side.value ? 'transferCost') IS DISTINCT FROM true
+		)
+		OR (
+			side.value->>'isAverage' = 'false'
+			AND ((side.value ? 'grossPoints') <> (side.value ? 'transferCost'))
+		)
+		OR (
+			side.value->>'isAverage' = 'false'
+			AND side.value ? 'grossPoints'
+			AND side.value ? 'transferCost'
+			AND jsonb_typeof(side.value->'grossPoints') = 'number'
+			AND jsonb_typeof(side.value->'transferCost') = 'number'
+			AND jsonb_typeof(side.value->'netPoints') = 'number'
+			AND jsonb_typeof(side.value->'grossPoints') IS DISTINCT FROM 'null'
+			AND jsonb_typeof(side.value->'transferCost') IS DISTINCT FROM 'null'
+			AND jsonb_typeof(side.value->'netPoints') IS DISTINCT FROM 'null'
+			AND (
+				side.value->>'grossPoints' !~ '^-?[0-9]+$'
+				OR side.value->>'transferCost' !~ '^[0-9]+$'
+				OR side.value->>'netPoints' !~ '^-?[0-9]+$'
+				OR (side.value->>'grossPoints')::numeric - (side.value->>'transferCost')::numeric <> (side.value->>'netPoints')::numeric
+			)
+		)
+	`;
+	const knockoutSideInvalid = `
+		jsonb_typeof(side.value) IS DISTINCT FROM 'object'
+		OR jsonb_typeof(side.value->'entryId') IS DISTINCT FROM 'number'
+		OR side.value->>'entryId' !~ '^[1-9][0-9]*$'
+		OR jsonb_typeof(side.value->'entryName') IS DISTINCT FROM 'string'
+		OR btrim(COALESCE(side.value->>'entryName', '')) = ''
+		OR (side.value ? 'applicable' AND jsonb_typeof(side.value->'applicable') IS DISTINCT FROM 'boolean')
+		OR EXISTS (
+			SELECT 1
+			FROM unnest(ARRAY['grossPoints','transferCost','netPoints','goalsScored','goalsConceded']) field_name
+			WHERE side.value ? field_name
+			  AND jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'null'
+			  AND (
+				jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'number'
+				OR side.value->>field_name !~ '^-?[0-9]+$'
+				OR (field_name IN ('goalsScored', 'goalsConceded') AND side.value->>field_name !~ '^[0-9]+$')
+				OR (field_name = 'transferCost' AND side.value->>field_name !~ '^[0-9]+$')
+			  )
+		)
+		OR (side.value->>'applicable' = 'false' AND EXISTS (
+			SELECT 1
+			FROM unnest(ARRAY['grossPoints','transferCost','netPoints','goalsScored','goalsConceded']) field_name
+			WHERE side.value ? field_name
+			  AND jsonb_typeof(side.value->field_name) IS DISTINCT FROM 'null'
+		))
+		OR (
+			side.value ? 'grossPoints'
+			AND (side.value ? 'transferCost') IS DISTINCT FROM true
+		)
+		OR ((side.value ? 'grossPoints') <> (side.value ? 'transferCost'))
+		OR (
+			side.value ? 'grossPoints'
+			AND side.value ? 'transferCost'
+			AND jsonb_typeof(side.value->'grossPoints') = 'number'
+			AND jsonb_typeof(side.value->'transferCost') = 'number'
+			AND jsonb_typeof(side.value->'netPoints') = 'number'
+			AND jsonb_typeof(side.value->'grossPoints') IS DISTINCT FROM 'null'
+			AND jsonb_typeof(side.value->'transferCost') IS DISTINCT FROM 'null'
+			AND jsonb_typeof(side.value->'netPoints') IS DISTINCT FROM 'null'
+			AND (
+				side.value->>'grossPoints' !~ '^-?[0-9]+$'
+				OR side.value->>'transferCost' !~ '^[0-9]+$'
+				OR side.value->>'netPoints' !~ '^-?[0-9]+$'
+				OR (side.value->>'grossPoints')::numeric - (side.value->>'transferCost')::numeric <> (side.value->>'netPoints')::numeric
+			)
+		)
+	`;
 	return `
   AND jsonb_typeof(${publicationAlias}.payload) = 'object'
   AND ${publicationAlias}.schema_version = 'my-tournament-review-v2.1'
@@ -537,8 +917,324 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
 	        AND point_chunk.event_id = ${publicationAlias}.event_id
 	        AND point_chunk.revision = ${publicationAlias}.revision
 	        AND point_chunk.section_key = 'POINTS_STANDINGS'
-	    )
-	  )
+			)
+		)
+	)
+	AND (
+		${publicationAlias}.format <> 'POINTS'
+		OR (
+			NOT EXISTS (
+				SELECT 1
+				FROM competition.tournament_review_publication_chunks point_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+					ELSE '[]'::jsonb
+				END) point_item
+				WHERE point_chunk.season_id = ${publicationAlias}.season_id
+				  AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND point_chunk.event_id = ${publicationAlias}.event_id
+				  AND point_chunk.revision = ${publicationAlias}.revision
+				  AND point_chunk.section_key IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')
+				  AND (${pointsRowsInvalid})
+			)
+			AND NOT EXISTS (
+				SELECT point_item->>'entryId'
+				FROM competition.tournament_review_publication_chunks point_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+					ELSE '[]'::jsonb
+				END) point_item
+				WHERE point_chunk.season_id = ${publicationAlias}.season_id
+				  AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND point_chunk.event_id = ${publicationAlias}.event_id
+				  AND point_chunk.revision = ${publicationAlias}.revision
+				  AND point_chunk.section_key = 'POINTS_STANDINGS'
+				GROUP BY point_item->>'entryId'
+				HAVING count(*) <> 1
+			)
+			AND NOT EXISTS (
+				SELECT point_item->>'entryId'
+				FROM competition.tournament_review_publication_chunks point_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+					ELSE '[]'::jsonb
+				END) point_item
+				WHERE point_chunk.season_id = ${publicationAlias}.season_id
+				  AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND point_chunk.event_id = ${publicationAlias}.event_id
+				  AND point_chunk.revision = ${publicationAlias}.revision
+				  AND point_chunk.section_key = 'POINTS_TRAJECTORIES'
+				GROUP BY point_item->>'entryId'
+				HAVING count(*) <> 1
+			)
+			AND (
+				SELECT count(*)::numeric
+				FROM competition.tournament_review_publication_chunks point_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+					ELSE '[]'::jsonb
+				END) point_item
+				WHERE point_chunk.season_id = ${publicationAlias}.season_id
+				  AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND point_chunk.event_id = ${publicationAlias}.event_id
+				  AND point_chunk.revision = ${publicationAlias}.revision
+				  AND point_chunk.section_key = 'POINTS_STANDINGS'
+			) = ${publicationAlias}.row_count
+			AND (
+				SELECT count(*) FILTER (WHERE point_item->>'applicable' = 'true')::numeric
+				FROM competition.tournament_review_publication_chunks point_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+					ELSE '[]'::jsonb
+				END) point_item
+				WHERE point_chunk.season_id = ${publicationAlias}.season_id
+				  AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND point_chunk.event_id = ${publicationAlias}.event_id
+				  AND point_chunk.revision = ${publicationAlias}.revision
+				  AND point_chunk.section_key = 'POINTS_STANDINGS'
+			) = ${publicationAlias}.ready_subject_count
+			AND (
+				SELECT count(*) FILTER (WHERE point_item->>'applicable' = 'false')::numeric
+				FROM competition.tournament_review_publication_chunks point_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+					ELSE '[]'::jsonb
+				END) point_item
+				WHERE point_chunk.season_id = ${publicationAlias}.season_id
+				  AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND point_chunk.event_id = ${publicationAlias}.event_id
+				  AND point_chunk.revision = ${publicationAlias}.revision
+				  AND point_chunk.section_key = 'POINTS_STANDINGS'
+			) = ${publicationAlias}.not_applicable_subject_count
+		)
+	)
+	AND (
+		${publicationAlias}.format <> 'H2H'
+		OR (
+			NOT EXISTS (
+				SELECT 1
+				FROM competition.tournament_review_publication_chunks h2h_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(h2h_chunk.items) = 'array' THEN h2h_chunk.items
+					ELSE '[]'::jsonb
+				END) match_item
+				WHERE h2h_chunk.season_id = ${publicationAlias}.season_id
+				  AND h2h_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND h2h_chunk.event_id = ${publicationAlias}.event_id
+				  AND h2h_chunk.revision = ${publicationAlias}.revision
+				  AND h2h_chunk.section_key = 'H2H_FIXTURES'
+				  AND (${h2hMatchInvalid()})
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM competition.tournament_review_publication_chunks h2h_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(h2h_chunk.items) = 'array' THEN h2h_chunk.items
+					ELSE '[]'::jsonb
+				END) standing_item
+				WHERE h2h_chunk.season_id = ${publicationAlias}.season_id
+				  AND h2h_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND h2h_chunk.event_id = ${publicationAlias}.event_id
+				  AND h2h_chunk.revision = ${publicationAlias}.revision
+				  AND h2h_chunk.section_key = 'H2H_STANDINGS'
+				  AND (${h2hStandingInvalid})
+			)
+			AND NOT EXISTS (
+				SELECT standing_item->>'entryId'
+				FROM competition.tournament_review_publication_chunks h2h_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(h2h_chunk.items) = 'array' THEN h2h_chunk.items
+					ELSE '[]'::jsonb
+				END) standing_item
+				WHERE h2h_chunk.season_id = ${publicationAlias}.season_id
+				  AND h2h_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND h2h_chunk.event_id = ${publicationAlias}.event_id
+				  AND h2h_chunk.revision = ${publicationAlias}.revision
+				  AND h2h_chunk.section_key = 'H2H_STANDINGS'
+				GROUP BY standing_item->>'entryId'
+				HAVING count(*) <> 1
+			)
+			AND (
+				SELECT count(*)::numeric
+				FROM competition.tournament_review_publication_chunks h2h_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(h2h_chunk.items) = 'array' THEN h2h_chunk.items
+					ELSE '[]'::jsonb
+				END) match_item
+				WHERE h2h_chunk.season_id = ${publicationAlias}.season_id
+				  AND h2h_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND h2h_chunk.event_id = ${publicationAlias}.event_id
+				  AND h2h_chunk.revision = ${publicationAlias}.revision
+				  AND h2h_chunk.section_key = 'H2H_FIXTURES'
+			) = ${publicationAlias}.row_count
+			AND (
+				SELECT count(*)::numeric
+				FROM competition.tournament_review_publication_chunks h2h_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(h2h_chunk.items) = 'array' THEN h2h_chunk.items
+					ELSE '[]'::jsonb
+				END) standing_item
+				WHERE h2h_chunk.season_id = ${publicationAlias}.season_id
+				  AND h2h_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND h2h_chunk.event_id = ${publicationAlias}.event_id
+				  AND h2h_chunk.revision = ${publicationAlias}.revision
+				  AND h2h_chunk.section_key = 'H2H_STANDINGS'
+			) = ${publicationAlias}.ready_subject_count
+			AND NOT EXISTS (
+				SELECT 1
+				FROM competition.tournament_review_publication_chunks h2h_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(h2h_chunk.items) = 'array' THEN h2h_chunk.items
+					ELSE '[]'::jsonb
+				END) match_item
+				CROSS JOIN LATERAL (VALUES (match_item->'home'), (match_item->'away')) AS side(value)
+				WHERE h2h_chunk.season_id = ${publicationAlias}.season_id
+				  AND h2h_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND h2h_chunk.event_id = ${publicationAlias}.event_id
+				  AND h2h_chunk.revision = ${publicationAlias}.revision
+				  AND h2h_chunk.section_key = 'H2H_FIXTURES'
+				  AND jsonb_typeof(side.value) = 'object'
+				  AND side.value->>'isAverage' = 'false'
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM competition.tournament_review_publication_chunks standing_chunk
+					CROSS JOIN LATERAL jsonb_array_elements(CASE
+						WHEN jsonb_typeof(standing_chunk.items) = 'array' THEN standing_chunk.items
+						ELSE '[]'::jsonb
+					END) standing_item
+					WHERE standing_chunk.season_id = ${publicationAlias}.season_id
+					  AND standing_chunk.tournament_id = ${publicationAlias}.tournament_id
+					  AND standing_chunk.event_id = ${publicationAlias}.event_id
+					  AND standing_chunk.revision = ${publicationAlias}.revision
+					  AND standing_chunk.section_key = 'H2H_STANDINGS'
+					  AND standing_item->>'groupId' = match_item->>'groupId'
+					  AND standing_item->>'entryId' = side.value->>'entryId'
+				  )
+			)
+			AND NOT EXISTS (
+				SELECT 1
+				FROM competition.tournament_review_publication_chunks standing_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(standing_chunk.items) = 'array' THEN standing_chunk.items
+					ELSE '[]'::jsonb
+				END) standing_item
+				WHERE standing_chunk.season_id = ${publicationAlias}.season_id
+				  AND standing_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND standing_chunk.event_id = ${publicationAlias}.event_id
+				  AND standing_chunk.revision = ${publicationAlias}.revision
+				  AND standing_chunk.section_key = 'H2H_STANDINGS'
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM competition.tournament_review_publication_chunks fixture_chunk
+					CROSS JOIN LATERAL jsonb_array_elements(CASE
+						WHEN jsonb_typeof(fixture_chunk.items) = 'array' THEN fixture_chunk.items
+						ELSE '[]'::jsonb
+					END) match_item
+					CROSS JOIN LATERAL (VALUES (match_item->'home'), (match_item->'away')) AS side(value)
+					WHERE fixture_chunk.season_id = ${publicationAlias}.season_id
+					  AND fixture_chunk.tournament_id = ${publicationAlias}.tournament_id
+					  AND fixture_chunk.event_id = ${publicationAlias}.event_id
+					  AND fixture_chunk.revision = ${publicationAlias}.revision
+					  AND fixture_chunk.section_key = 'H2H_FIXTURES'
+					  AND jsonb_typeof(side.value) = 'object'
+					  AND side.value->>'isAverage' = 'false'
+					  AND side.value->>'entryId' = standing_item->>'entryId'
+					  AND match_item->>'groupId' = standing_item->>'groupId'
+				  )
+			)
+		)
+	)
+	AND (
+		${publicationAlias}.format <> 'KNOCKOUT'
+		OR (
+			NOT EXISTS (
+				SELECT 1
+				FROM competition.tournament_review_publication_chunks knockout_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(knockout_chunk.items) = 'array' THEN knockout_chunk.items
+					ELSE '[]'::jsonb
+				END) knockout_item
+				WHERE knockout_chunk.season_id = ${publicationAlias}.season_id
+				  AND knockout_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND knockout_chunk.event_id = ${publicationAlias}.event_id
+				  AND knockout_chunk.revision = ${publicationAlias}.revision
+				  AND knockout_chunk.section_key = 'KNOCKOUT_BRACKET'
+				  AND (${knockoutMatchInvalid()})
+			)
+			AND NOT EXISTS (
+				SELECT knockout_item->>'matchId', knockout_item->>'playAgainstId'
+				FROM competition.tournament_review_publication_chunks knockout_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(knockout_chunk.items) = 'array' THEN knockout_chunk.items
+					ELSE '[]'::jsonb
+				END) knockout_item
+				WHERE knockout_chunk.season_id = ${publicationAlias}.season_id
+				  AND knockout_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND knockout_chunk.event_id = ${publicationAlias}.event_id
+				  AND knockout_chunk.revision = ${publicationAlias}.revision
+				  AND knockout_chunk.section_key = 'KNOCKOUT_BRACKET'
+				GROUP BY knockout_item->>'matchId', knockout_item->>'playAgainstId'
+				HAVING count(*) <> 1
+			)
+			AND (
+				SELECT count(*)::numeric
+				FROM competition.tournament_review_publication_chunks knockout_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(knockout_chunk.items) = 'array' THEN knockout_chunk.items
+					ELSE '[]'::jsonb
+				END) knockout_item
+				WHERE knockout_chunk.season_id = ${publicationAlias}.season_id
+				  AND knockout_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND knockout_chunk.event_id = ${publicationAlias}.event_id
+				  AND knockout_chunk.revision = ${publicationAlias}.revision
+				  AND knockout_chunk.section_key = 'KNOCKOUT_BRACKET'
+			) = ${publicationAlias}.row_count
+			AND (
+				SELECT count(DISTINCT side.value->>'entryId')::numeric
+				FROM competition.tournament_review_publication_chunks knockout_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(knockout_chunk.items) = 'array' THEN knockout_chunk.items
+					ELSE '[]'::jsonb
+				END) knockout_item
+				CROSS JOIN LATERAL (VALUES (knockout_item->'home'), (knockout_item->'away')) AS side(value)
+				WHERE knockout_chunk.season_id = ${publicationAlias}.season_id
+				  AND knockout_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND knockout_chunk.event_id = ${publicationAlias}.event_id
+				  AND knockout_chunk.revision = ${publicationAlias}.revision
+				  AND knockout_chunk.section_key = 'KNOCKOUT_BRACKET'
+				  AND jsonb_typeof(side.value) = 'object'
+			) <= ${publicationAlias}.expected_subject_count
+			AND (
+				SELECT count(DISTINCT side.value->>'entryId') FILTER (WHERE side.value->>'applicable' = 'true')::numeric
+				FROM competition.tournament_review_publication_chunks knockout_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(knockout_chunk.items) = 'array' THEN knockout_chunk.items
+					ELSE '[]'::jsonb
+				END) knockout_item
+				CROSS JOIN LATERAL (VALUES (knockout_item->'home'), (knockout_item->'away')) AS side(value)
+				WHERE knockout_chunk.season_id = ${publicationAlias}.season_id
+				  AND knockout_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND knockout_chunk.event_id = ${publicationAlias}.event_id
+				  AND knockout_chunk.revision = ${publicationAlias}.revision
+				  AND knockout_chunk.section_key = 'KNOCKOUT_BRACKET'
+				  AND jsonb_typeof(side.value) = 'object'
+			) <= ${publicationAlias}.ready_subject_count
+			AND (
+				SELECT count(DISTINCT side.value->>'entryId') FILTER (WHERE side.value->>'applicable' = 'false')::numeric
+				FROM competition.tournament_review_publication_chunks knockout_chunk
+				CROSS JOIN LATERAL jsonb_array_elements(CASE
+					WHEN jsonb_typeof(knockout_chunk.items) = 'array' THEN knockout_chunk.items
+					ELSE '[]'::jsonb
+				END) knockout_item
+				CROSS JOIN LATERAL (VALUES (knockout_item->'home'), (knockout_item->'away')) AS side(value)
+				WHERE knockout_chunk.season_id = ${publicationAlias}.season_id
+				  AND knockout_chunk.tournament_id = ${publicationAlias}.tournament_id
+				  AND knockout_chunk.event_id = ${publicationAlias}.event_id
+				  AND knockout_chunk.revision = ${publicationAlias}.revision
+				  AND knockout_chunk.section_key = 'KNOCKOUT_BRACKET'
+				  AND jsonb_typeof(side.value) = 'object'
+			) <= ${publicationAlias}.not_applicable_subject_count
+		)
 	)
 	AND ${publicationAlias}.content_sha256 ~ '^[0-9a-f]{64}$'
 	AND CASE

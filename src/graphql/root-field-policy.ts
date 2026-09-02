@@ -146,6 +146,7 @@ add(
 		"tournament",
 		"tournamentLiveParticipants",
 		"tournamentDetailDesk",
+		"leagueLiveHead",
 		"entryLiveCompetitionBoard",
 		"myFplCompetitionSetupStatus",
 		"myTournamentGameweekReview",
