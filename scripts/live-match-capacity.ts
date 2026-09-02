@@ -1070,6 +1070,17 @@ function semanticError(body: unknown): string | null {
 	const detailReasonCodes = Array.isArray(detailDelivery?.reasonCodes)
 		? detailDelivery.reasonCodes.filter((value): value is string => typeof value === "string")
 		: [];
+	const finalizedDescriptorOnly = snapshot.state === "FINALIZED";
+	const expectedMetadataOnlyRootReasons = finalizedDescriptorOnly
+		? ["REDIS_CURRENT", "DETAIL_OR_DESK_DEGRADED", "FINAL_CHECKPOINT_PENDING"]
+		: ["REDIS_CURRENT", "DETAIL_OR_DESK_DEGRADED"];
+	const expectedMetadataOnlyDetailReasons = finalizedDescriptorOnly
+		? ["FINAL_CHECKPOINT_PENDING"]
+		: ["DETAIL_METADATA_ONLY"];
+	const hasExactReasonCodes = (actual: readonly string[], expected: readonly string[]): boolean =>
+		actual.length === expected.length &&
+		new Set(actual).size === expected.length &&
+		actual.every((reason) => expected.includes(reason));
 	// HEAD is allowed to report a started match as DEGRADED while it observes
 	// only the compact detail manifest. This is a valid metadata observation,
 	// not a healthy FULL payload; keep the exception exact so stale/fallback or
@@ -1080,15 +1091,10 @@ function semanticError(body: unknown): string | null {
 		/^[0-9a-f]{64}$/.test(detailObservation) &&
 		deliveryState === "DEGRADED" &&
 		delivery?.servedFrom === "REDIS_CURRENT" &&
-		rootReasonCodes.includes("REDIS_CURRENT") &&
-		rootReasonCodes.includes("DETAIL_OR_DESK_DEGRADED") &&
-		rootReasonCodes.every(
-			(reason) => reason === "REDIS_CURRENT" || reason === "DETAIL_OR_DESK_DEGRADED"
-		) &&
+		hasExactReasonCodes(rootReasonCodes, expectedMetadataOnlyRootReasons) &&
 		detailDelivery?.state === "DEGRADED" &&
 		detailDelivery.servedFrom === "REDIS_CURRENT" &&
-		detailReasonCodes.length === 1 &&
-		detailReasonCodes[0] === "DETAIL_METADATA_ONLY";
+		hasExactReasonCodes(detailReasonCodes, expectedMetadataOnlyDetailReasons);
 	if (mode === "HEAD" && detailReasonCodes.includes("DETAIL_METADATA_ONLY") && !metadataOnlyHead)
 		return "invalid_metadata_only_delivery";
 	if (deliveryState !== "FRESH" && deliveryState !== "FINAL" && !metadataOnlyHead)

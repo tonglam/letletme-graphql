@@ -65,6 +65,9 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("playerValue.price < 0");
 		expect(capacitySource).toContain("metadataOnlyHead");
 		expect(capacitySource).toContain("detailObservation");
+		expect(capacitySource).toContain("expectedMetadataOnlyRootReasons");
+		expect(capacitySource).toContain("expectedMetadataOnlyDetailReasons");
+		expect(capacitySource).toContain("hasExactReasonCodes");
 		expect(capacitySource).toContain('typeof detailObservation === "string"');
 		expect(capacitySource).toContain('"DETAIL_METADATA_ONLY"');
 		expect(capacitySource).not.toContain("playerValue.price <= 0");
