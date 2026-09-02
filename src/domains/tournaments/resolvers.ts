@@ -722,21 +722,31 @@ const rebaseH2HProjection = (
 	value: TournamentOfficialH2HProjectionV2,
 	headRead: H2HLeaguePublicationReadV2,
 	standingsRead: H2HLeaguePublicationReadV2 | null,
-	standingsGlobalValidated?: boolean
+	standingsGlobalValidated?: boolean,
+	projectionUsedProcessLkg = false
 ): TournamentOfficialH2HProjectionV2 => {
 	const servedAt = new Date().toISOString();
 	const currentTimes = h2hLeagueTimesV2(headRead.publication, servedAt);
-	const servedFrom = headRead.servedFrom;
+	const servedFrom = projectionUsedProcessLkg ? "PROCESS_LKG" : headRead.servedFrom;
 	const fallback = servedFrom !== "REDIS_CURRENT";
 	const baseDelivery = h2hLeagueDeliveryV2(headRead);
 	const delivery = {
 		...baseDelivery,
 		state: fallback ? "DEGRADED" : baseDelivery.state,
 		servedFrom,
-		reasonCodes: baseDelivery.reasonCodes,
+		reasonCodes: [
+			...new Set([
+				...baseDelivery.reasonCodes,
+				...(projectionUsedProcessLkg ? ["PROJECTION_CACHE_FALLBACK"] : []),
+			]),
+		],
 	};
 	const matches = value.matches.map((match) => {
-		const matchServedFrom = worstDeliverySource([match.delivery.servedFrom, headRead.servedFrom]);
+		const matchServedFrom = worstDeliverySource([
+			match.delivery.servedFrom,
+			headRead.servedFrom,
+			...(projectionUsedProcessLkg ? ["PROCESS_LKG"] : []),
+		]);
 		const matchFallback = matchServedFrom !== "REDIS_CURRENT" && matchServedFrom !== "FINAL_RESULT";
 		const times = h2hMatchTimesV2(match.times.sourceCheckedAt, servedAt, currentTimes);
 		const deliveryState = h2hMatchFreshnessStateV2(
@@ -827,20 +837,36 @@ const readTournamentOfficialH2HV2 = async (
 		headRead.publication,
 		standingsRead?.publication ?? null
 	);
+	const headGlobalRead = await readLivePublicationByRefV2(
+		context,
+		eventId,
+		headRead.publication.globalRef
+	).catch(() => null);
+	const headGlobal =
+		headGlobalRead && h2hPublicationMatchesGlobal(headRead.publication, headGlobalRead)
+			? headGlobalRead
+			: null;
 	const cached = readH2HProjection(projectionKey);
-	if (cached) return rebaseH2HProjection(cached, headRead, standingsRead, standingsGlobalValidated);
+	if (cached)
+		return rebaseH2HProjection(
+			cached,
+			headRead,
+			standingsRead,
+			standingsGlobalValidated,
+			headGlobal === null
+		);
 	const existing = h2hProjectionInFlight.get(projectionKey);
 	if (existing)
-		return rebaseH2HProjection(await existing, headRead, standingsRead, standingsGlobalValidated);
+		return rebaseH2HProjection(
+			await existing,
+			headRead,
+			standingsRead,
+			standingsGlobalValidated,
+			headGlobal === null
+		);
 	const project = async (): Promise<TournamentOfficialH2HProjectionV2> => {
 		const publication = headRead.publication;
-		const globalRead = await readLivePublicationByRefV2(
-			context,
-			eventId,
-			publication.globalRef
-		).catch(() => null);
-		const global =
-			globalRead && h2hPublicationMatchesGlobal(publication, globalRead) ? globalRead : null;
+		const global = headGlobal;
 		const delivery = h2hLeagueDeliveryV2(headRead);
 		const revisions = h2hRevisionVector(publication);
 		const times = h2hLeagueTimesV2(publication);

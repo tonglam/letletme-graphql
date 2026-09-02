@@ -14,7 +14,6 @@ import {
 	type LeagueLiveScope,
 } from "./league-v2";
 import {
-	LIVE_POINTS_ALGORITHM_VERSION,
 	projectLivePointsFromPublishedEntryV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
@@ -186,6 +185,11 @@ const canonical = (value: unknown): string => {
 
 const digest = (value: unknown): string =>
 	createHash("sha256").update(canonical(value), "utf8").digest("hex");
+
+// Data stores the Classic league algorithm identity as the hash of this
+// producer representation. The GraphQL guard must compare the same revision,
+// not the human-readable live-points algorithm label.
+const LIVE_LEAGUE_CLASSIC_ALGORITHM_REVISION = digest("live-league-v2:classic:1");
 
 export const normalizeEntryLiveCompetitionBoardRequestV2 = (
 	value: unknown
@@ -753,7 +757,7 @@ const projectCompleteBoard = async (
 		read.publication.revisions.fixtureIdentity !==
 			global.publication.revisions.fixtureIdentity.revision ||
 		read.publication.revisions.rules !== global.publication.revisions.rules.revision ||
-		read.publication.revisions.algorithm !== LIVE_POINTS_ALGORITHM_VERSION
+		read.publication.revisions.algorithm !== LIVE_LEAGUE_CLASSIC_ALGORITHM_REVISION
 	)
 		throw new Error("LEAGUE_GLOBAL_REVISION_MISMATCH");
 	if (read.index.length > MAX_PROJECTION_ENTRIES) throw new Error("LEAGUE_PUBLICATION_TOO_LARGE");
