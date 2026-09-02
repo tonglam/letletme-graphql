@@ -151,6 +151,35 @@ export const validateCapacityHealthEndpoint = (url: URL): void => {
 	}
 };
 
+const normalizedRoutePath = (url: URL): string => url.pathname.replace(/\/+$/, "") || "/";
+
+const isApiAliasHostname = (left: string, right: string): boolean =>
+	left === `api.${right}` || right === `api.${left}`;
+
+const validateCapacityHealthBinding = (loadEndpoint: URL, healthEndpoint: URL): void => {
+	validateCapacityHealthEndpoint(healthEndpoint);
+	if (loadEndpoint.protocol !== healthEndpoint.protocol) {
+		throw new Error("capacity health URLs must use the load endpoint protocol");
+	}
+	if (loadEndpoint.origin === healthEndpoint.origin) return;
+
+	const loopbackAlias =
+		isLoopbackHostname(loadEndpoint.hostname) &&
+		isLoopbackHostname(healthEndpoint.hostname) &&
+		loadEndpoint.port === healthEndpoint.port;
+	const apiAlias = isApiAliasHostname(loadEndpoint.hostname, healthEndpoint.hostname);
+	if (!loopbackAlias && !apiAlias) {
+		throw new Error("cross-origin capacity health URLs must use the load target or its api alias");
+	}
+	if (apiAlias) {
+		const loadPath = normalizedRoutePath(loadEndpoint);
+		const healthPath = normalizedRoutePath(healthEndpoint);
+		if (loadPath === "/" || !healthPath.startsWith(`${loadPath}/health/`)) {
+			throw new Error("cross-origin capacity health URLs must be bound to the load route");
+		}
+	}
+};
+
 const endpoint = new URL(required("LIVE_MATCH_LOAD_URL"));
 const serviceToken = required("LIVE_MATCH_GRAPHQL_SERVICE_TOKEN");
 const contractHeader = "live-matches-v3";
@@ -199,7 +228,7 @@ if (!/^[0-9a-f]{40}$/.test(expectedDeploySha)) {
 const configuredHealthEndpoint = (name: string, defaultPath: string): URL => {
 	const configured = process.env[name]?.trim();
 	const url = configured ? new URL(configured) : new URL(defaultPath, endpoint.origin);
-	validateCapacityHealthEndpoint(url);
+	validateCapacityHealthBinding(endpoint, url);
 	return url;
 };
 

@@ -54,6 +54,14 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("waitForHttp2Capacity");
 		expect(capacitySource).toContain("runtimeReadinessSamples");
 		expect(capacitySource).toContain("validateCapacityHealthEndpoint");
+		expect(capacitySource).toContain("validateCapacityHealthBinding");
+		expect(capacitySource).toContain(
+			"cross-origin capacity health URLs must use the load target or its api alias"
+		);
+		expect(capacitySource).toContain(
+			"cross-origin capacity health URLs must be bound to the load route"
+		);
+		expect(capacitySource).toContain("isApiAliasHostname");
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL");
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_READY_HEALTH_URL");
 		expect(capacitySource).toContain('"/health/ready"');
@@ -88,6 +96,28 @@ describe("PostgreSQL pool observability", () => {
 		);
 		expect(rendered).toContain(
 			'live_match_fallback_total{component="desk",source="REDIS_PREVIOUS"} 0'
+		);
+	});
+
+	it("fails closed when health overrides target an unrelated deployment", async () => {
+		const child = Bun.spawn(["bun", "scripts/live-match-capacity.ts", "--mode=HEAD"], {
+			cwd: process.cwd(),
+			env: {
+				...Bun.env,
+				LIVE_MATCH_LOAD_URL: "https://letletme.top/api/graphql",
+				LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+				LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+				LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL: "https://unrelated.example/health/deploy",
+				LIVE_MATCH_LOAD_STAGES: "1",
+			},
+			stderr: "pipe",
+			stdout: "pipe",
+		});
+		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain(
+			"cross-origin capacity health URLs must use the load target or its api alias"
 		);
 	});
 });
