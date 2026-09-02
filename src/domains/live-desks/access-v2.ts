@@ -30,9 +30,18 @@ const LIVE_TOURNAMENT_ACCESS_SQL = `
 					AND membership.entry_id = $3
 			) OR EXISTS (
 				SELECT 1
-				FROM competition.entry_leagues_with_tournament tracked
+				FROM competition.entry_leagues tracked
+				JOIN LATERAL (
+					SELECT candidate.tournament_id
+					FROM competition.tournaments candidate
+					WHERE candidate.season_id = tracked.season_id
+						AND candidate.league_id = tracked.league_id
+						AND candidate.league_type = tracked.league_type
+					ORDER BY candidate.tournament_id
+					LIMIT 1
+				) tracked_tournament ON TRUE
 				WHERE tracked.season_id = $1
-					AND tracked.tournament_id = tournament.tournament_id
+					AND tracked_tournament.tournament_id = tournament.tournament_id
 					AND tracked.entry_id = $3
 			)
 		) AS member
