@@ -453,6 +453,34 @@ describe("Live Matches V3 read path", () => {
 		expect(second.detail?.fixtures).toBe(first.detail?.fixtures);
 	});
 
+	it("coalesces concurrent reads for the same scope without serving a completed read", async () => {
+		const redis = new TestRedis();
+		const bundle = buildBundle().bundle;
+		let evalCalls = 0;
+		let release: ((value: string) => void) | undefined;
+		const pending = new Promise<string>((resolve) => {
+			release = resolve;
+		});
+		(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async () => {
+			evalCalls += 1;
+			return pending;
+		};
+		const context = buildSnapshotContext(redis);
+
+		const reads = Array.from({ length: 8 }, () => readLiveMatchday(context, 1, "FULL"));
+		await Promise.resolve();
+		expect(evalCalls).toBe(1);
+		release?.(JSON.stringify(bundle));
+
+		const results = await Promise.all(reads);
+		expect(evalCalls).toBe(1);
+		expect(results.every((result) => result.desk?.servedFrom === "REDIS_CURRENT")).toBe(true);
+		expect(results.every((result) => result.detail?.servedFrom === "REDIS_CURRENT")).toBe(true);
+
+		await readLiveMatchday(context, 1, "FULL");
+		expect(evalCalls).toBe(2);
+	});
+
 	it("does not reuse a verified decode after the Redis publication changes", async () => {
 		const redis = new TestRedis();
 		const bundle = attachBundle(redis, buildBundle().bundle);
