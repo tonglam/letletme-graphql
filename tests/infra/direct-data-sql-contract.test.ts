@@ -35,6 +35,7 @@ import {
 	PRICE_CHANGE_PUBLICATION_CONTRACT_SQL,
 } from "../../src/infra/price-change-predictions-client";
 import { TRENDS_CONTRACT_PUBLICATION_ID_SQL } from "../../src/domains/trends/repository";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../src/contracts/data-fixture-identities";
 
 const mockContractResultType = (relation: string, column: string, jsonType: string): string => {
 	const assertion = DIRECT_DATA_SQL_CONTRACT.flatMap((probe) => probe.resultTypes ?? []).find(
@@ -747,6 +748,14 @@ describe("direct Data SQL contract", () => {
 				}),
 			])
 		);
+	});
+
+	test("binds the live tournament access probe to the disposable authority fixture", () => {
+		const probe = DIRECT_DATA_SQL_CONTRACT.find(
+			(candidate) => candidate.name === "live-tournament-access-v2.cold-fallback"
+		);
+		expect(probe?.values).toEqual([2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1]);
+		expect(probe?.runtime).toBe("must-return-row");
 	});
 
 	test("contains the direct reporting relations and only read statements", () => {

@@ -2,6 +2,7 @@ import { GraphQLError } from "graphql";
 
 import type { GraphQLContext } from "../../graphql/context";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
+import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import {
 	hasPlatformAdminAccess,
 	hasVerifiedEntry,
@@ -56,7 +57,7 @@ export const LIVE_TOURNAMENT_ACCESS_DATA_SQL_CONTRACT: readonly DataSqlContractP
 	{
 		name: "live-tournament-access-v2.cold-fallback",
 		sql: LIVE_TOURNAMENT_ACCESS_SQL,
-		values: [2026, 1, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1],
 		runtime: "must-return-row",
 	},
 ];
