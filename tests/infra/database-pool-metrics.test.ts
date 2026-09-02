@@ -109,6 +109,10 @@ describe("PostgreSQL pool observability", () => {
 				"https://api.letletme.top/api/graphql/health/deploy?",
 				"capacity health URLs must not include a query string",
 			],
+			[
+				"https://api.letletme.top:8443/api/graphql/health/deploy",
+				"cross-origin capacity health URLs must preserve the load endpoint port",
+			],
 		] as const) {
 			const child = Bun.spawn(["bun", "scripts/live-match-capacity.ts", "--mode=HEAD"], {
 				cwd: process.cwd(),

@@ -156,6 +156,8 @@ const normalizedRoutePath = (url: URL): string => url.pathname.replace(/\/+$/, "
 const isApiAliasHostname = (left: string, right: string): boolean =>
 	left === `api.${right}` || right === `api.${left}`;
 
+const effectivePort = (url: URL): string => url.port || (url.protocol === "https:" ? "443" : "80");
+
 const validateCapacityHealthBinding = (loadEndpoint: URL, healthEndpoint: URL): void => {
 	validateCapacityHealthEndpoint(healthEndpoint);
 	if (loadEndpoint.protocol !== healthEndpoint.protocol) {
@@ -166,12 +168,15 @@ const validateCapacityHealthBinding = (loadEndpoint: URL, healthEndpoint: URL): 
 	const loopbackAlias =
 		isLoopbackHostname(loadEndpoint.hostname) &&
 		isLoopbackHostname(healthEndpoint.hostname) &&
-		loadEndpoint.port === healthEndpoint.port;
+		effectivePort(loadEndpoint) === effectivePort(healthEndpoint);
 	const apiAlias = isApiAliasHostname(loadEndpoint.hostname, healthEndpoint.hostname);
 	if (!loopbackAlias && !apiAlias) {
 		throw new Error("cross-origin capacity health URLs must use the load target or its api alias");
 	}
 	if (apiAlias) {
+		if (effectivePort(loadEndpoint) !== effectivePort(healthEndpoint)) {
+			throw new Error("cross-origin capacity health URLs must preserve the load endpoint port");
+		}
 		const loadPath = normalizedRoutePath(loadEndpoint);
 		const healthPath = normalizedRoutePath(healthEndpoint);
 		if (loadPath === "/" || !healthPath.startsWith(`${loadPath}/health/`)) {
