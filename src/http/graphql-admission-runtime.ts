@@ -29,6 +29,7 @@ import {
 import { handleRateLimitStorageFailure } from "./security";
 import {
 	checkTokenBucketStageV3,
+	checkTokenBucketStageV3WithGlobalSafety,
 	type GraphQLRateLimitHeaderScope,
 	type TokenBucketCheckV3,
 	type TokenBucketStageResultV3,
@@ -65,6 +66,14 @@ const shouldEnforceRateLimitDecision = (
 	decision: TokenBucketStageResultV3,
 	enforce: boolean
 ): boolean => enforce || (isGraphQLRateLimitShadowMode && decision.deniedScope === "global");
+
+export const rateLimitStorageFailureShouldFailClosed = ({
+	checks,
+	enforce,
+}: {
+	checks: readonly Pick<TokenBucketCheckV3, "scope">[];
+	enforce: boolean;
+}): boolean => enforce || checks.some((check) => check.scope === "global");
 
 export const graphQLVersionedPreAuthRateLimitChecks = (
 	ingress: GraphQLIngress
@@ -106,19 +115,29 @@ export type GraphQLRateLimitStageExecution = {
 	readonly v3Decision?: TokenBucketStageResultV3;
 };
 
-export const checkV3GraphQLRateLimits = async ({
-	checks,
-	corsHeaders,
-	enforce,
-	rateLimitWorkload,
-}: {
+type GraphQLRateLimitCheckRequest = {
 	checks: readonly TokenBucketCheckV3[];
 	corsHeaders: Record<string, string>;
 	enforce: boolean;
 	rateLimitWorkload?: string;
+};
+
+type TokenBucketStageChecker = (
+	redis: ReturnType<typeof getRateLimitRedis>,
+	checks: readonly TokenBucketCheckV3[]
+) => Promise<TokenBucketStageResultV3>;
+
+const checkGraphQLRateLimits = async ({
+	checks,
+	corsHeaders,
+	enforce,
+	rateLimitWorkload,
+	evaluate,
+}: GraphQLRateLimitCheckRequest & {
+	evaluate: TokenBucketStageChecker;
 }): Promise<{ response: Response | null; decision?: TokenBucketStageResultV3 }> => {
 	try {
-		const decision = await checkTokenBucketStageV3(getRateLimitRedis(), checks);
+		const decision = await evaluate(getRateLimitRedis(), checks);
 		if (!decision.allowed && shouldEnforceRateLimitDecision(decision, enforce)) {
 			return {
 				decision,
@@ -138,7 +157,10 @@ export const checkV3GraphQLRateLimits = async ({
 		try {
 			handleRateLimitStorageFailure({
 				error,
-				failClosed: enforce || isGraphQLRateLimitShadowMode,
+				// Shadow mode must not turn an observational bucket outage into a
+				// 503. The global emergency valve remains fail-closed even when
+				// the client/workload buckets are only being observed.
+				failClosed: rateLimitStorageFailureShouldFailClosed({ checks, enforce }),
 				scope,
 				logger,
 			});
@@ -156,6 +178,16 @@ export const checkV3GraphQLRateLimits = async ({
 	}
 };
 
+export const checkV3GraphQLRateLimits = async (
+	request: GraphQLRateLimitCheckRequest
+): Promise<{ response: Response | null; decision?: TokenBucketStageResultV3 }> =>
+	checkGraphQLRateLimits({ ...request, evaluate: checkTokenBucketStageV3 });
+
+const checkV3GraphQLRateLimitsWithGlobalSafety = async (
+	request: GraphQLRateLimitCheckRequest
+): Promise<{ response: Response | null; decision?: TokenBucketStageResultV3 }> =>
+	checkGraphQLRateLimits({ ...request, evaluate: checkTokenBucketStageV3WithGlobalSafety });
+
 export const runGraphQLRateLimitStage = async ({
 	v3Checks,
 	corsHeaders,
@@ -166,32 +198,19 @@ export const runGraphQLRateLimitStage = async ({
 	rateLimitWorkload?: string;
 }): Promise<GraphQLRateLimitStageExecution> => {
 	if (v3Checks.length === 0) return { response: null };
-	// In shadow mode the global emergency valve is still enforcing. Evaluate it
-	// separately so an observational client/workload denial cannot suppress the
-	// global debit or turn a global outage into an allowed request.
+	// In shadow mode the global emergency valve is still enforcing. The combined
+	// script evaluates it atomically with observational buckets, while preserving
+	// the rule that an observational denial cannot suppress the global debit.
 	if (isGraphQLRateLimitShadowMode && v3Checks.length > 1) {
 		const globalChecks = v3Checks.filter((check) => check.scope === "global");
 		const observationalChecks = v3Checks.filter((check) => check.scope !== "global");
 		if (globalChecks.length > 0 && observationalChecks.length > 0) {
-			const global = await checkV3GraphQLRateLimits({
-				checks: globalChecks,
-				corsHeaders,
-				enforce: true,
-				rateLimitWorkload,
-			});
-			if (global.response || observationalChecks.length === 0) {
-				return { response: global.response, v3Decision: global.decision };
-			}
-			const observational = await checkV3GraphQLRateLimits({
-				checks: observationalChecks,
+			return checkV3GraphQLRateLimitsWithGlobalSafety({
+				checks: [...globalChecks, ...observationalChecks],
 				corsHeaders,
 				enforce: false,
 				rateLimitWorkload,
 			});
-			return {
-				response: observational.response,
-				v3Decision: observational.decision,
-			};
 		}
 	}
 	const v3 = await checkV3GraphQLRateLimits({

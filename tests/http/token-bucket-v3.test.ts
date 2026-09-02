@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type Redis from "ioredis";
 import {
+	TOKEN_BUCKET_V3_GLOBAL_SAFETY_SCRIPT,
 	TOKEN_BUCKET_V3_SCRIPT,
 	checkTokenBucketStageV3,
+	checkTokenBucketStageV3WithGlobalSafety,
 	evaluateTokenBucketStageV3,
 	tokenBucketKeyV3,
 } from "../../src/http/token-bucket-v3";
@@ -44,6 +46,40 @@ describe("Redis token bucket v3", () => {
 		expect(TOKEN_BUCKET_V3_SCRIPT).toContain("redis.call('TIME')");
 		expect(TOKEN_BUCKET_V3_SCRIPT).toContain(
 			"if allowed then remaining = remaining - state.cost_milli end"
+		);
+	});
+
+	it("evaluates global safety and observational buckets in one atomic script", async () => {
+		const calls: unknown[][] = [];
+		const redis = {
+			eval: async (...args: unknown[]) => {
+				calls.push(args);
+				return [0, 2, 2, 5_000, 0];
+			},
+		} as unknown as Redis;
+		const result = await checkTokenBucketStageV3WithGlobalSafety(redis, stageChecks);
+
+		expect(result).toMatchObject({
+			allowed: false,
+			deniedScope: "client",
+			deniedBucketId: "client-weighted",
+		});
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.slice(1)).toEqual([
+			2,
+			"global",
+			"client",
+			"10",
+			"10",
+			"5",
+			"10",
+			"10",
+			"5",
+			"global",
+			"client",
+		]);
+		expect(TOKEN_BUCKET_V3_GLOBAL_SAFETY_SCRIPT).toContain(
+			"observational_allowed = observational_denied_index == 0"
 		);
 	});
 

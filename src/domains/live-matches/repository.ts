@@ -266,6 +266,139 @@ let postgresCircuitOpenUntil = 0;
 let postgresCircuitFailures = 0;
 const postgresReadFlights = new Map<string, Promise<PostgresCheckpointRead | null>>();
 
+// FULL reads verify immutable Redis bodies before they can be served. Keep a
+// small content-addressed decode cache so concurrent requests for the same
+// publication do not repeat JSON parsing, SHA verification, structural
+// validation, and aggregate detail hashing. The raw values remain part of
+// each entry's identity; a changed Redis value can never hit this cache.
+const LIVE_MATCH_DECODE_CACHE_LIMIT = 16;
+const LIVE_MATCH_DECODE_CACHE_MAX_BYTES = 4 * 1024 * 1024;
+
+type DeskDecodeCacheEntry = Readonly<{
+	bytes: number;
+	publication: string;
+	payload: string | null;
+	metadata: string | null;
+	value: MatchDeskCandidate | null;
+}>;
+
+type DetailDecodeCacheEntry = Readonly<{
+	bytes: number;
+	publication: string;
+	manifest: string | null;
+	items: readonly RedisDetailItemRaw[];
+	value: MatchDetailCandidate | null;
+}>;
+
+type RedisBundleDecodeCacheEntry = Readonly<{
+	bytes: number;
+	raw: string;
+	value: Omit<RedisReadBundle, "pointer">;
+}>;
+
+const processRedisBundleDecodeCache = new Map<string, RedisBundleDecodeCacheEntry>();
+const processDeskDecodeCache = new Map<string, DeskDecodeCacheEntry>();
+const processDetailDecodeCache = new Map<string, DetailDecodeCacheEntry>();
+let processRedisBundleDecodeCacheBytes = 0;
+let processDeskDecodeCacheBytes = 0;
+let processDetailDecodeCacheBytes = 0;
+
+const cacheStringBytes = (values: readonly (string | null)[]): number =>
+	values.reduce(
+		(total, value) => total + (value === null ? 0 : Buffer.byteLength(value, "utf8")),
+		0
+	);
+
+const boundedCacheBytes = (bytes: number): number => Math.min(Number.MAX_SAFE_INTEGER, bytes * 2);
+
+const canCacheDecodeEntry = (bytes: number): boolean => bytes <= LIVE_MATCH_DECODE_CACHE_MAX_BYTES;
+
+const touchRedisBundleDecodeCache = (key: string, entry: RedisBundleDecodeCacheEntry): void => {
+	const previous = processRedisBundleDecodeCache.get(key);
+	if (previous) processRedisBundleDecodeCacheBytes -= previous.bytes;
+	processRedisBundleDecodeCache.delete(key);
+	if (!canCacheDecodeEntry(entry.bytes)) return;
+	processRedisBundleDecodeCache.set(key, entry);
+	processRedisBundleDecodeCacheBytes += entry.bytes;
+	while (
+		processRedisBundleDecodeCache.size > LIVE_MATCH_DECODE_CACHE_LIMIT ||
+		processRedisBundleDecodeCacheBytes > LIVE_MATCH_DECODE_CACHE_MAX_BYTES
+	) {
+		const oldest = processRedisBundleDecodeCache.keys().next().value;
+		if (oldest === undefined) break;
+		const oldestEntry = processRedisBundleDecodeCache.get(oldest);
+		if (oldestEntry) processRedisBundleDecodeCacheBytes -= oldestEntry.bytes;
+		processRedisBundleDecodeCache.delete(oldest);
+	}
+};
+
+const decodeCacheScope = (season: string, eventId: number, publication: string): string =>
+	`${season}:${eventId}:${publication}`;
+
+const touchDeskDecodeCache = (key: string, entry: DeskDecodeCacheEntry): void => {
+	const previous = processDeskDecodeCache.get(key);
+	if (previous) processDeskDecodeCacheBytes -= previous.bytes;
+	processDeskDecodeCache.delete(key);
+	if (!canCacheDecodeEntry(entry.bytes)) return;
+	processDeskDecodeCache.set(key, entry);
+	processDeskDecodeCacheBytes += entry.bytes;
+	while (
+		processDeskDecodeCache.size > LIVE_MATCH_DECODE_CACHE_LIMIT ||
+		processDeskDecodeCacheBytes > LIVE_MATCH_DECODE_CACHE_MAX_BYTES
+	) {
+		const oldest = processDeskDecodeCache.keys().next().value;
+		if (oldest === undefined) break;
+		const oldestEntry = processDeskDecodeCache.get(oldest);
+		if (oldestEntry) processDeskDecodeCacheBytes -= oldestEntry.bytes;
+		processDeskDecodeCache.delete(oldest);
+	}
+};
+
+const touchDetailDecodeCache = (key: string, entry: DetailDecodeCacheEntry): void => {
+	const previous = processDetailDecodeCache.get(key);
+	if (previous) processDetailDecodeCacheBytes -= previous.bytes;
+	processDetailDecodeCache.delete(key);
+	if (!canCacheDecodeEntry(entry.bytes)) return;
+	processDetailDecodeCache.set(key, entry);
+	processDetailDecodeCacheBytes += entry.bytes;
+	while (
+		processDetailDecodeCache.size > LIVE_MATCH_DECODE_CACHE_LIMIT ||
+		processDetailDecodeCacheBytes > LIVE_MATCH_DECODE_CACHE_MAX_BYTES
+	) {
+		const oldest = processDetailDecodeCache.keys().next().value;
+		if (oldest === undefined) break;
+		const oldestEntry = processDetailDecodeCache.get(oldest);
+		if (oldestEntry) processDetailDecodeCacheBytes -= oldestEntry.bytes;
+		processDetailDecodeCache.delete(oldest);
+	}
+};
+
+const sameDetailRawItems = (
+	left: readonly RedisDetailItemRaw[],
+	right: readonly RedisDetailItemRaw[]
+): boolean =>
+	left.length === right.length &&
+	left.every((item, index) => {
+		const other = right[index];
+		return (
+			other !== undefined &&
+			item.fixtureId === other.fixtureId &&
+			item.key === other.key &&
+			item.payload === other.payload &&
+			item.metadata === other.metadata
+		);
+	});
+
+const reServeDeskCandidate = (
+	value: MatchDeskCandidate | null,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): MatchDeskCandidate | null => (value ? { ...value, servedFrom } : null);
+
+const reServeDetailCandidate = (
+	value: MatchDetailCandidate | null,
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
+): MatchDetailCandidate | null => (value ? { ...value, servedFrom } : null);
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -1230,6 +1363,21 @@ const decodeDeskCandidate = (
 	eventId: number,
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
 ): MatchDeskCandidate | null => {
+	const publicationRaw = raw.publication;
+	const cacheKey =
+		publicationRaw === null ? null : decodeCacheScope(season, eventId, publicationRaw);
+	if (publicationRaw !== null && cacheKey !== null) {
+		const cached = processDeskDecodeCache.get(cacheKey);
+		if (
+			cached &&
+			cached.publication === raw.publication &&
+			cached.payload === raw.payload &&
+			cached.metadata === raw.metadata
+		) {
+			touchDeskDecodeCache(cacheKey, cached);
+			return reServeDeskCandidate(cached.value, servedFrom);
+		}
+	}
 	const publication = parseDeskPublication(raw.publication, season, eventId);
 	if (
 		!publication ||
@@ -1242,18 +1390,29 @@ const decodeDeskCandidate = (
 		publication.desk,
 		(value): value is readonly MatchDeskFixture[] => validDeskPayload(value, eventId)
 	);
-	return fixtures &&
+	const value: MatchDeskCandidate | null =
+		fixtures &&
 		fixtures.length === publication.desk.count &&
 		deskRevisionsMatchPayload(publication, fixtures)
-		? {
-				publication,
-				fixtures,
-				fixtureCoverage: deskFixtureCoverage(fixtures),
-				fixtureTeamIds: deskFixtureTeamIds(fixtures),
-				payloadLoaded: true,
-				servedFrom,
-			}
-		: null;
+			? {
+					publication,
+					fixtures,
+					fixtureCoverage: deskFixtureCoverage(fixtures),
+					fixtureTeamIds: deskFixtureTeamIds(fixtures),
+					payloadLoaded: true,
+					servedFrom,
+				}
+			: null;
+	if (publicationRaw !== null && cacheKey !== null) {
+		touchDeskDecodeCache(cacheKey, {
+			bytes: boundedCacheBytes(cacheStringBytes([publicationRaw, raw.payload, raw.metadata])),
+			publication: publicationRaw,
+			payload: raw.payload,
+			metadata: raw.metadata,
+			value,
+		});
+	}
+	return value;
 };
 
 const decodeDeskMetadataCandidate = (
@@ -1310,8 +1469,26 @@ const decodeDetailCandidate = (
 	eventId: number,
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
 ): MatchDetailCandidate | null => {
+	const publicationRaw = raw.publication;
+	const cacheKey =
+		publicationRaw === null ? null : decodeCacheScope(season, eventId, publicationRaw);
+	if (publicationRaw !== null && cacheKey !== null) {
+		const cached = processDetailDecodeCache.get(cacheKey);
+		if (
+			cached &&
+			cached.publication === raw.publication &&
+			cached.manifest === raw.manifest &&
+			sameDetailRawItems(cached.items, raw.items)
+		) {
+			touchDetailDecodeCache(cacheKey, cached);
+			return reServeDetailCandidate(cached.value, servedFrom);
+		}
+	}
 	const publication = parseDetailPublication(raw.publication, season, eventId);
-	const manifest = parseDetailPublication(raw.manifest, season, eventId);
+	const manifest =
+		raw.manifest === raw.publication
+			? publication
+			: parseDetailPublication(raw.manifest, season, eventId);
 	if (
 		!publication ||
 		!manifest ||
@@ -1341,15 +1518,33 @@ const decodeDetailCandidate = (
 		byFixture.set(item.fixtureId, { fixtureId: item.fixtureId, players });
 	}
 	const fixtures = [...byFixture.values()];
-	if (sha256(fixtures) !== publication.detail.revision) return null;
-	return {
-		publication,
-		fixtures,
-		observationRevision: detailManifestObservationRevision(publication),
-		fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
-		payloadLoaded: true,
-		servedFrom,
-	};
+	const value: MatchDetailCandidate | null =
+		sha256(fixtures) === publication.detail.revision
+			? {
+					publication,
+					fixtures,
+					observationRevision: detailManifestObservationRevision(publication),
+					fixturePlayerTeamIds: detailFixturePlayerTeamIds(fixtures),
+					payloadLoaded: true,
+					servedFrom,
+				}
+			: null;
+	if (publicationRaw !== null && cacheKey !== null) {
+		touchDetailDecodeCache(cacheKey, {
+			bytes: boundedCacheBytes(
+				cacheStringBytes([
+					publicationRaw,
+					raw.manifest,
+					...raw.items.flatMap((item) => [item.key, item.payload, item.metadata]),
+				])
+			),
+			publication: publicationRaw,
+			manifest: raw.manifest,
+			items: raw.items,
+			value,
+		});
+	}
+	return value;
 };
 
 const decodeDetailObservation = (
@@ -1359,7 +1554,10 @@ const decodeDetailObservation = (
 	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS"
 ): MatchDetailObservation | null => {
 	const publication = parseDetailPublication(raw.publication, season, eventId);
-	const manifest = parseDetailPublication(raw.manifest, season, eventId);
+	const manifest =
+		raw.manifest === raw.publication
+			? publication
+			: parseDetailPublication(raw.manifest, season, eventId);
 	if (
 		!publication ||
 		!manifest ||
@@ -1411,6 +1609,11 @@ const readRedisBundle = async (
 		);
 		if (typeof raw !== "string") return null;
 		if (Buffer.byteLength(raw, "utf8") > LIVE_MATCH_MAX_REDIS_BUNDLE_BYTES) return null;
+		const cached = processRedisBundleDecodeCache.get(raw);
+		if (cached?.raw === raw) {
+			touchRedisBundleDecodeCache(raw, cached);
+			return { ...cached.value, pointer };
+		}
 		const value: unknown = JSON.parse(raw);
 		if (!isRecord(value) || !isRecord(value.desk) || !isRecord(value.detail)) return null;
 		const candidate = (input: unknown): RedisDeskRaw => {
@@ -1442,9 +1645,8 @@ const readRedisBundle = async (
 				items,
 			};
 		};
-		return {
+		const parsed: Omit<RedisReadBundle, "pointer"> = {
 			eventId: safeInteger(value.eventId),
-			pointer,
 			desk: {
 				active: candidate(value.desk.active),
 				previous: candidate(value.desk.previous),
@@ -1454,6 +1656,12 @@ const readRedisBundle = async (
 				previous: detail(value.detail.previous),
 			},
 		};
+		touchRedisBundleDecodeCache(raw, {
+			bytes: boundedCacheBytes(Buffer.byteLength(raw, "utf8")),
+			raw,
+			value: parsed,
+		});
+		return { ...parsed, pointer };
 	} catch {
 		return null;
 	}
@@ -1574,13 +1782,31 @@ const compatibleDetail = (
 	);
 };
 
+type CompatibleDetailCheck = (
+	desk: MatchDeskCandidate,
+	detail: MatchDetailCandidate | null
+) => detail is MatchDetailCandidate;
+
+const detailCompatibilityKey = (desk: MatchDeskCandidate, detail: MatchDetailCandidate): string =>
+	[
+		desk.publication.publicationId,
+		desk.publication.generation,
+		desk.publication.revisions.fixtureIdentity.revision,
+		desk.servedFrom,
+		detail.publication.publicationId,
+		detail.publication.generation,
+		detail.publication.detail.revision,
+		detail.servedFrom,
+	].join(":");
+
 const chooseDetail = (
 	desk: MatchDeskCandidate,
-	candidates: readonly (MatchDetailCandidate | null)[]
+	candidates: readonly (MatchDetailCandidate | null)[],
+	isCompatible: CompatibleDetailCheck = compatibleDetail
 ): MatchDetailCandidate | null => {
 	let selected: MatchDetailCandidate | null = null;
 	for (const candidate of candidates) {
-		if (!compatibleDetail(desk, candidate)) continue;
+		if (!isCompatible(desk, candidate)) continue;
 		if (!selected) {
 			selected = candidate;
 			continue;
@@ -2141,8 +2367,22 @@ const isCompleteDetailCandidate = (
 
 const chooseCompleteDetail = (
 	desk: MatchDeskCandidate,
-	candidates: readonly (MatchDetailReadCandidate | null)[]
-): MatchDetailCandidate | null => chooseDetail(desk, candidates.filter(isCompleteDetailCandidate));
+	candidates: readonly (MatchDetailReadCandidate | null)[],
+	compatibilityCache?: Map<string, boolean>
+): MatchDetailCandidate | null => {
+	const isCompatible: CompatibleDetailCheck = compatibilityCache
+		? (candidateDesk, candidate): candidate is MatchDetailCandidate => {
+				if (!candidate) return false;
+				const key = detailCompatibilityKey(candidateDesk, candidate);
+				const cached = compatibilityCache.get(key);
+				if (cached !== undefined) return cached;
+				const result = compatibleDetail(candidateDesk, candidate);
+				compatibilityCache.set(key, result);
+				return result;
+			}
+		: compatibleDetail;
+	return chooseDetail(desk, candidates.filter(isCompleteDetailCandidate), isCompatible);
+};
 
 /**
  * Read one publication mode without paying the full detail cost on every
@@ -2258,11 +2498,12 @@ export const readLiveMatchday = async (
 		desk: null,
 		detail: null,
 	};
+	const detailCompatibilityCache = new Map<string, boolean>();
 	const activeDetailNeedsFallback =
 		activeBundle !== null &&
 		active.desk !== null &&
 		(mode === "FULL"
-			? chooseCompleteDetail(active.desk, [active.detail])
+			? chooseCompleteDetail(active.desk, [active.detail], detailCompatibilityCache)
 			: chooseDetailObservation(active.desk, [active.detail])) === null &&
 		(activeBundle.detail.active.publication !== null || allFixturesStarted(active.desk));
 	const previousAttempted =
@@ -2304,11 +2545,11 @@ export const readLiveMatchday = async (
 		mode === "FULL" &&
 		effectiveDesk !== null &&
 		allFixturesStarted(effectiveDesk) &&
-		chooseCompleteDetail(effectiveDesk, [
-			active.detail,
-			previous.detail,
-			processLkgCandidate?.detail ?? null,
-		]) === null;
+		chooseCompleteDetail(
+			effectiveDesk,
+			[active.detail, previous.detail, processLkgCandidate?.detail ?? null],
+			detailCompatibilityCache
+		) === null;
 	const needsPostgres =
 		effectiveDesk === null ||
 		(detailNeedsPostgres && detailCheckpointMayBeRetried(season, selectedEventId, effectiveDesk));
@@ -2375,12 +2616,16 @@ export const readLiveMatchday = async (
 				]);
 	const detail =
 		mode === "FULL"
-			? chooseCompleteDetail(effectiveDesk, [
-					active.detail,
-					previous.detail,
-					processLkgCandidate?.detail ?? null,
-					postgres?.detail ?? null,
-				])
+			? chooseCompleteDetail(
+					effectiveDesk,
+					[
+						active.detail,
+						previous.detail,
+						processLkgCandidate?.detail ?? null,
+						postgres?.detail ?? null,
+					],
+					detailCompatibilityCache
+				)
 			: null;
 	const result = {
 		season,
@@ -2406,7 +2651,11 @@ export const readLiveMatchday = async (
 	const completeDetailForLkg =
 		mode === "FULL"
 			? detail
-			: chooseCompleteDetail(effectiveDesk, [processLkgCandidate?.detail ?? null]);
+			: chooseCompleteDetail(
+					effectiveDesk,
+					[processLkgCandidate?.detail ?? null],
+					detailCompatibilityCache
+				);
 	// A metadata-only observation must never replace a complete process LKG
 	// with an object whose detail payload was deliberately not read. When a
 	// complete PostgreSQL desk is the selected fallback, retain only a complete
@@ -2432,6 +2681,12 @@ export const readLiveMatchday = async (
 export const resetLiveMatchProcessStateForTests = (): void => {
 	processLkg.clear();
 	processMetadataLkg.clear();
+	processRedisBundleDecodeCache.clear();
+	processDeskDecodeCache.clear();
+	processDetailDecodeCache.clear();
+	processRedisBundleDecodeCacheBytes = 0;
+	processDeskDecodeCacheBytes = 0;
+	processDetailDecodeCacheBytes = 0;
 	processActiveEvent.clear();
 	processEventCheckedAt.clear();
 	processEventCheckpointBudget.clear();

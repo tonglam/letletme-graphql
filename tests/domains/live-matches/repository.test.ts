@@ -439,6 +439,40 @@ describe("Live Matches V3 read path", () => {
 		expect(databaseReads).toBe(0);
 	});
 
+	it("reuses verified immutable Redis decodes without changing the served source", async () => {
+		const redis = new TestRedis();
+		attachBundle(redis, buildBundle().bundle);
+		const context = buildSnapshotContext(redis);
+
+		const first = await readLiveMatchday(context, 1, "FULL");
+		const second = await readLiveMatchday(context, 1, "FULL");
+
+		expect(second.desk?.servedFrom).toBe("REDIS_CURRENT");
+		expect(second.detail?.servedFrom).toBe("REDIS_CURRENT");
+		expect(second.desk?.fixtures).toBe(first.desk?.fixtures);
+		expect(second.detail?.fixtures).toBe(first.detail?.fixtures);
+	});
+
+	it("does not reuse a verified decode after the Redis publication changes", async () => {
+		const redis = new TestRedis();
+		const bundle = attachBundle(redis, buildBundle().bundle);
+		const context = buildSnapshotContext(redis);
+
+		await readLiveMatchday(context, 1, "FULL");
+		const newer = buildBundle({
+			deskGeneration: 3,
+			detailDeskGeneration: 3,
+			detailGeneration: 13,
+			detailItemGeneration: 13,
+		});
+		bundle.set(newer.bundle);
+
+		const result = await readLiveMatchday(context, 1, "FULL");
+
+		expect(result.desk?.publication.publicationId).toBe(publicationId(3));
+		expect(result.detail?.publication.publicationId).toBe(publicationId(13));
+	});
+
 	it("selects HEAD, DESK, and FULL from the actual selection tree", async () => {
 		const redis = new TestRedis();
 		const bundle = buildBundle().bundle;
