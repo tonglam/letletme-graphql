@@ -75,6 +75,7 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("detailObservation");
 		expect(capacitySource).toContain("expectedMetadataOnlyRootReasons");
 		expect(capacitySource).toContain("expectedMetadataOnlyDetailReasons");
+		expect(capacitySource).toContain('rootReasonCodes.includes("FINAL_CHECKPOINT_PENDING")');
 		expect(capacitySource).toContain("hasExactReasonCodes");
 		expect(capacitySource).toContain('typeof detailObservation === "string"');
 		expect(capacitySource).toContain('"DETAIL_METADATA_ONLY"');
@@ -152,5 +153,27 @@ describe("PostgreSQL pool observability", () => {
 			expect(exitCode).not.toBe(0);
 			expect(stderr).toContain(expectedError);
 		}
+	});
+
+	it("accepts a root-routed API health override before validating the next setting", async () => {
+		const child = Bun.spawn(["bun", "scripts/live-match-capacity.ts", "--mode=HEAD"], {
+			cwd: process.cwd(),
+			env: {
+				...Bun.env,
+				LIVE_MATCH_LOAD_URL: "https://letletme.top/",
+				LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+				LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+				LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL: "https://api.letletme.top/health/deploy",
+				LIVE_MATCH_LOAD_READY_HEALTH_URL: "ftp://api.letletme.top/health/ready",
+				LIVE_MATCH_LOAD_STAGES: "1",
+			},
+			stderr: "pipe",
+			stdout: "pipe",
+		});
+		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain("capacity health URLs must use http or https");
+		expect(stderr).not.toContain("capacity health URLs must be bound to the load route");
 	});
 });

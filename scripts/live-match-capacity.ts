@@ -175,7 +175,10 @@ const validateCapacityHealthBinding = (
 	}
 	const loadPath = normalizedRoutePath(loadEndpoint);
 	const healthPath = normalizedRoutePath(healthEndpoint);
-	const routeBound = loadPath !== "/" && healthPath.startsWith(`${loadPath}/health/`);
+	const routeBound =
+		loadPath === "/"
+			? healthPath.startsWith("/health/")
+			: healthPath.startsWith(`${loadPath}/health/`);
 	if (loadEndpoint.origin === healthEndpoint.origin) {
 		if (explicitOverride && !routeBound) {
 			throw new Error("capacity health URLs must be bound to the load route");
@@ -1126,7 +1129,8 @@ function semanticError(body: unknown): string | null {
 	const detailReasonCodes = Array.isArray(detailDelivery?.reasonCodes)
 		? detailDelivery.reasonCodes.filter((value): value is string => typeof value === "string")
 		: [];
-	const finalizedDescriptorOnly = snapshot.state === "FINALIZED";
+	const finalizedDescriptorOnly =
+		snapshot.state === "FINALIZED" || rootReasonCodes.includes("FINAL_CHECKPOINT_PENDING");
 	const expectedMetadataOnlyRootReasons = finalizedDescriptorOnly
 		? ["REDIS_CURRENT", "DETAIL_OR_DESK_DEGRADED", "FINAL_CHECKPOINT_PENDING"]
 		: ["REDIS_CURRENT", "DETAIL_OR_DESK_DEGRADED"];
