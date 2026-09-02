@@ -2765,7 +2765,8 @@ function h2hPageCache(
 	value: Record<string, unknown>,
 	expectedSection: "H2H_STANDINGS" | "H2H_FIXTURES",
 	expectedScope?: Pick<MyTournamentReviewScopeMeta, "rowCount" | "readySubjectCount">,
-	allowRepeatedParticipants = false
+	allowRepeatedParticipants = false,
+	expectedFirst = 100
 ): boolean {
 	const matches = value.matches;
 	const standings = value.standings;
@@ -2799,6 +2800,8 @@ function h2hPageCache(
 	if (
 		expectedRowCount !== undefined &&
 		(!Number.isSafeInteger(expectedRowCount) ||
+			!Number.isSafeInteger(expectedFirst) ||
+			expectedFirst < 1 ||
 			expectedRowCount < 0 ||
 			pageOffset > expectedRowCount ||
 			pageOffset + (expectedSection === "H2H_FIXTURES" ? matches.length : standings.length) >
@@ -2908,8 +2911,21 @@ function h2hPageCache(
 		}
 	}
 	const pageLength = expectedSection === "H2H_FIXTURES" ? matches.length : standings.length;
+	const canonicalPageLength =
+		expectedRowCount === undefined
+			? pageLength
+			: Math.min(expectedFirst, Math.max(0, expectedRowCount - pageOffset));
+	// A cache entry with its page rows removed must not be able to turn into a
+	// valid empty continuation. Bind the page shape to the authenticated
+	// request size and source row count; an empty page is valid only at the end.
+	if (
+		pageLength !== canonicalPageLength ||
+		(pageLength === 0 && pageOffset !== (expectedRowCount ?? pageOffset))
+	) {
+		return false;
+	}
 	const totalRows = expectedRowCount ?? pageOffset + pageLength;
-	const expectedHasNextPage = pageOffset + pageLength < totalRows;
+	const expectedHasNextPage = pageOffset + canonicalPageLength < totalRows;
 	const sameArray = (left: string[], right: unknown): boolean =>
 		Array.isArray(right) &&
 		left.length === right.length &&
@@ -2929,14 +2945,21 @@ function h2hCache(
 	value: unknown,
 	expectedSection?: "H2H_STANDINGS" | "H2H_FIXTURES",
 	expectedScope?: Pick<MyTournamentReviewScopeMeta, "rowCount" | "readySubjectCount">,
-	allowRepeatedParticipants = false
+	allowRepeatedParticipants = false,
+	expectedFirst = 100
 ): value is MyTournamentReviewH2H {
 	if (!isRecord(value) || !Array.isArray(value.matches) || !Array.isArray(value.standings)) {
 		return false;
 	}
 	if (isRecord(value.coverageWitness) && value.coverageWitness.pageOnly === true) {
 		if (expectedSection === undefined) return false;
-		return h2hPageCache(value, expectedSection, expectedScope, allowRepeatedParticipants);
+		return h2hPageCache(
+			value,
+			expectedSection,
+			expectedScope,
+			allowRepeatedParticipants,
+			expectedFirst
+		);
 	}
 	const coverageWitness = value.coverageWitness;
 	const isCoverageMatchIdentity = (candidate: unknown): candidate is string => {
@@ -3314,7 +3337,8 @@ function knockoutPageCache(
 	expectedScope?: Pick<
 		MyTournamentReviewScopeMeta,
 		"rowCount" | "expectedSubjectCount" | "readySubjectCount" | "notApplicableSubjectCount"
-	>
+	>,
+	expectedFirst = 100
 ): boolean {
 	const matches = value.matches;
 	const witness = value.coverageWitness;
@@ -3343,8 +3367,23 @@ function knockoutPageCache(
 	if (
 		expectedScope !== undefined &&
 		(!Number.isSafeInteger(expectedScope.rowCount) ||
+			!Number.isSafeInteger(expectedFirst) ||
+			expectedFirst < 1 ||
 			pageOffset > expectedScope.rowCount ||
 			pageOffset + matches.length > expectedScope.rowCount)
+	) {
+		return false;
+	}
+	const canonicalPageLength =
+		expectedScope === undefined
+			? matches.length
+			: Math.min(expectedFirst, Math.max(0, expectedScope.rowCount - pageOffset));
+	// A corrupted cache must not validate itself by shrinking a non-terminal
+	// page to an empty (or otherwise short) continuation. Only the final page
+	// may be shorter than the requested size.
+	if (
+		matches.length !== canonicalPageLength ||
+		(matches.length === 0 && pageOffset !== (expectedScope?.rowCount ?? pageOffset))
 	) {
 		return false;
 	}
@@ -3397,11 +3436,12 @@ function knockoutCache(
 	expectedScope?: Pick<
 		MyTournamentReviewScopeMeta,
 		"rowCount" | "expectedSubjectCount" | "readySubjectCount" | "notApplicableSubjectCount"
-	>
+	>,
+	expectedFirst = 100
 ): value is MyTournamentReviewKnockout {
 	if (!isRecord(value) || !Array.isArray(value.matches)) return false;
 	if (isRecord(value.coverageWitness) && value.coverageWitness.pageOnly === true) {
-		return knockoutPageCache(value, expectedScope);
+		return knockoutPageCache(value, expectedScope, expectedFirst);
 	}
 	const witness = value.coverageWitness;
 	if (
@@ -3518,6 +3558,11 @@ function gameweekCache(
 	) {
 		return false;
 	}
+	// A READY response is only valid when this request observed the exact
+	// publication head that produced it. Negative-state cache keys deliberately
+	// have no head expectation and may never be promoted by a corrupt Redis
+	// value into fabricated business data.
+	if (state === "READY" && expectedHead === undefined) return false;
 	if (state !== "READY") {
 		return (
 			value.scope === null && value.points === null && value.h2h === null && value.knockout === null
@@ -3790,15 +3835,20 @@ function seasonSectionCache(
 					rowCount: expected.rowCount,
 					readySubjectCount: expected.readySubjectCount,
 				},
-				true
+				true,
+				expected.first
 			)) ||
 		(expectedKnockout &&
-			!knockoutCache(knockout, {
-				rowCount: expected.rowCount,
-				expectedSubjectCount: expected.expectedSubjectCount,
-				readySubjectCount: expected.readySubjectCount,
-				notApplicableSubjectCount: expected.notApplicableSubjectCount,
-			})) ||
+			!knockoutCache(
+				knockout,
+				{
+					rowCount: expected.rowCount,
+					expectedSubjectCount: expected.expectedSubjectCount,
+					readySubjectCount: expected.readySubjectCount,
+					notApplicableSubjectCount: expected.notApplicableSubjectCount,
+				},
+				expected.first
+			)) ||
 		(!expectedPoints && points !== null) ||
 		(!expectedH2H && h2h !== null) ||
 		(!expectedKnockout && knockout !== null)
