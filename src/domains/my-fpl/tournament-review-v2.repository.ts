@@ -608,7 +608,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
 	            WHERE descriptor->>'sectionKey' = 'H2H_FIXTURES'
 	            LIMIT 1
 	          )
-	          AND ${publicationAlias}.expected_subject_count = (
+	          AND ${publicationAlias}.ready_subject_count = (
 	            SELECT CASE
 	                     WHEN descriptor->>'itemCount' ~ '^[0-9]{1,18}$'
 	                     THEN (descriptor->>'itemCount')::numeric
