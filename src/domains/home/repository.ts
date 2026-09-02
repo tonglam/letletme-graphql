@@ -45,6 +45,7 @@ export type HomeLeagueRank = {
 	rankCheckedAt: string | null;
 	movement: HomeRankMovement;
 	tournamentId: number | null;
+	officialH2H?: boolean;
 	h2hMatchup: HomeH2HMatchup | null;
 };
 
@@ -86,6 +87,7 @@ type HomePersonalDeskRow = {
 	official_kind: string | null;
 	short_name: string | null;
 	tournament_id: number | null;
+	official_h2h_tournament_id: number | null;
 	h2h_official_match_id: number | null;
 	h2h_event_id: number | null;
 	h2h_home_entry_id: number | null;
@@ -129,6 +131,7 @@ export const HOME_PERSONAL_DESK_SQL = `
 		l.official_kind::text AS official_kind,
 		l.short_name,
 		COALESCE(official_h2h.tournament_id, tracked.tournament_id) AS tournament_id,
+		official_h2h.tournament_id AS official_h2h_tournament_id,
 		h2h_match.official_match_id AS h2h_official_match_id,
 		h2h_match.event_id AS h2h_event_id,
 		h2h_match.home_entry_id AS h2h_home_entry_id,
@@ -420,6 +423,7 @@ const mapLeagueRank = (row: HomePersonalDeskRow): HomeLeagueRankRow | null => {
 		rankCheckedAt: isoDate(row.league_source_checked_at),
 		movement: movementFromRanks(rank, previousRank),
 		tournamentId: row.tournament_id,
+		...(scoring === "h2h" ? { officialH2H: row.official_h2h_tournament_id !== null } : {}),
 		h2hMatchup: scoring === "h2h" ? mapH2HMatchup(row) : null,
 		scoring,
 		officialKind,
@@ -437,6 +441,7 @@ const toHomeLeagueRank = (row: HomeLeagueRankRow): HomeLeagueRank => ({
 	rankCheckedAt: row.rankCheckedAt,
 	movement: row.movement,
 	tournamentId: row.tournamentId,
+	...(row.officialH2H === undefined ? {} : { officialH2H: row.officialH2H }),
 	h2hMatchup: row.h2hMatchup,
 });
 

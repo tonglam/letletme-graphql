@@ -13,6 +13,7 @@ describe("Live Points V2 contract gate", () => {
 		expect(requiresLivePointsV2Contract(["liveContext"])).toBe(true);
 		expect(requiresLivePointsV2Contract(["homeGameweek"])).toBe(true);
 		expect(requiresLivePointsV2Contract(["events"])).toBe(false);
+		expect(requiresLivePointsV2Contract(["tournamentDetailDesk"])).toBe(true);
 	});
 
 	it("accepts only the exact V2 header value", () => {

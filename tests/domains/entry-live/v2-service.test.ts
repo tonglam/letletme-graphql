@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import { graphql } from "graphql";
 import { schema } from "../../../src/graphql/schema";
@@ -7,6 +7,8 @@ import {
 	calcLivePointsByEntryV2,
 	clearLivePointsV2Lkg,
 	loadLiveSnapshotMetaV2,
+	readLivePublicationV2,
+	readLivePublicationByRefV2,
 } from "../../../src/domains/entry-live/v2-service";
 import {
 	buildCorePublication,
@@ -211,6 +213,8 @@ const buildV2Redis = (
 };
 
 describe("Live Points V2 projection", () => {
+	beforeEach(() => clearLivePointsV2Lkg());
+
 	it("returns one complete same-event 15-pick projection without a Data/FPL request", async () => {
 		clearLivePointsV2Lkg();
 		const context = buildSnapshotContext(buildV2Redis());
@@ -379,6 +383,121 @@ describe("Live Points V2 projection", () => {
 		expect(result.delivery.state).toBe("DEGRADED");
 		expect(result.delivery.reasonCodes).toContain("CORE_IDENTITY_UNAVAILABLE");
 		expect(result.pickList).toHaveLength(15);
+	});
+
+	it("reads an exact league publication from Redis before consulting PostgreSQL", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		for (const key of [...redis.values.keys()]) {
+			if (key.startsWith("llm:data:fpl:core:2627:")) redis.values.delete(key);
+		}
+		const active = JSON.parse(redis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
+			publicationId: string;
+			generation: number;
+		};
+		let databaseCalls = 0;
+		const result = await readLivePublicationByRefV2(
+			buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseCalls += 1;
+					throw new Error("postgres down");
+				},
+			}),
+			1,
+			{ publicationId: active.publicationId, generation: active.generation }
+		);
+		expect(result?.servedFrom).toBe("REDIS_CURRENT");
+		expect(databaseCalls).toBe(0);
+	});
+
+	it("serves an exact league publication from process LKG before PostgreSQL", async () => {
+		clearLivePointsV2Lkg();
+		const warmRedis = buildV2Redis();
+		const warm = await calcLivePointsByEntryV2(buildSnapshotContext(warmRedis), 1, 6953);
+		expect(warm.availability).toBe("READY");
+		const active = JSON.parse(warmRedis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
+			publicationId: string;
+			generation: number;
+		};
+		let databaseCalls = 0;
+		const unavailableRedis = {
+			get: async () => {
+				throw new Error("redis down");
+			},
+			mget: async () => {
+				throw new Error("redis down");
+			},
+		} as never;
+		const result = await readLivePublicationByRefV2(
+			buildSnapshotContext(unavailableRedis, {
+				databaseQuery: async () => {
+					databaseCalls += 1;
+					throw new Error("postgres down");
+				},
+			}),
+			1,
+			{ publicationId: active.publicationId, generation: active.generation }
+		);
+
+		expect(result?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseCalls).toBe(0);
+	});
+
+	it("does not reuse an entry LKG against a changed global revision vector", async () => {
+		clearLivePointsV2Lkg();
+		const warmRedis = buildV2Redis();
+		const warm = await calcLivePointsByEntryV2(buildSnapshotContext(warmRedis), 1, 6953);
+		expect(warm.availability).toBe("READY");
+
+		const changedRedis = buildV2Redis();
+		const globalKey = "llm:data:v2:fpl:live:2627:1:active";
+		const global = JSON.parse(changedRedis.values.get(globalKey)!) as {
+			revisions: { rules: { revision: string } };
+		};
+		global.revisions.rules.revision = hash({ rules: "changed-after-warm" });
+		changedRedis.values.set(globalKey, JSON.stringify(global));
+		changedRedis.values.delete("llm:data:v2:fpl:entry-live:2627:1:6953:active");
+
+		const result = await calcLivePointsByEntryV2(
+			buildSnapshotContext(changedRedis, {
+				databaseQuery: async () => {
+					throw new Error("postgres down");
+				},
+			}),
+			1,
+			6953
+		);
+
+		expect(result.availability).toBe("PENDING");
+		expect(result.delivery.state).toBe("UNAVAILABLE");
+		expect(result.pickList).toHaveLength(0);
+	});
+
+	it("serves the generic event publication from process LKG before Core", async () => {
+		clearLivePointsV2Lkg();
+		const warm = await readLivePublicationV2(buildSnapshotContext(buildV2Redis()), 1);
+		expect(warm?.servedFrom).toBe("REDIS_CURRENT");
+		let databaseCalls = 0;
+		const unavailableRedis = {
+			get: async () => {
+				throw new Error("redis down");
+			},
+			mget: async () => {
+				throw new Error("redis down");
+			},
+		} as never;
+		const result = await readLivePublicationV2(
+			buildSnapshotContext(unavailableRedis, {
+				databaseQuery: async () => {
+					databaseCalls += 1;
+					throw new Error("postgres down");
+				},
+			}),
+			1
+		);
+
+		expect(result?.servedFrom).toBe("PROCESS_LKG");
+		expect(databaseCalls).toBe(0);
 	});
 
 	it("probes Redis entry input before using a warmed process LKG", async () => {

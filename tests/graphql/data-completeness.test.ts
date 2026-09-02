@@ -52,8 +52,6 @@ describe("data completeness metadata", () => {
 			"PriceChangeBoard",
 			"MyFplSnapshotMeta",
 			"PlayerStatsContext",
-			"TournamentOfficialH2H",
-			"TournamentOfficialH2HBoard",
 			"HomePersonalDesk",
 			"HomeMarketDesk",
 		]) {
@@ -61,6 +59,12 @@ describe("data completeness metadata", () => {
 			expect(type && isObjectType(type)).toBe(true);
 			if (!type || !isObjectType(type)) continue;
 			expect(type.getFields().completeness.type.toString()).toBe("DataCompletenessMeta");
+		}
+		const h2h = schema.getType("TournamentOfficialH2H");
+		expect(h2h && isObjectType(h2h)).toBe(true);
+		if (h2h && isObjectType(h2h)) {
+			expect(h2h.getFields().availability.type.toString()).toBe("LeagueLiveAvailability!");
+			expect(h2h.getFields().delivery.type.toString()).toBe("LiveDelivery!");
 		}
 		const meta = schema.getType("DataCompletenessMeta");
 		expect(meta && isObjectType(meta)).toBe(true);

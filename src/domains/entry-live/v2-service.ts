@@ -209,15 +209,73 @@ type GlobalRead = {
 	publication: LivePublication;
 	eventLives: EventLiveRow[];
 	fixtures: FixtureRow[];
-	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "POSTGRES_CHECKPOINT";
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 };
 
 export type LivePublicationReadV2 = GlobalRead;
 
+export type LivePublicationRefV2 = Readonly<{
+	publicationId: string;
+	generation: number;
+}>;
+
 type EntryRead = {
 	publication: EntryPublication;
 	input: EntryLiveInput;
-	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "POSTGRES_CHECKPOINT";
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
+};
+
+const GLOBAL_LKG_MAX_BYTES = 64 * 1024 * 1024;
+const globalLkg = new Map<string, { value: GlobalRead; bytes: number }>();
+let globalLkgBytes = 0;
+
+const globalLkgKey = (
+	context: GraphQLContext,
+	eventId: number,
+	publication: LivePublication
+): string =>
+	`${context.currentSeason.seasonCode}:${eventId}:${publication.publicationId}:${publication.generation}`;
+
+const rememberGlobalLkg = (context: GraphQLContext, eventId: number, value: GlobalRead): void => {
+	const key = globalLkgKey(context, eventId, value.publication);
+	const bytes = Buffer.byteLength(stable(value), "utf8");
+	const existing = globalLkg.get(key);
+	if (existing) globalLkgBytes -= existing.bytes;
+	globalLkg.delete(key);
+	if (bytes > GLOBAL_LKG_MAX_BYTES) return;
+	globalLkg.set(key, { value, bytes });
+	globalLkgBytes += bytes;
+	while (globalLkgBytes > GLOBAL_LKG_MAX_BYTES && globalLkg.size > 0) {
+		const oldest = globalLkg.keys().next().value as string | undefined;
+		if (oldest === undefined) break;
+		const removed = globalLkg.get(oldest);
+		globalLkg.delete(oldest);
+		if (removed) globalLkgBytes -= removed.bytes;
+	}
+};
+
+const readGlobalLkg = (
+	context: GraphQLContext,
+	eventId: number,
+	expectedScoreCoreRevision: string | undefined,
+	expectedPublicationRef: LivePublicationRefV2 | undefined
+): GlobalRead | null => {
+	for (const key of [...globalLkg.keys()].reverse()) {
+		const cached = globalLkg.get(key);
+		if (!cached) continue;
+		if (!key.startsWith(`${context.currentSeason.seasonCode}:${eventId}:`)) continue;
+		const publication = cached.value.publication;
+		if (
+			(expectedScoreCoreRevision === undefined ||
+				publication.revisions.scoreCore.revision === expectedScoreCoreRevision) &&
+			matchesPublicationRef(publication, expectedPublicationRef)
+		) {
+			globalLkg.delete(key);
+			globalLkg.set(key, cached);
+			return { ...cached.value, servedFrom: "PROCESS_LKG" };
+		}
+	}
+	return null;
 };
 
 type EntryMetadataRead = Readonly<{
@@ -232,12 +290,37 @@ const entryMatchesGlobal = (entry: EntryRead, global: GlobalRead): boolean => {
 		: entry.publication.state === "PROVISIONAL" && entry.input.finalResult === null;
 };
 
-const lkgMatchesGlobal = (value: LiveCalcDataV2, global: GlobalRead): boolean =>
-	value.event === global.publication.eventId &&
-	value.snapshot.state === global.publication.state &&
-	(global.publication.state === "FINALIZED"
-		? value.score.calculationMode === "FINAL_RESULT"
-		: value.score.calculationMode === "PROJECTED_AUTOSUBS");
+const matchesPublicationRef = (
+	publication: LivePublication,
+	expected?: LivePublicationRefV2
+): boolean =>
+	expected === undefined ||
+	(publication.publicationId === expected.publicationId &&
+		publication.generation === expected.generation);
+
+const lkgMatchesGlobal = (value: LiveCalcDataV2, global: GlobalRead): boolean => {
+	const matchesRevision = (vector: LiveRevisionVectorV2): boolean =>
+		vector.publicationId === global.publication.publicationId &&
+		vector.generation === global.publication.generation &&
+		vector.lifecycle === global.publication.revisions.lifecycle.revision &&
+		vector.fixtureIdentity === global.publication.revisions.fixtureIdentity.revision &&
+		vector.scoreCore === global.publication.revisions.scoreCore.revision &&
+		vector.displayStats === global.publication.revisions.displayStats.revision &&
+		vector.explain === global.publication.revisions.explain.revision &&
+		vector.rules === global.publication.revisions.rules.revision &&
+		vector.algorithm === LIVE_POINTS_ALGORITHM_VERSION;
+	return (
+		value.event === global.publication.eventId &&
+		value.snapshot.season === global.publication.season &&
+		value.snapshot.eventId === global.publication.eventId &&
+		value.snapshot.state === global.publication.state &&
+		matchesRevision(value.snapshot.revisions) &&
+		matchesRevision(value.score.revisions) &&
+		(global.publication.state === "FINALIZED"
+			? value.score.calculationMode === "FINAL_RESULT"
+			: value.score.calculationMode === "PROJECTED_AUTOSUBS")
+	);
+};
 
 export type LiveRevisionVectorV2 = {
 	publicationId: string;
@@ -883,6 +966,18 @@ const isEntryInput =
 	(season: string, eventId: number, entryId: number) =>
 	(value: unknown): value is EntryLiveInput =>
 		validInput(value, season, eventId, entryId);
+
+/**
+ * Validate an entry input embedded in a league publication.  League readers
+ * use this boundary before projecting an H2H side, so malformed inline input
+ * cannot turn into a zero score or a synthetic missing entry.
+ */
+export const isPublishedEntryLiveInputV2 = (
+	value: unknown,
+	season: string,
+	eventId: number,
+	entryId: number
+): boolean => validInput(value, season, eventId, entryId);
 
 const hasCompleteEventLiveRoster = (
 	eventLives: readonly EventLiveRow[],
@@ -1802,7 +1897,8 @@ const readRedisGlobal = (
 	eventId: number,
 	expectedPlayerIds: ReadonlySet<number> | undefined,
 	expectedFixtureIds: ReadonlySet<number> | null | undefined,
-	expectedScoreCoreRevision?: string
+	expectedScoreCoreRevision?: string,
+	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
 	let memo = requestRedisGlobalMemo.get(scope);
@@ -1828,6 +1924,10 @@ const readRedisGlobal = (
 		":" +
 		(expectedScoreCoreRevision ?? "current") +
 		":" +
+		(expectedPublicationRef
+			? `${expectedPublicationRef.publicationId}:${expectedPublicationRef.generation}`
+			: "any-publication") +
+		":" +
 		rosterRevision +
 		":" +
 		fixtureRevision;
@@ -1848,7 +1948,8 @@ const readRedisGlobal = (
 			if (
 				redisValue &&
 				(expectedScoreCoreRevision === undefined ||
-					redisValue.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+					redisValue.publication.revisions.scoreCore.revision === expectedScoreCoreRevision) &&
+				matchesPublicationRef(redisValue.publication, expectedPublicationRef)
 			)
 				return redisValue;
 			const previous = await readRedisGlobalCandidate(
@@ -1862,7 +1963,8 @@ const readRedisGlobal = (
 			if (
 				previous &&
 				(expectedScoreCoreRevision === undefined ||
-					previous.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+					previous.publication.revisions.scoreCore.revision === expectedScoreCoreRevision) &&
+				matchesPublicationRef(previous.publication, expectedPublicationRef)
 			)
 				return previous;
 		} catch (error) {
@@ -1878,7 +1980,8 @@ const readDatabaseGlobalMemoized = (
 	context: GraphQLContext,
 	eventId: number,
 	expectedFixtureIds: ReadonlySet<number> | null,
-	expectedScoreCoreRevision?: string
+	expectedScoreCoreRevision?: string,
+	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
 	const scope = requestScope(context);
 	let memo = requestDatabaseGlobalMemo.get(scope);
@@ -1891,7 +1994,15 @@ const readDatabaseGlobalMemoized = (
 			? "authority-unavailable"
 			: hash([...expectedFixtureIds].sort((left, right) => left - right));
 	const memoKey =
-		String(eventId) + ":" + (expectedScoreCoreRevision ?? "current") + ":" + fixtureRevision;
+		String(eventId) +
+		":" +
+		(expectedScoreCoreRevision ?? "current") +
+		":" +
+		(expectedPublicationRef
+			? `${expectedPublicationRef.publicationId}:${expectedPublicationRef.generation}`
+			: "any-publication") +
+		":" +
+		fixtureRevision;
 	const existing = memo.get(memoKey);
 	if (existing) return existing;
 	const load = readDatabaseGlobal(
@@ -1902,7 +2013,8 @@ const readDatabaseGlobalMemoized = (
 	).then((value) =>
 		value &&
 		(expectedScoreCoreRevision === undefined ||
-			value.publication.revisions.scoreCore.revision === expectedScoreCoreRevision)
+			value.publication.revisions.scoreCore.revision === expectedScoreCoreRevision) &&
+		matchesPublicationRef(value.publication, expectedPublicationRef)
 			? value
 			: null
 	);
@@ -1960,20 +2072,84 @@ const requireCompleteGlobalPublication = (
 const readGlobal = async (
 	context: GraphQLContext,
 	eventId: number,
-	expectedScoreCoreRevision?: string
+	expectedScoreCoreRevision?: string,
+	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
+	// An exact publication reference is already a producer-side coherence
+	// decision.  Read that Redis snapshot before consulting the mutable Core
+	// read model so a warm league board remains available during a PostgreSQL
+	// incident.  The complete projection still validates Core when it needs to
+	// calculate an uncached row; this boundary only prevents an avoidable DB
+	// dependency from hiding a valid publication or a warmed projection cache.
+	if (expectedPublicationRef) {
+		const exactRedis = await readRedisGlobal(
+			context,
+			eventId,
+			undefined,
+			undefined,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		if (exactRedis) {
+			// The producer has already accepted this immutable publication as a
+			// coherent event snapshot, and readRedisGlobal has validated its item
+			// checksums/schema. An exact retained reference must not acquire a
+			// mutable PostgreSQL dependency during a database incident.
+			rememberGlobalLkg(context, eventId, exactRedis);
+			return exactRedis;
+		}
+		const exactLkg = readGlobalLkg(
+			context,
+			eventId,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		if (exactLkg) return exactLkg;
+	}
+	// Probe Redis before consulting process LKG.  A warmed LKG is a fallback, not
+	// a reason to ignore a recovered current/previous publication.
+	const redisProbe = expectedPublicationRef
+		? null
+		: await readRedisGlobal(
+				context,
+				eventId,
+				undefined,
+				undefined,
+				expectedScoreCoreRevision,
+				expectedPublicationRef
+			);
+	if (!redisProbe) {
+		const processLkg = readGlobalLkg(
+			context,
+			eventId,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		if (processLkg) return processLkg;
+	}
 	const core = await readCore(context);
-	if (!core) return null;
+	if (!core) {
+		const processLkg = readGlobalLkg(
+			context,
+			eventId,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		return processLkg;
+	}
 	// Attempt both Redis pointers without a PostgreSQL roster lookup first.  A
 	// historical event's roster is mutable in today's database and must never
 	// delay or block a complete V2 hot publication.
-	const unvalidatedRedis = await readRedisGlobal(
-		context,
-		eventId,
-		undefined,
-		undefined,
-		expectedScoreCoreRevision
-	);
+	const unvalidatedRedis =
+		redisProbe ??
+		(await readRedisGlobal(
+			context,
+			eventId,
+			undefined,
+			undefined,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		));
 	const expectedPlayerIds = await expectedPlayerIdsForEvent(context, eventId, core);
 	const expectedFixtureIds = await expectedFixtureIdsForEvent(context, eventId);
 	const redisGlobal = requireCompleteGlobalPublication(
@@ -1982,27 +2158,44 @@ const readGlobal = async (
 		expectedPlayerIds,
 		expectedFixtureIds
 	);
-	if (redisGlobal) return redisGlobal;
+	if (redisGlobal) {
+		rememberGlobalLkg(context, eventId, redisGlobal);
+		return redisGlobal;
+	}
 	const validatedRedis = await readRedisGlobal(
 		context,
 		eventId,
 		expectedPlayerIds,
 		expectedFixtureIds,
-		expectedScoreCoreRevision
+		expectedScoreCoreRevision,
+		expectedPublicationRef
 	);
-	if (validatedRedis) return validatedRedis;
+	if (validatedRedis) {
+		rememberGlobalLkg(context, eventId, validatedRedis);
+		return validatedRedis;
+	}
+	const processLkg = readGlobalLkg(
+		context,
+		eventId,
+		expectedScoreCoreRevision,
+		expectedPublicationRef
+	);
+	if (processLkg) return processLkg;
 	const databaseGlobal = await readDatabaseGlobalMemoized(
 		context,
 		eventId,
 		expectedFixtureIds,
-		expectedScoreCoreRevision
+		expectedScoreCoreRevision,
+		expectedPublicationRef
 	);
-	return requireCompleteGlobalPublication(
+	const completeDatabaseGlobal = requireCompleteGlobalPublication(
 		context,
 		databaseGlobal,
 		expectedPlayerIds,
 		expectedFixtureIds
 	);
+	if (completeDatabaseGlobal) rememberGlobalLkg(context, eventId, completeDatabaseGlobal);
+	return completeDatabaseGlobal;
 };
 
 /** Read the complete event publication for non-entry live desks. */
@@ -2011,6 +2204,17 @@ export const readLivePublicationV2 = async (
 	eventId: number,
 	expectedScoreCoreRevision?: string
 ): Promise<LivePublicationReadV2 | null> => readGlobal(context, eventId, expectedScoreCoreRevision);
+
+/**
+ * Read the exact global publication referenced by a retained league match or
+ * board.  A newer global snapshot must never be substituted for an older
+ * input vector merely because it is currently active.
+ */
+export const readLivePublicationByRefV2 = async (
+	context: GraphQLContext,
+	eventId: number,
+	ref: LivePublicationRefV2
+): Promise<LivePublicationReadV2 | null> => readGlobal(context, eventId, undefined, ref);
 
 /**
  * Read several historical publications with one event-roster SQL query and
@@ -3279,6 +3483,65 @@ const buildReady = async (
 	};
 };
 
+/**
+ * Project one entry from a complete league publication.  The league reader
+ * has already loaded and checksum-validated the immutable input, so this
+ * adapter deliberately does not look up entry metadata or probe the entry
+ * Redis/DB paths again.  Core identity remains request-memoized and the
+ * projection itself is pure CPU work over the pinned global publication.
+ */
+export async function projectLivePointsFromPublishedEntryV2(
+	context: GraphQLContext,
+	global: LivePublicationReadV2,
+	input: unknown,
+	publicationRef: {
+		publicationId: string;
+		generation: number;
+		sourceCheckedAt: string;
+		servedFrom?: LivePublicationReadV2["servedFrom"];
+	},
+	entry: Entry
+): Promise<LiveCalcDataV2> {
+	if (
+		!validInput(input, global.publication.season, global.publication.eventId, entry.id) ||
+		publicationRef.publicationId.length === 0 ||
+		!Number.isSafeInteger(publicationRef.generation) ||
+		publicationRef.generation <= 0 ||
+		!iso(publicationRef.sourceCheckedAt)
+	)
+		throw new Error("LEAGUE_ENTRY_INPUT_INVALID");
+	const entryRead: EntryRead = {
+		publication: {
+			contractVersion: LIVE_POINTS_CONTRACT_VERSION,
+			publicationId: publicationRef.publicationId,
+			generation: publicationRef.generation,
+			season: global.publication.season,
+			eventId: global.publication.eventId,
+			entryId: entry.id,
+			state: global.publication.state === "FINALIZED" ? "FINAL" : "PROVISIONAL",
+			sourceCheckedAt: publicationRef.sourceCheckedAt,
+			publishedAt: publicationRef.sourceCheckedAt,
+			checkpointedAt: global.publication.checkpointedAt,
+			expectedNextCheckAt: global.publication.expectedNextCheckAt,
+			item: {
+				name: "input",
+				key: "league-publication",
+				type: "string",
+				count: input.picksBase.picks.length,
+				bytes: Buffer.byteLength(JSON.stringify(input), "utf8"),
+				sha256: hash(input),
+			},
+		},
+		input,
+		// The embedded input may be carried by a retained league publication.
+		// Preserve that read's provenance instead of making every projected row
+		// look like it came from the current entry snapshot.
+		servedFrom: publicationRef.servedFrom ?? "REDIS_CURRENT",
+	};
+	const core = await readCore(context);
+	return buildReady(context, global, entryRead, { entry, available: true }, core);
+}
+
 const unavailableRevisionVector = (eventId: number): LiveRevisionVectorV2 => ({
 	publicationId: `${UNAVAILABLE_REVISION}:${eventId}`,
 	generation: 0,
@@ -3498,7 +3761,11 @@ const writeLiveLkg = (key: string, value: LiveCalcDataV2): void => {
 	}
 };
 
-export const clearLivePointsV2Lkg = (): void => liveLkg.clear();
+export const clearLivePointsV2Lkg = (): void => {
+	liveLkg.clear();
+	globalLkg.clear();
+	globalLkgBytes = 0;
+};
 
 export const loadLiveSnapshotMetaV2 = async (
 	context: GraphQLContext,
@@ -3647,6 +3914,7 @@ export const calcLivePointsByEntryV2 = async (
 				));
 	const processLkg =
 		lkgCandidate && (!global || lkgMatchesGlobal(lkgCandidate, global)) ? lkgCandidate : null;
+	if (global) rememberGlobalLkg(context, eventId, global);
 	if (!global) {
 		return observeLivePointsResult(
 			processLkg

@@ -11,8 +11,10 @@ const LIVE_POINTS_ROOT_FIELDS = new Set([
 	"eventLiveExplains",
 	"liveSnapshot",
 	"liveContext",
+	"leagueLiveHead",
 	"entryLiveCompetitionBoard",
-	"entryLiveCompetitionsDesk",
+	"tournamentOfficialH2H",
+	"tournamentOfficialH2HHistory",
 	"tournamentSelectionIndex",
 	"tournamentEntrySquads",
 	"tournamentDetailDesk",
@@ -32,6 +34,10 @@ const LIVE_POINTS_HOT_PATH_ROOT_FIELDS = new Set([
 	"eventLiveExplains",
 	"liveSnapshot",
 	"liveContext",
+	"leagueLiveHead",
+	"entryLiveCompetitionBoard",
+	"tournamentOfficialH2H",
+	"tournamentOfficialH2HHistory",
 ]);
 
 export const isLivePointsHotPathRootField = (field: string): boolean =>

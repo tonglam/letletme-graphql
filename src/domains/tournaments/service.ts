@@ -2,12 +2,11 @@ import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
 import type {
 	EntryH2HMatchResult,
-	EntryOfficialH2HDeskItem,
+	TournamentOfficialH2HHistory,
 	TournamentBattleGroupResult,
 	TournamentEntryRankingSummary,
 	TournamentEventResult,
 	TournamentInfo,
-	TournamentOfficialH2H,
 	TournamentParticipant,
 	TournamentSeasonSnapshot,
 	TournamentDetailDesk,
@@ -46,6 +45,13 @@ export const assertTournamentInsightsReady = async (
 };
 
 export const tournamentsService = {
+	getTournamentInfoUncached(
+		context: GraphQLContext,
+		tournamentId: number
+	): Promise<TournamentInfo | null> {
+		return tournamentsRepository.getTournamentInfoUncached(context, tournamentId);
+	},
+
 	getTournamentForMember(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -145,19 +151,20 @@ export const tournamentsService = {
 		return tournamentsRepository.getEntryH2HMatchResults(context, entryId);
 	},
 
-	getTournamentOfficialH2H(
+	getTournamentOfficialH2HHistory(
 		context: GraphQLContext,
 		tournamentId: number,
-		eventId: number
-	): Promise<TournamentOfficialH2H> {
-		return tournamentsRepository.getTournamentOfficialH2H(context, tournamentId, eventId);
-	},
-
-	getEntryOfficialH2HDesk(
-		context: GraphQLContext,
-		entryId: number
-	): Promise<EntryOfficialH2HDeskItem[]> {
-		return tournamentsRepository.getEntryOfficialH2HDesk(context, entryId);
+		eventId: number,
+		entryId: number,
+		limit?: number | null
+	): Promise<TournamentOfficialH2HHistory> {
+		return tournamentsRepository.getTournamentOfficialH2HHistory(
+			context,
+			tournamentId,
+			eventId,
+			entryId,
+			limit
+		);
 	},
 
 	getTournamentDetailDesk(

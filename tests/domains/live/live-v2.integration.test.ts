@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { graphql, getIntrospectionQuery } from "graphql";
 
 import { schema } from "../../../src/graphql/schema";
+import { clearLivePointsV2Lkg } from "../../../src/domains/entry-live/v2-service";
 import { resetLiveMatchProcessStateForTests } from "../../../src/domains/live-matches/repository";
 import {
 	buildCorePublication,
@@ -13,7 +14,10 @@ import {
 } from "../../helpers/data-publication";
 
 describe("Live Points V2 GraphQL contract", () => {
-	beforeEach(() => resetLiveMatchProcessStateForTests());
+	beforeEach(() => {
+		resetLiveMatchProcessStateForTests();
+		clearLivePointsV2Lkg();
+	});
 
 	it("publishes one coherent V2 event snapshot across live roots", async () => {
 		const core = buildTestCoreData(1, {

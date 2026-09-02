@@ -839,6 +839,21 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges the live H2H publication as a bounded current-page read", () => {
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: "query { tournamentOfficialH2H(tournamentId: 6953, eventId: 1) { availability } }",
+				},
+				schema
+			)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["tournamentOfficialH2H"],
+			rateLimitCostUnits: 30,
+		});
+	});
+
 	it("charges a tournament review page once across mutually exclusive format branches", () => {
 		const fields = Array.from({ length: 100 }, () => "state").join(" ");
 		for (const query of [
@@ -974,12 +989,17 @@ describe("GraphQL request limits", () => {
 		let astNodes = 0;
 		visit(parse(query), { enter: () => void (astNodes += 1) });
 
-		expect(astNodes).toBe(360);
+		expect(astNodes).toBe(188);
 		expect(
 			validateGraphQLRequestLimits(
 				{
 					query,
-					variables: { entryId: 1, tournamentId: 1, eventId: 1, page: 1, pageSize: 20 },
+					variables: {
+						entryId: 1,
+						tournamentId: 1,
+						eventId: 1,
+						input: { first: 20 },
+					},
 				},
 				schema
 			)
@@ -1010,6 +1030,32 @@ describe("GraphQL request limits", () => {
 		expect(
 			validateGraphQLRequestLimits(
 				{ query: "query { " + root(fieldsWithinAllowance) + " events { id } }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsAboveAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
+	});
+
+	it("keeps the official H2H publication allowance scoped to one exact root", () => {
+		const fieldsWithinAllowance = Array.from({ length: 105 }, () => "__typename").join(" ");
+		const fieldsAboveAllowance = Array.from({ length: 125 }, () => "__typename").join(" ");
+		const root = (fields: string) =>
+			"tournamentOfficialH2H(tournamentId: 1, eventId: 1) { " + fields + " }";
+
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { " + root(fieldsWithinAllowance) + " }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rootFields: ["tournamentOfficialH2H"] });
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { h2h: " + root(fieldsWithinAllowance) + " }" },
 				schema
 			)
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });
@@ -1247,7 +1293,7 @@ describe("GraphQL request limits", () => {
 	it("sums heavy root floors, including aliases", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
-				"query { first: liveMatchday { snapshot { eventId } } second: liveMatchday { snapshot { eventId } } entryLiveCompetitionsDesk(entryId: 1) { eventId } }",
+				"query { first: liveMatchday { snapshot { eventId } } second: liveMatchday { snapshot { eventId } } leagueLiveHead(entryId: 1, tournamentId: 1, eventId: 1, mode: CLASSIC) { eventId } }",
 		});
 		expect(result).toMatchObject({ ok: true });
 	});
@@ -1268,12 +1314,12 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 40 });
 	});
 
-	it("charges official H2H detail and Team Desk roots for their multi-read projections", () => {
+	it("charges the V2 official H2H publication root", () => {
 		const result = validateGraphQLRequestLimits({
 			query:
-				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } entryOfficialH2HDesk(entryId: 7) { tournamentId } }",
+				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } leagueLiveHead(entryId: 7, tournamentId: 1, eventId: 3, mode: H2H) { eventId } }",
 		});
-		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 60 });
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 31 });
 	});
 
 	it("charges every aliased liveScores full-event lookup", () => {
