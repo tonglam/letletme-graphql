@@ -80,129 +80,10 @@ end
 return result
 `;
 
-/**
- * Shadow-mode stage that evaluates the global emergency bucket and the
- * observational buckets in one atomic call. A global denial is terminal; an
- * observational denial is reported but does not suppress the global debit.
- * This preserves the two-stage debit semantics without making two Redis
- * roundtrips for every request.
- */
-export const TOKEN_BUCKET_V3_GLOBAL_SAFETY_SCRIPT = `
-local server_time = redis.call('TIME')
-local now_ms = tonumber(server_time[1]) * 1000 + math.floor(tonumber(server_time[2]) / 1000)
-local states = {}
-local global_denied_index = 0
-local observational_denied_index = 0
-local global_retry_after = 0
-local observational_retry_after = 0
-local offset = 1
-local scope_offset = (#KEYS * 3) + 1
-
-for index, key in ipairs(KEYS) do
-  local refill_per_second = tonumber(ARGV[offset])
-  local burst = tonumber(ARGV[offset + 1])
-  local cost = tonumber(ARGV[offset + 2])
-  local scope = ARGV[scope_offset + index - 1]
-  local burst_milli = burst * 1000
-  local cost_milli = cost * 1000
-  local stored = redis.call('HMGET', key, 'tokens', 'updated_ms')
-  local tokens = tonumber(stored[1]) or burst_milli
-  local updated_ms = tonumber(stored[2]) or now_ms
-  local elapsed_ms = math.max(0, now_ms - updated_ms)
-  tokens = math.min(burst_milli, tokens + math.floor(elapsed_ms * refill_per_second))
-  states[index] = {
-    tokens = tokens,
-    cost_milli = cost_milli,
-    refill_per_second = refill_per_second,
-    burst = burst,
-    scope = scope
-  }
-  if tokens < cost_milli then
-    local deficit = cost_milli - tokens
-    local wait_seconds = math.max(1, math.ceil(deficit / (refill_per_second * 1000)))
-    if scope == 'global' then
-      if global_denied_index == 0 then global_denied_index = index end
-      global_retry_after = math.max(global_retry_after, wait_seconds)
-    else
-      if observational_denied_index == 0 then observational_denied_index = index end
-      observational_retry_after = math.max(observational_retry_after, wait_seconds)
-    end
-  end
-  offset = offset + 3
-end
-
-local global_allowed = global_denied_index == 0
-local observational_allowed = observational_denied_index == 0
-local allowed = global_allowed and observational_allowed
-local denied_index = global_denied_index > 0 and global_denied_index or observational_denied_index
-local retry_after = global_denied_index > 0 and global_retry_after or observational_retry_after
-local result = { allowed and 1 or 0, retry_after, denied_index }
-
-for index, key in ipairs(KEYS) do
-  local state = states[index]
-  local should_write = global_allowed
-  if state.scope == 'global' then
-    should_write = true
-  end
-  if should_write then
-    local remaining = state.tokens
-    if state.scope == 'global' then
-      if global_allowed then remaining = remaining - state.cost_milli end
-    elseif observational_allowed then
-      remaining = remaining - state.cost_milli
-    end
-    redis.call('HSET', key, 'tokens', remaining, 'updated_ms', now_ms)
-    local ttl_seconds = math.max(120, math.ceil((2 * state.burst) / state.refill_per_second))
-    redis.call('EXPIRE', key, ttl_seconds)
-  end
-  local remaining = state.tokens
-  if state.scope == 'global' then
-    if global_allowed then remaining = remaining - state.cost_milli end
-  elseif global_allowed and observational_allowed then
-    remaining = remaining - state.cost_milli
-  end
-  table.insert(result, remaining)
-end
-return result
-`;
-
 const positiveInteger = (value: number, label: string): void => {
 	if (!Number.isSafeInteger(value) || value < 1) {
 		throw new Error(`${label} must be a positive integer`);
 	}
-};
-
-const validateChecks = (checks: readonly TokenBucketCheckV3[]): void => {
-	if (checks.length === 0) throw new Error("At least one v3 token bucket is required");
-	for (const check of checks) {
-		positiveInteger(check.refillPerSecond, `${check.id}.refillPerSecond`);
-		positiveInteger(check.burst, `${check.id}.burst`);
-		positiveInteger(check.cost ?? 1, `${check.id}.cost`);
-	}
-};
-
-const parseTokenBucketStageResult = (
-	raw: Array<number | string>,
-	checks: readonly TokenBucketCheckV3[]
-): TokenBucketStageResultV3 => {
-	const allowed = Number(raw[0]) === 1;
-	const retryAfterSeconds = Math.max(0, Number(raw[1]) || 0);
-	const deniedIndex = Number(raw[2]) || 0;
-	const details = checks.map((check, index): TokenBucketDetailV3 => ({
-		id: check.id,
-		scope: check.scope,
-		cost: check.cost ?? 1,
-		refillPerSecond: check.refillPerSecond,
-		burst: check.burst,
-		remainingMilliTokens: Number(raw[index + 3]) || 0,
-	}));
-	const denied = deniedIndex > 0 ? details[deniedIndex - 1] : undefined;
-	return {
-		allowed,
-		retryAfterSeconds: allowed ? 0 : Math.max(1, retryAfterSeconds),
-		...(denied ? { deniedScope: denied.scope, deniedBucketId: denied.id } : {}),
-		details,
-	};
 };
 
 export const tokenBucketKeyV3 = (id: string, subject: string): string => {
@@ -222,7 +103,12 @@ export const checkTokenBucketStageV3 = async (
 	redis: Redis,
 	checks: readonly TokenBucketCheckV3[]
 ): Promise<TokenBucketStageResultV3> => {
-	validateChecks(checks);
+	if (checks.length === 0) throw new Error("At least one v3 token bucket is required");
+	for (const check of checks) {
+		positiveInteger(check.refillPerSecond, `${check.id}.refillPerSecond`);
+		positiveInteger(check.burst, `${check.id}.burst`);
+		positiveInteger(check.cost ?? 1, `${check.id}.cost`);
+	}
 
 	const raw = (await redis.eval(
 		TOKEN_BUCKET_V3_SCRIPT,
@@ -234,29 +120,24 @@ export const checkTokenBucketStageV3 = async (
 			String(check.cost ?? 1),
 		])
 	)) as Array<number | string>;
-	return parseTokenBucketStageResult(raw, checks);
-};
-
-export const checkTokenBucketStageV3WithGlobalSafety = async (
-	redis: Redis,
-	checks: readonly TokenBucketCheckV3[]
-): Promise<TokenBucketStageResultV3> => {
-	validateChecks(checks);
-	if (!checks.some((check) => check.scope === "global")) {
-		throw new Error("Global safety stage requires a global token bucket");
-	}
-	const raw = (await redis.eval(
-		TOKEN_BUCKET_V3_GLOBAL_SAFETY_SCRIPT,
-		checks.length,
-		...checks.map((check) => check.key),
-		...checks.flatMap((check) => [
-			String(check.refillPerSecond),
-			String(check.burst),
-			String(check.cost ?? 1),
-		]),
-		...checks.map((check) => check.scope)
-	)) as Array<number | string>;
-	return parseTokenBucketStageResult(raw, checks);
+	const allowed = Number(raw[0]) === 1;
+	const retryAfterSeconds = Math.max(0, Number(raw[1]) || 0);
+	const deniedIndex = Number(raw[2]) || 0;
+	const details = checks.map((check, index): TokenBucketDetailV3 => ({
+		id: check.id,
+		scope: check.scope,
+		cost: check.cost ?? 1,
+		refillPerSecond: check.refillPerSecond,
+		burst: check.burst,
+		remainingMilliTokens: Number(raw[index + 3]) || 0,
+	}));
+	const denied = deniedIndex > 0 ? details[deniedIndex - 1] : undefined;
+	return {
+		allowed,
+		retryAfterSeconds: allowed ? 0 : Math.max(1, retryAfterSeconds),
+		...(denied ? { deniedScope: denied.scope, deniedBucketId: denied.id } : {}),
+		details,
+	};
 };
 
 export type TokenBucketState = {
