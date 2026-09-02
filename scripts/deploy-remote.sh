@@ -141,6 +141,11 @@ else
 fi
 chmod 600 "$candidate_env_next"
 
+# Ensure DEPLOY_SHA is present for the runtime startup contract.
+if ! grep -qE '^DEPLOY_SHA=' "$candidate_env_next"; then
+  printf 'DEPLOY_SHA=%s\n' "$DEPLOY_SHA" >> "$candidate_env_next"
+fi
+
 # The protocol/configuration hard cut must be visible at the deployment
 # boundary too. Do not silently translate or ignore names from the retired
 # runtime; an operator must remove them from the source secret first.
