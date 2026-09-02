@@ -235,6 +235,9 @@ const configuredHealthEndpoint = (name: string, defaultPath: string): URL => {
 	if (configured?.includes("?")) {
 		throw new Error("capacity health URLs must not include a query string");
 	}
+	if (configured?.includes("#")) {
+		throw new Error("capacity health URLs must not include a fragment");
+	}
 	const url = configured ? new URL(configured) : new URL(defaultPath, endpoint.origin);
 	validateCapacityHealthBinding(endpoint, url);
 	return url;
