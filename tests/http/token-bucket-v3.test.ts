@@ -2,7 +2,9 @@ import { describe, expect, it } from "bun:test";
 import type Redis from "ioredis";
 import {
 	TOKEN_BUCKET_V3_SCRIPT,
+	TOKEN_BUCKET_SHADOW_STAGE_SCRIPT,
 	checkTokenBucketStageV3,
+	checkTokenBucketShadowStageV3,
 	evaluateTokenBucketStageV3,
 	tokenBucketKeyV3,
 } from "../../src/http/token-bucket-v3";
@@ -86,5 +88,52 @@ describe("Redis token bucket v3", () => {
 		const key = tokenBucketKeyV3("mini-device-weighted", subject);
 		expect(key).toStartWith("llm:gql:security:rate:v3:mini-device-weighted:");
 		expect(key).not.toContain(subject);
+	});
+
+	it("combines enforcing global and observational buckets in one atomic call", async () => {
+		const calls: unknown[][] = [];
+		const redis = {
+			eval: async (...args: unknown[]) => {
+				calls.push(args);
+				return [2, 1, 0, 0, 4_000];
+			},
+		} as unknown as Redis;
+		const result = await checkTokenBucketShadowStageV3(redis, [stageChecks[0]!], [stageChecks[1]!]);
+
+		expect(result).toMatchObject({
+			allowed: true,
+			retryAfterSeconds: 0,
+			details: [{ id: "client-weighted", scope: "client", remainingMilliTokens: 4_000 }],
+		});
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.slice(1)).toEqual([
+			2,
+			"global",
+			"client",
+			"1",
+			"10",
+			"10",
+			"5",
+			"10",
+			"10",
+			"5",
+		]);
+		expect(TOKEN_BUCKET_SHADOW_STAGE_SCRIPT).toContain("if global_denied_index ~= 0 then");
+		expect(TOKEN_BUCKET_SHADOW_STAGE_SCRIPT).toContain("for index = observation_start, #KEYS do");
+	});
+
+	it("decodes a global denial without returning an observational denial", async () => {
+		const redis = {
+			eval: async () => [1, 0, 3, 1, 2_000],
+		} as unknown as Redis;
+		const result = await checkTokenBucketShadowStageV3(redis, [stageChecks[0]!], [stageChecks[1]!]);
+
+		expect(result).toMatchObject({
+			allowed: false,
+			retryAfterSeconds: 3,
+			deniedScope: "global",
+			deniedBucketId: "global-request",
+			details: [{ id: "global-request", remainingMilliTokens: 2_000 }],
+		});
 	});
 });
