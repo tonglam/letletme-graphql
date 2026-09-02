@@ -218,6 +218,23 @@ describe("Classic live league publication lifecycle fence", () => {
 
 		expect(head).toBeNull();
 	});
+
+	it("does not advertise a head when the payload hash is stale", async () => {
+		const fixture = buildRedis(36, "LIVE_ACTIVE", false);
+		const payloadKey = `llm:data:v2:fpl:league-live:${fixture.season}:${fixture.eventId}:${fixture.tournamentId}:classic:1:payload`;
+		const payload = fixture.redis.values.get(payloadKey);
+		expect(payload).toBeDefined();
+		fixture.redis.values.set(payloadKey, payload!.replace('"transferCost":0', '"transferCost":1'));
+
+		const head = await readLeagueLiveHeadV2(buildSnapshotContext(fixture.redis), {
+			season: fixture.season,
+			eventId: fixture.eventId,
+			tournamentId: fixture.tournamentId,
+			mode: "CLASSIC",
+		});
+
+		expect(head).toBeNull();
+	});
 });
 
 describe("live league freshness state", () => {

@@ -23,6 +23,7 @@ import {
 } from "../entry-live/v2-service";
 import {
 	readH2HLeaguePublicationV2,
+	h2hPublicationMatchesGlobal,
 	type H2HLeaguePublicationReadV2,
 	type H2HStandingsPayloadV2,
 } from "../live-desks/h2h-v2";
@@ -243,8 +244,7 @@ const reconcileHomeOfficialH2HRanksV2 = async (
 				if (
 					!global ||
 					global.publication.state !== "FINALIZED" ||
-					global.publication.publicationId !== read.publication.globalRef.publicationId ||
-					global.publication.generation !== read.publication.globalRef.generation
+					!h2hPublicationMatchesGlobal(read.publication, global)
 				)
 					return [tournamentId, null] as const;
 				return [

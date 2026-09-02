@@ -850,7 +850,7 @@ describe("GraphQL request limits", () => {
 		).toMatchObject({
 			ok: true,
 			rootFields: ["tournamentOfficialH2H"],
-			rateLimitCostUnits: 5,
+			rateLimitCostUnits: 30,
 		});
 	});
 
@@ -1319,7 +1319,7 @@ describe("GraphQL request limits", () => {
 			query:
 				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } leagueLiveHead(entryId: 7, tournamentId: 1, eventId: 3, mode: H2H) { eventId } }",
 		});
-		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 6 });
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 31 });
 	});
 
 	it("charges every aliased liveScores full-event lookup", () => {

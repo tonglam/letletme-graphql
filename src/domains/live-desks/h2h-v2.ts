@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { GraphQLContext } from "../../graphql/context";
 import { LIVE_LEAGUE_CHECKPOINT_SQL } from "./league-v2";
-import { isPublishedEntryLiveInputV2 } from "../entry-live/v2-service";
+import { isPublishedEntryLiveInputV2, type LivePublicationReadV2 } from "../entry-live/v2-service";
 
 type H2HScope = "H2H_HEAD" | "H2H_STANDINGS";
 type H2HMatchState = "READY" | "PENDING" | "ERROR";
@@ -186,6 +186,26 @@ const canonical = (value: unknown): string => {
 
 const hash = (value: unknown): string =>
 	createHash("sha256").update(canonical(value), "utf8").digest("hex");
+
+// Data stores revision vectors as hashes. Keep the producer's H2H algorithm
+// identity here instead of comparing the manifest to the human-readable live
+// points algorithm label used in GraphQL responses.
+const H2H_LEAGUE_ALGORITHM_REVISION = hash("live-league-v2:h2h:1");
+
+/**
+ * H2H publications may be retained independently, but every final overlay
+ * must still identify the exact global score contract it was built from.
+ */
+export const h2hPublicationMatchesGlobal = (
+	publication: Pick<H2HManifestV2, "globalRef" | "revisions">,
+	global: LivePublicationReadV2
+): boolean =>
+	publication.globalRef.publicationId === global.publication.publicationId &&
+	publication.globalRef.generation === global.publication.generation &&
+	publication.revisions.scoreCore === global.publication.revisions.scoreCore.revision &&
+	publication.revisions.fixtureIdentity === global.publication.revisions.fixtureIdentity.revision &&
+	publication.revisions.rules === global.publication.revisions.rules.revision &&
+	publication.revisions.algorithm === H2H_LEAGUE_ALGORITHM_REVISION;
 
 const iso = (value: unknown): value is string =>
 	typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -735,9 +755,8 @@ const readRedisPointer = async (
 };
 
 /**
- * Head probes read only the manifest, index and item metadata. Full match
- * payloads remain behind the explicit tournament response, so heartbeat-only
- * polls do not fan out through every matchup input.
+ * Head probes validate both immutable siblings before exposing a publication
+ * revision. They do not project the embedded match sides.
  */
 const readRedisLightPointer = async (
 	context: GraphQLContext,
@@ -750,23 +769,23 @@ const readRedisLightPointer = async (
 	const raw = await context.redis.get(pointerKey(season, eventId, tournamentId, scope, pointer));
 	const publication = parseManifest(raw, season, eventId, tournamentId, scope);
 	if (!publication) return null;
-	const [[indexRaw, indexMeta, payloadMeta], payloadBytes] = await Promise.all([
-		context.redis.mget(
-			publication.items.index.key,
-			`${publication.items.index.key}:meta`,
-			`${publication.items.payload.key}:meta`
-		),
-		context.redis.strlen(publication.items.payload.key),
-	]);
+	const [indexRaw, indexMeta, payloadRaw, payloadMeta] = await context.redis.mget(
+		publication.items.index.key,
+		`${publication.items.index.key}:meta`,
+		publication.items.payload.key,
+		`${publication.items.payload.key}:meta`
+	);
 	if (
 		indexRaw === null ||
+		payloadRaw === null ||
 		indexMeta !==
 			`${publication.items.index.count}|${publication.items.index.bytes}|${publication.items.index.sha256}` ||
 		payloadMeta !==
 			`${publication.items.payload.count}|${publication.items.payload.bytes}|${publication.items.payload.sha256}` ||
-		payloadBytes !== publication.items.payload.bytes ||
 		Buffer.byteLength(indexRaw, "utf8") !== publication.items.index.bytes ||
-		hash(parseJson(indexRaw)) !== publication.items.index.sha256
+		Buffer.byteLength(payloadRaw, "utf8") !== publication.items.payload.bytes ||
+		hash(parseJson(indexRaw)) !== publication.items.index.sha256 ||
+		hash(parseJson(payloadRaw)) !== publication.items.payload.sha256
 	)
 		return null;
 	const parsedIndex = parseJson(indexRaw);
@@ -997,10 +1016,22 @@ export const readH2HLeagueMembershipV2 = async (
 ): Promise<boolean | null> => {
 	try {
 		const light = await readH2HLeagueLightV2(context, tournamentId, eventId, "H2H_HEAD");
-		if (!light) return null;
-		return light.index.some(
-			(row) => "homeEntryId" in row && (row.homeEntryId === entryId || row.awayEntryId === entryId)
-		);
+		if (
+			light &&
+			light.index.some(
+				(row) =>
+					"homeEntryId" in row && (row.homeEntryId === entryId || row.awayEntryId === entryId)
+			)
+		)
+			return true;
+		// A complete H2H head can legitimately have no current matchup for a
+		// roster member (for example a knockout bye). Use the independent
+		// standings index as the complete-roster authorization source. If neither
+		// publication is available, return null so the caller uses cold access.
+		const standings = await readH2HLeagueLightV2(context, tournamentId, eventId, "H2H_STANDINGS");
+		if (standings)
+			return standings.index.some((row) => "entryId" in row && row.entryId === entryId);
+		return light ? false : null;
 	} catch (error) {
 		context.logger.warn(
 			{ err: error, eventId, tournamentId },

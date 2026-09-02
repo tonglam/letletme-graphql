@@ -10,6 +10,7 @@ import { playersService } from "../players/service";
 import {
 	h2hLeagueDeliveryV2,
 	h2hLeagueTimesV2,
+	h2hPublicationMatchesGlobal,
 	readH2HLeaguePublicationV2,
 	readH2HLeagueMembershipV2,
 	type H2HLeaguePublicationReadV2,
@@ -513,16 +514,6 @@ export const h2hMatchRevisionVectorV2 = (
 	};
 };
 
-const h2hPublicationMatchesGlobal = (
-	publication: H2HLeaguePublicationReadV2["publication"],
-	global: LivePublicationReadV2
-): boolean =>
-	samePublicationRef(publication.globalRef, global.publication) &&
-	publication.revisions.scoreCore === global.publication.revisions.scoreCore.revision &&
-	publication.revisions.fixtureIdentity === global.publication.revisions.fixtureIdentity.revision &&
-	publication.revisions.rules === global.publication.revisions.rules.revision &&
-	publication.revisions.algorithm === LIVE_POINTS_ALGORITHM_VERSION;
-
 const standingsGlobalIsValidated = async (
 	context: GraphQLContext,
 	eventId: number,
@@ -560,14 +551,6 @@ const worstDeliverySource = (sources: readonly string[]): string =>
 	sources.reduce(
 		(worst, source) => (deliverySourceRank(source) > deliverySourceRank(worst) ? source : worst),
 		sources[0] ?? "UNAVAILABLE"
-	);
-
-const worstH2HReadSource = (
-	sources: readonly H2HLeaguePublicationReadV2["servedFrom"][]
-): H2HLeaguePublicationReadV2["servedFrom"] =>
-	sources.reduce(
-		(worst, source) => (deliverySourceRank(source) > deliverySourceRank(worst) ? source : worst),
-		sources[0] ?? "POSTGRES_CHECKPOINT"
 	);
 
 const h2hMatchDelivery = (
@@ -743,20 +726,14 @@ const rebaseH2HProjection = (
 ): TournamentOfficialH2HProjectionV2 => {
 	const servedAt = new Date().toISOString();
 	const currentTimes = h2hLeagueTimesV2(headRead.publication, servedAt);
-	const servedFrom = worstH2HReadSource([value.delivery.servedFrom, headRead.servedFrom]);
+	const servedFrom = headRead.servedFrom;
 	const fallback = servedFrom !== "REDIS_CURRENT";
 	const baseDelivery = h2hLeagueDeliveryV2(headRead);
 	const delivery = {
 		...baseDelivery,
 		state: fallback ? "DEGRADED" : baseDelivery.state,
 		servedFrom,
-		reasonCodes: [
-			...new Set([
-				...baseDelivery.reasonCodes,
-				...value.delivery.reasonCodes,
-				...(fallback ? ["PROJECTION_CACHE_FALLBACK"] : []),
-			]),
-		],
+		reasonCodes: baseDelivery.reasonCodes,
 	};
 	const matches = value.matches.map((match) => {
 		const matchServedFrom = worstDeliverySource([match.delivery.servedFrom, headRead.servedFrom]);

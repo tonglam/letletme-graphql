@@ -459,9 +459,8 @@ const readRedisPointer = async (
 };
 
 /**
- * Head probes read the manifest, roster index and item metadata only. The
- * entry-input payload remains behind the full board read, so heartbeat-only
- * polls never pull or parse every embedded squad.
+ * Head probes validate both immutable siblings before exposing a publication
+ * revision. They do not materialize or project the embedded entry rows.
  */
 const readRedisLightPointer = async (
 	context: GraphQLContext,
@@ -471,23 +470,23 @@ const readRedisLightPointer = async (
 	const raw = await context.redis.get(pointerKey(scope, pointer));
 	const publication = parseManifest(raw, scope);
 	if (!publication) return null;
-	const [[indexRaw, indexMeta, payloadMeta], payloadBytes] = await Promise.all([
-		context.redis.mget(
-			publication.items.index.key,
-			`${publication.items.index.key}:meta`,
-			`${publication.items.payload.key}:meta`
-		),
-		context.redis.strlen(publication.items.payload.key),
-	]);
+	const [indexRaw, indexMeta, payloadRaw, payloadMeta] = await context.redis.mget(
+		publication.items.index.key,
+		`${publication.items.index.key}:meta`,
+		publication.items.payload.key,
+		`${publication.items.payload.key}:meta`
+	);
 	if (
 		indexRaw === null ||
+		payloadRaw === null ||
 		indexMeta !==
 			`${publication.items.index.count}|${publication.items.index.bytes}|${publication.items.index.sha256}` ||
 		payloadMeta !==
 			`${publication.items.payload.count}|${publication.items.payload.bytes}|${publication.items.payload.sha256}` ||
-		payloadBytes !== publication.items.payload.bytes ||
 		Buffer.byteLength(indexRaw, "utf8") !== publication.items.index.bytes ||
-		hash(parseJson(indexRaw)) !== publication.items.index.sha256
+		Buffer.byteLength(payloadRaw, "utf8") !== publication.items.payload.bytes ||
+		hash(parseJson(indexRaw)) !== publication.items.index.sha256 ||
+		hash(parseJson(payloadRaw)) !== publication.items.payload.sha256
 	)
 		return null;
 	const index = parseJson(indexRaw);

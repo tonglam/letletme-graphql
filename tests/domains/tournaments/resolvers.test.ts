@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 import type { Event } from "../../../src/domains/events/repository";
 import { eventsService } from "../../../src/domains/events/service";
@@ -26,7 +27,12 @@ import {
 	tournamentsResolvers,
 } from "../../../src/domains/tournaments/resolvers";
 import { tournamentsService } from "../../../src/domains/tournaments/service";
+import { h2hPublicationMatchesGlobal } from "../../../src/domains/live-desks/h2h-v2";
 import type { GraphQLContext } from "../../../src/graphql/context";
+
+const h2hAlgorithmRevision = createHash("sha256")
+	.update(JSON.stringify("live-league-v2:h2h:1"), "utf8")
+	.digest("hex");
 
 describe("tournaments resolver enum mappers", () => {
 	it("maps league type to GraphQL enum", () => {
@@ -174,6 +180,45 @@ describe("official H2H match revision vectors", () => {
 		expect(changedScore.content).not.toBe(first.content);
 		expect(changedScore.averageSide).not.toBe(first.averageSide);
 		expect(changedScore.scoreCore).toBe(first.scoreCore);
+	});
+});
+
+describe("official H2H global revision fence", () => {
+	it("requires every score-affecting global revision to match", () => {
+		const global = {
+			publication: {
+				publicationId: "00000000-0000-4000-8000-000000000001",
+				generation: 4,
+				revisions: {
+					scoreCore: { revision: "1".repeat(64) },
+					fixtureIdentity: { revision: "2".repeat(64) },
+					rules: { revision: "3".repeat(64) },
+				},
+			},
+		} as unknown as Parameters<typeof h2hPublicationMatchesGlobal>[1];
+		const publication = {
+			globalRef: {
+				publicationId: "00000000-0000-4000-8000-000000000001",
+				generation: 4,
+			},
+			revisions: {
+				scoreCore: "1".repeat(64),
+				fixtureIdentity: "2".repeat(64),
+				rules: "3".repeat(64),
+				algorithm: h2hAlgorithmRevision,
+			},
+		} as unknown as Parameters<typeof h2hPublicationMatchesGlobal>[0];
+
+		expect(h2hPublicationMatchesGlobal(publication, global)).toBe(true);
+		expect(
+			h2hPublicationMatchesGlobal(
+				{
+					...publication,
+					revisions: { ...publication.revisions, fixtureIdentity: "4".repeat(64) },
+				},
+				global
+			)
+		).toBe(false);
 	});
 });
 
