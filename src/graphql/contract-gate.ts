@@ -1,7 +1,13 @@
 import type { GraphQLContext } from "./context";
 
-export const MY_TOURNAMENT_REVIEW_CONTRACT = "my-tournament-review-v2";
+export const MY_TOURNAMENT_REVIEW_CONTRACT = "my-tournament-review-v2.1";
 export const MY_TOURNAMENT_REVIEW_CONTRACT_HEADER = "x-letletme-contract";
+
+const MY_TOURNAMENT_REVIEW_LEGACY_ROOTS = new Set([
+	"myFplCompetitionsDesk",
+	"myFplCompetitionBoard",
+	"myFplCompetitionSeasonPath",
+]);
 
 const hasContractToken = (value: string | null | undefined, expected: string): boolean =>
 	(value ?? "")
@@ -16,13 +22,16 @@ export type ContractGateFailure = Readonly<{
 }>;
 
 export function requiresMyTournamentReviewV2(rootFields: readonly string[]): boolean {
-	return rootFields.some((field) =>
-		[
-			"myTournamentReviewCatalog",
-			"myTournamentGameweekReview",
-			"myTournamentSeasonReview",
-			"myTournamentReviewStatus",
-		].includes(field)
+	return rootFields.some(
+		(field) =>
+			MY_TOURNAMENT_REVIEW_LEGACY_ROOTS.has(field) ||
+			[
+				"myTournamentReviewCatalog",
+				"myTournamentGameweekReview",
+				"myTournamentSeasonReview",
+				"myTournamentSeasonReviewSection",
+				"myTournamentReviewStatus",
+			].includes(field)
 	);
 }
 

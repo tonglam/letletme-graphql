@@ -7,14 +7,14 @@ import {
 	MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
 	MY_TOURNAMENT_REVIEW_STATUS_SQL,
 	createMyTournamentReviewRepository,
-	postgresJsonbContentHash,
+	tournamentReviewPublicationHash as postgresJsonbContentHash,
 } from "../../../src/domains/my-fpl/tournament-review-v2.repository";
 import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
 
 const publicationRow = (overrides: Record<string, unknown> = {}) => {
 	const payload = {
-		schemaVersion: "my-tournament-review-v2",
-		metricVersion: "descriptive-v1",
+		schemaVersion: "my-tournament-review-v2.1",
+		metricVersion: "settled-review-v2",
 		format: "POINTS",
 		points: {
 			headline: "gross",
@@ -48,8 +48,8 @@ const publicationRow = (overrides: Record<string, unknown> = {}) => {
 		event_id: 4,
 		revision: 8,
 		format: "POINTS",
-		schema_version: "my-tournament-review-v2",
-		metric_version: "descriptive-v1",
+		schema_version: "my-tournament-review-v2.1",
+		metric_version: "settled-review-v2",
 		event_data_checked_at: "2026-08-20T00:00:00.000Z",
 		source_min_checked_at: "2026-08-20T00:00:01.000Z",
 		source_max_checked_at: "2026-08-20T00:00:02.000Z",
@@ -83,8 +83,8 @@ const h2hPublicationRow = (overrides: Record<string, unknown> = {}) =>
 		not_applicable_subject_count: 1,
 		row_count: 1,
 		payload: {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "H2H",
 			h2h: {
 				matches: [
@@ -131,8 +131,8 @@ const knockoutPublicationRow = (overrides: Record<string, unknown> = {}) =>
 		not_applicable_subject_count: 0,
 		row_count: 1,
 		payload: {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: {
 				matches: [
@@ -174,12 +174,28 @@ const catalogRow = (overrides: Record<string, unknown> = {}) => ({
 	league_id: 6953,
 	league_type: "classic",
 	total_team_num: 2,
+	group_mode: "points_races",
+	group_started_event_id: 1,
+	group_ended_event_id: 38,
+	knockout_mode: "no_knockout",
+	knockout_started_event_id: null,
+	knockout_ended_event_id: null,
 	latest_finalized_event_id: 4,
-	latest_available_event_id: 3,
+	latest_ready_event_id: 3,
 	latest_revision: 8,
 	latest_format: "POINTS",
 	latest_state: "PENDING",
 	published_at: "2026-08-20T00:00:03.000Z",
+	setup_status: "ready",
+	previous_ready_event_id: null,
+	finalized_format: "POINTS",
+	finalized_state: "PENDING",
+	finalized_next_attempt_at: null,
+	finalized_execution_attempts: 1,
+	finalized_source_rechecks: 0,
+	finalized_degraded_at: null,
+	finalized_revision: null,
+	finalized_published_at: null,
 	...overrides,
 });
 
@@ -195,13 +211,32 @@ const seasonMetadataRow = (
 	event_data_checked_at: row.event_data_checked_at ?? null,
 	published_at: row.published_at ?? null,
 	row_count: row.row_count ?? null,
+	expected_subject_count: row.expected_subject_count ?? null,
 	ready_subject_count: row.ready_subject_count ?? null,
+	not_applicable_subject_count: row.not_applicable_subject_count ?? null,
 	obligation_format: row.format ?? "POINTS",
 	obligation_state: state,
 	finalized_event_ids: finalizedEventIds,
 });
 
 describe("My Tournament Review V2 repository", () => {
+	it("requires an explicit zero-item chunk for an empty section", () => {
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain("descriptor->>'itemCount' = '0'");
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain(
+			"THEN jsonb_array_length(descriptor->'chunkHashes')"
+		);
+	});
+
+	it("bounds manifest count casts and requires the exact format section set", () => {
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain("^[0-9]{1,18}$");
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain(
+			"descriptor->>'sectionKey' IN ('POINTS_STANDINGS', 'POINTS_TRAJECTORIES')"
+		);
+		expect(MY_TOURNAMENT_REVIEW_PUBLICATION_SQL).toContain(
+			"jsonb_typeof(descriptor->'sectionKey') IS DISTINCT FROM 'string'"
+		);
+	});
+
 	it("keeps the catalog on the current event checkpoint and bounds ALL reads", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"date_trunc('milliseconds', publication.event_data_checked_at) ="
@@ -209,8 +244,8 @@ describe("My Tournament Review V2 repository", () => {
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"date_trunc('milliseconds', head_event.data_checked_at)"
 		);
-		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("tournament.setup_status = 'ready'");
-		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT 500");
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).not.toContain("LIMIT 500");
+		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain("LIMIT $6::integer");
 		expect(MY_TOURNAMENT_REVIEW_CATALOG_SQL).toContain(
 			"head_obligation.ready_revision = review_head.revision"
 		);
@@ -278,10 +313,15 @@ describe("My Tournament Review V2 repository", () => {
 							event_id: 4,
 							format: "POINTS",
 							state: "READY",
+							eligible_at: "2026-08-20T00:00:00.000Z",
+							ready_at: "2026-08-20T00:00:03.000Z",
+							last_observed_at: "2026-08-20T00:00:04.000Z",
 							next_attempt_at: null,
 							execution_attempts: 1,
 							source_rechecks: 0,
 							degraded_at: null,
+							repair_issue_id: null,
+							last_error_code: null,
 							revision: 8,
 							published_at: "2026-08-20T00:00:03.000Z",
 							latest_finalized_event_id: 4,
@@ -293,85 +333,8 @@ describe("My Tournament Review V2 repository", () => {
 		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
 		expect(queries).toBe(1);
 		expect(observedSql).toBe(MY_TOURNAMENT_REVIEW_STATUS_SQL);
-		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: 4 });
+		expect(result).toMatchObject({ tournamentId: 6953, latestFinalizedEventId: 4 });
 		expect(result.events).toHaveLength(1);
-	});
-
-	it("rejects a cached READY status without an immutable publication identity", async () => {
-		const redis = new TestRedis();
-		let databaseReads = 0;
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => {
-				databaseReads += 1;
-				return {
-					rows: [
-						{
-							event_id: 4,
-							format: "POINTS",
-							state: "READY",
-							next_attempt_at: null,
-							execution_attempts: 1,
-							source_rechecks: 0,
-							degraded_at: null,
-							revision: 8,
-							published_at: "2026-08-20T00:00:03.000Z",
-							latest_finalized_event_id: 4,
-						},
-					],
-				};
-			},
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadStatus(context, 6953);
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			events: Array<{ revision: string | null; publishedAt: string | null }>;
-		};
-		cached.events[0]!.revision = null;
-		cached.events[0]!.publishedAt = null;
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadStatus(context, 6953);
-		expect(result.events[0]).toMatchObject({
-			revision: "8",
-			publishedAt: "2026-08-20T00:00:03.000Z",
-		});
-		expect(databaseReads).toBe(2);
-	});
-
-	it("rejects a cached status summary with an incorrect latest available event", async () => {
-		const redis = new TestRedis();
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => ({
-				rows: [
-					{
-						event_id: 4,
-						format: "POINTS",
-						state: "READY",
-						next_attempt_at: null,
-						execution_attempts: 1,
-						source_rechecks: 0,
-						degraded_at: null,
-						revision: 8,
-						published_at: "2026-08-20T00:00:03.000Z",
-						latest_finalized_event_id: 4,
-					},
-				],
-			}),
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadStatus(context, 6953);
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			latestAvailableEventId: number | null;
-		};
-		cached.latestAvailableEventId = null;
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadStatus(context, 6953);
-		expect(result.latestAvailableEventId).toBe(4);
 	});
 
 	it("preserves a finalized checkpoint when no obligation row exists", async () => {
@@ -394,7 +357,7 @@ describe("My Tournament Review V2 repository", () => {
 			}),
 		});
 		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
-		expect(result).toMatchObject({ latestFinalizedEventId: 4, latestAvailableEventId: null });
+		expect(result).toMatchObject({ tournamentId: 6953, latestFinalizedEventId: 4 });
 		expect(result.events).toEqual([]);
 	});
 
@@ -406,10 +369,15 @@ describe("My Tournament Review V2 repository", () => {
 						event_id: 5,
 						format: "POINTS",
 						state: "WAITING_SOURCE",
+						eligible_at: "2026-08-21T00:00:00.000Z",
+						ready_at: null,
+						last_observed_at: "2026-08-21T00:00:01.000Z",
 						next_attempt_at: "2026-08-21T00:00:00.000Z",
 						execution_attempts: 1,
 						source_rechecks: 1,
 						degraded_at: null,
+						repair_issue_id: null,
+						last_error_code: null,
 						revision: null,
 						published_at: null,
 						latest_finalized_event_id: 4,
@@ -419,7 +387,6 @@ describe("My Tournament Review V2 repository", () => {
 		});
 		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
 		expect(result.latestFinalizedEventId).toBe(4);
-		expect(result.latestAvailableEventId).toBeNull();
 		expect(result.events).toMatchObject([
 			{ eventId: 5, state: "WAITING_SOURCE", revision: null, publishedAt: null },
 		]);
@@ -433,10 +400,15 @@ describe("My Tournament Review V2 repository", () => {
 						event_id: 5,
 						format: "POINTS",
 						state: "READY",
+						eligible_at: "2026-08-20T00:00:00.000Z",
+						ready_at: "2026-08-20T00:00:03.000Z",
+						last_observed_at: "2026-08-20T00:00:04.000Z",
 						next_attempt_at: null,
 						execution_attempts: 1,
 						source_rechecks: 0,
 						degraded_at: null,
+						repair_issue_id: null,
+						last_error_code: null,
 						revision: 8,
 						published_at: "2026-08-20T00:00:03.000Z",
 						latest_finalized_event_id: 4,
@@ -460,14 +432,17 @@ describe("My Tournament Review V2 repository", () => {
 		const result = await repository.loadCatalog(context, "ACCESSIBLE");
 		expect(result.tournaments[0]).toMatchObject({
 			latestFinalizedEventId: 4,
-			latestAvailableEventId: 3,
 			state: "PENDING",
 		});
 	});
 
-	it("invalidates the catalog cache when the finalized scope advances", async () => {
+	it("reads the catalog directly from PostgreSQL as the finalized scope advances", async () => {
 		const redis = new TestRedis();
-		let current = catalogRow({ latest_available_event_id: 4, latest_state: "READY" });
+		let current = catalogRow({
+			finalized_state: "READY",
+			finalized_revision: 8,
+			finalized_published_at: "2026-08-20T00:00:03.000Z",
+		});
 		let queries = 0;
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => {
@@ -481,12 +456,14 @@ describe("My Tournament Review V2 repository", () => {
 
 		current = catalogRow({
 			latest_finalized_event_id: 5,
-			latest_available_event_id: 4,
-			latest_state: "PENDING",
+			finalized_state: "PENDING",
+			finalized_revision: null,
+			finalized_published_at: null,
 		});
 		const pending = await repository.loadCatalog(context, "ACCESSIBLE");
 		expect(pending.tournaments[0]).toMatchObject({ state: "PENDING", latestFinalizedEventId: 5 });
 		expect(queries).toBe(2);
+		expect(redis.values.size).toBe(0);
 	});
 
 	it("fails closed when a catalog claims READY without a product-visible head", async () => {
@@ -494,11 +471,13 @@ describe("My Tournament Review V2 repository", () => {
 			databaseQuery: async () => ({
 				rows: [
 					catalogRow({
-						latest_available_event_id: null,
+						latest_ready_event_id: null,
 						latest_revision: null,
 						latest_format: null,
 						published_at: null,
-						latest_state: "READY",
+						finalized_state: "READY",
+						finalized_revision: null,
+						finalized_published_at: null,
 					}),
 				],
 			}),
@@ -509,60 +488,34 @@ describe("My Tournament Review V2 repository", () => {
 		});
 	});
 
-	it("fails closed when READY points to an older finalized-event head", async () => {
+	it("uses the finalized scope instead of a stale latest-head projection", async () => {
 		const context = buildSnapshotContext(new TestRedis(), {
-			databaseQuery: async () => ({ rows: [catalogRow({ latest_state: "READY" })] }),
+			databaseQuery: async () => ({
+				rows: [
+					catalogRow({
+						latest_finalized_event_id: 4,
+						latest_ready_event_id: 3,
+						latest_state: "PENDING",
+						finalized_state: "READY",
+						finalized_revision: 8,
+						finalized_published_at: "2026-08-20T00:00:03.000Z",
+					}),
+				],
+			}),
 		});
 		const repository = createMyTournamentReviewRepository();
-		await expect(repository.loadCatalog(context, "ACCESSIBLE")).rejects.toMatchObject({
-			extensions: { code: "DATA_INTEGRITY_ERROR" },
-		});
-	});
-
-	it("rejects a cached READY catalog whose immutable head tuple is incomplete", async () => {
-		const redis = new TestRedis();
-		let databaseReads = 0;
-		const publication = catalogRow({
-			latest_finalized_event_id: 4,
-			latest_available_event_id: 4,
-			latest_state: "READY",
-		});
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => {
-				databaseReads += 1;
-				return { rows: [publication] };
-			},
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadCatalog(context, "ACCESSIBLE");
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			tournaments: Array<{ latestRevision: string | null }>;
-		};
-		cached.tournaments[0]!.latestRevision = null;
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
 		const result = await repository.loadCatalog(context, "ACCESSIBLE");
-		expect(result.tournaments[0]?.latestRevision).toBe("8");
-		expect(databaseReads).toBe(2);
+		expect(result.tournaments[0]).toMatchObject({ state: "READY", latestFinalizedEventId: 4 });
 	});
 
-	it("rejects a cached catalog root state that disagrees with its items", async () => {
+	it("keeps catalog and status free of Redis cache state", async () => {
 		const redis = new TestRedis();
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => ({ rows: [catalogRow()] }),
 		});
 		const repository = createMyTournamentReviewRepository();
 		await repository.loadCatalog(context, "ACCESSIBLE");
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as { state: string };
-		cached.state = "READY";
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadCatalog(context, "ACCESSIBLE");
-		expect(result.state).toBe("PENDING");
+		expect(redis.values.size).toBe(0);
 	});
 
 	it("keeps a pending obligation visible when its publication is not ready", async () => {
@@ -835,10 +788,11 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
-	it("rejects a cached Season with incomplete freshness or finalized identity", async () => {
+	it("keeps the Season cache metadata-only and rejects embedded payloads", async () => {
 		const redis = new TestRedis();
 		const latest = publicationRow({ event_id: 4 });
 		const older = publicationRow({ event_id: 3, revision: 7 });
+		let publicationReads = 0;
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async (query: unknown) => {
 				const sql = String(query);
@@ -847,7 +801,10 @@ describe("My Tournament Review V2 repository", () => {
 						rows: [seasonMetadataRow(latest, [3, 4]), seasonMetadataRow(older, [3, 4])],
 					};
 				}
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) {
+					publicationReads += 1;
+					return { rows: [latest] };
+				}
 				throw new Error(`unexpected query: ${sql}`);
 			},
 		});
@@ -855,28 +812,21 @@ describe("My Tournament Review V2 repository", () => {
 		await repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 4 });
 		const cacheKey = [...redis.values.keys()][0];
 		expect(cacheKey).toBeDefined();
+		expect(publicationReads).toBe(0);
 
-		const mismatchedIdentity = JSON.parse(redis.values.get(cacheKey!)!) as {
-			latestEventId: number;
+		const embeddedPayload = JSON.parse(redis.values.get(cacheKey!)!) as {
+			points: unknown;
 		};
-		mismatchedIdentity.latestEventId = 3;
-		redis.values.set(cacheKey!, JSON.stringify(mismatchedIdentity));
-		const identityResult = await repository.loadSeasonReview(context, {
+		embeddedPayload.points = { rows: [{ entryId: 6953 }] };
+		redis.values.set(cacheKey!, JSON.stringify(embeddedPayload));
+		const result = await repository.loadSeasonReview(context, {
 			tournamentId: 6953,
 			throughEventId: 4,
 		});
-		expect(identityResult.latestEventId).toBe(4);
-
-		const incompleteFreshness = JSON.parse(redis.values.get(cacheKey!)!) as {
-			freshness: unknown;
-		};
-		incompleteFreshness.freshness = null;
-		redis.values.set(cacheKey!, JSON.stringify(incompleteFreshness));
-		const freshnessResult = await repository.loadSeasonReview(context, {
-			tournamentId: 6953,
-			throughEventId: 4,
-		});
-		expect(freshnessResult.freshness).not.toBeNull();
+		expect(result.points).toBeNull();
+		expect(result.h2h).toBeNull();
+		expect(result.knockout).toBeNull();
+		expect(publicationReads).toBe(0);
 	});
 
 	it("maps gross headline and keeps transfer cost/net separate", async () => {
@@ -927,7 +877,13 @@ describe("My Tournament Review V2 repository", () => {
 								format: "POINTS",
 								content_sha256: observed.content_sha256,
 								event_data_checked_at: observed.event_data_checked_at,
+								source_min_checked_at: observed.source_min_checked_at,
+								source_max_checked_at: observed.source_max_checked_at,
 								published_at: observed.published_at,
+								row_count: observed.row_count,
+								expected_subject_count: observed.expected_subject_count,
+								ready_subject_count: observed.ready_subject_count,
+								not_applicable_subject_count: observed.not_applicable_subject_count,
 							},
 						],
 					};
@@ -1638,8 +1594,8 @@ describe("My Tournament Review V2 repository", () => {
 			winnerEntryId: null,
 		};
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: { matches: [match, { ...match }] },
 		};
@@ -1703,8 +1659,8 @@ describe("My Tournament Review V2 repository", () => {
 			winnerEntryId: 6953,
 		};
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: { matches: [match] },
 		};
@@ -2598,7 +2554,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(firstPage.h2h?.standings).toHaveLength(1);
 		expect(firstPage.h2h?.hasNextPage).toBe(true);
 		expect(firstPage.h2h?.nextCursor).toBe(
-			"eyJvZmZzZXQiOjEsInJldmlzaW9uIjoiOCIsInNjb3BlIjoiWzIwMjYsNjk1Myw0LFwiSDJIXCIsXCJIMkhcIl0ifQ"
+			"eyJvZmZzZXQiOjEsInJldmlzaW9uIjoiOCIsInNjb3BlIjoiWzIwMjYsNjk1Myw0LFwiSDJIXCIsXCJIMkhcIixudWxsXSJ9"
 		);
 
 		const secondPage = await repository.loadGameweekReview(context, {
@@ -2703,7 +2659,7 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 	});
 
-	it("paginates season payload rows without changing the finalized event window", async () => {
+	it("returns a metadata-only Season index without reading publication payloads", async () => {
 		const latestPayload = structuredClone(publicationRow().payload) as Record<string, unknown>;
 		const latestPoints = latestPayload.points as Record<string, unknown>;
 		const latestRows = latestPoints.rows as Array<Record<string, unknown>>;
@@ -2752,150 +2708,70 @@ describe("My Tournament Review V2 repository", () => {
 			first: 1,
 		});
 		expect(result.finalizedEventIds).toEqual([3, 4]);
-		expect(result.points?.rows).toHaveLength(1);
-		expect(result.points?.hasNextPage).toBe(true);
-		expect(result.points?.nextCursor).toBe(
-			"eyJvZmZzZXQiOjEsInJldmlzaW9uIjoiOCIsInNjb3BlIjoiWzIwMjYsNjk1Myw0LFwiUE9JTlRTXCIsXCJTRUFTT05fUE9JTlRTXCJdIn0"
-		);
+		expect(result.latestEventId).toBe(4);
+		expect(result.latestRevision).toBe("8");
+		expect(result.semanticSha256).toBe(latest.content_sha256);
+		expect(result.points).toBeNull();
+		expect(result.h2h).toBeNull();
+		expect(result.knockout).toBeNull();
 	});
 
-	it("canonicalizes equivalent Season cursors before cache lookup", async () => {
-		const latestPayload = structuredClone(publicationRow().payload) as Record<string, unknown>;
-		const points = latestPayload.points as Record<string, unknown>;
-		const rows = points.rows as Array<Record<string, unknown>>;
-		rows.push({
-			...rows[0],
-			entryId: 6954,
-			entryName: "Second XI",
-			playerName: "Second Manager",
-			rank: 2,
-			grossPoints: 40,
-			transferCost: 0,
-			netPoints: 40,
-			seasonGrossPoints: 40,
-			seasonNetPoints: 40,
-		});
-		points.grossPointsTotal = 95;
-		points.grossPointsAverage = 47.5;
-		points.netPointsTotal = 91;
-		points.seasonGrossPointsTotal = 140;
-		points.seasonGrossPointsAverage = 70;
-		points.seasonNetPointsTotal = 136;
-		const latest = publicationRow({
-			payload: latestPayload,
-			row_count: 2,
-			expected_subject_count: 2,
-			ready_subject_count: 2,
-			content_sha256: postgresJsonbContentHash(latestPayload),
-		});
-		let publicationReads = 0;
-		const context = buildSnapshotContext(new TestRedis(), {
+	it("uses one metadata cache identity regardless of legacy paging arguments", async () => {
+		const latest = publicationRow({ event_id: 4 });
+		const redis = new TestRedis();
+		let metadataReads = 0;
+		const context = buildSnapshotContext(redis, {
 			databaseQuery: async (query: unknown) => {
-				const sql = String(query);
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
-					return { rows: [seasonMetadataRow(latest, [4])] };
+				if (String(query) !== MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					throw new Error(`unexpected query: ${String(query)}`);
 				}
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) publicationReads += 1;
-				return { rows: [latest] };
+				metadataReads += 1;
+				return { rows: [seasonMetadataRow(latest, [4])] };
 			},
 		});
 		const repository = createMyTournamentReviewRepository();
-		const firstPage = await repository.loadSeasonReview(context, {
+		const first = await repository.loadSeasonReview(context, {
 			tournamentId: 6953,
 			throughEventId: 4,
 			first: 1,
 		});
-		const cursor = JSON.parse(
-			Buffer.from(firstPage.points!.nextCursor!, "base64url").toString("utf8")
-		) as { offset: number; revision: string; scope: string };
-		const variantCursor = Buffer.from(
-			` { "scope": ${JSON.stringify(cursor.scope)}, "offset": "${cursor.offset}", "revision": ${JSON.stringify(cursor.revision)}, "ignored": true } `,
-			"utf8"
-		).toString("base64url");
-		const variantPage = await repository.loadSeasonReview(context, {
+		const second = await repository.loadSeasonReview(context, {
 			tournamentId: 6953,
 			throughEventId: 4,
-			first: 1,
-			after: variantCursor,
+			first: 100,
+			after: "ignored-by-season-summary",
 		});
-		const canonicalPage = await repository.loadSeasonReview(context, {
-			tournamentId: 6953,
-			throughEventId: 4,
-			first: 1,
-			after: firstPage.points?.nextCursor,
-		});
-		expect(variantPage.points?.rows[0]?.entryId).toBe(6954);
-		expect(canonicalPage.points?.rows[0]?.entryId).toBe(6954);
-		expect(publicationReads).toBe(2);
+		expect(first.points).toBeNull();
+		expect(second.points).toBeNull();
+		expect(redis.values.size).toBe(1);
+		expect(metadataReads).toBe(2);
 	});
 
-	it("uses format-specific cursors for Season H2H pages", async () => {
-		const base = h2hPublicationRow();
-		const payload = structuredClone(base.payload) as Record<string, unknown>;
-		const h2h = payload.h2h as Record<string, unknown>;
-		const matches = h2h.matches as Array<Record<string, unknown>>;
-		const standings = h2h.standings as Array<Record<string, unknown>>;
-		matches.push({
-			...matches[0],
-			matchId: "4-2",
-			home: {
-				...(matches[0]!.home as Record<string, unknown>),
-				entryId: 6954,
-				entryName: "Second XI",
-				rank: 2,
-			},
-		});
-		standings.push({
-			...standings[0],
-			entryId: 6954,
-			entryName: "Second XI",
-			rank: 2,
-		});
-		const latest = h2hPublicationRow({
-			payload,
-			row_count: 2,
-			ready_subject_count: 2,
-			not_applicable_subject_count: 0,
-			content_sha256: postgresJsonbContentHash(payload),
-		});
-		let publicationReads = 0;
+	it("keeps H2H phases in the Season index without materializing fixtures", async () => {
+		const latest = h2hPublicationRow({ event_id: 4 });
+		const older = h2hPublicationRow({ event_id: 3, revision: 7 });
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async (query: unknown) => {
-				const sql = String(query);
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
-					return { rows: [seasonMetadataRow(latest, [4])] };
+				if (String(query) !== MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					throw new Error(`unexpected query: ${String(query)}`);
 				}
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) {
-					publicationReads += 1;
-					return { rows: [latest] };
-				}
-				throw new Error(`unexpected query: ${sql}`);
+				return {
+					rows: [seasonMetadataRow(older, [3, 4]), seasonMetadataRow(latest, [3, 4])],
+				};
 			},
 		});
-		const repository = createMyTournamentReviewRepository();
-		const firstPage = await repository.loadSeasonReview(context, {
+		const result = await createMyTournamentReviewRepository().loadSeasonReview(context, {
 			tournamentId: 6953,
 			throughEventId: 4,
-			first: 1,
 		});
-		const cursor = JSON.parse(
-			Buffer.from(firstPage.h2h!.nextCursor!, "base64url").toString("utf8")
-		) as { scope: string };
-		expect(cursor.scope).toBe('[2026,6953,4,"H2H","H2H"]');
-
-		const secondPage = await repository.loadSeasonReview(context, {
-			tournamentId: 6953,
-			throughEventId: 4,
-			first: 1,
-			after: firstPage.h2h?.nextCursor,
-		});
-		expect(secondPage.h2h?.matches).toHaveLength(1);
-		expect(secondPage.h2h?.standings[0]?.entryId).toBe(6954);
-		expect(secondPage.h2h?.hasNextPage).toBe(false);
-		expect(publicationReads).toBe(2);
+		expect(result.state).toBe("READY");
+		expect(result.format).toBe("H2H");
+		expect(result.points).toBeNull();
+		expect(result.h2h).toBeNull();
+		expect(result.phases?.[0]?.format).toBe("H2H");
 	});
 
-	it("accepts Season H2H metadata with more standings than matches", async () => {
+	it("defers H2H fixture validation to the section reader", async () => {
 		const base = h2hPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
 		const h2h = payload.h2h as Record<string, unknown>;
@@ -2947,8 +2823,8 @@ describe("My Tournament Review V2 repository", () => {
 			throughEventId: 4,
 		});
 		expect(result.state).toBe("READY");
-		expect(result.h2h?.matches).toHaveLength(1);
-		expect(result.h2h?.standings).toHaveLength(2);
+		expect(result.h2h).toBeNull();
+		expect(result.phases?.[0]?.format).toBe("H2H");
 	});
 
 	it("rejects Season H2H metadata beyond two standings per match", async () => {
@@ -2979,71 +2855,35 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
 	});
 
-	it("uses format-specific cursors for Season knockout pages", async () => {
-		const base = knockoutPublicationRow();
-		const payload = structuredClone(base.payload) as Record<string, unknown>;
-		const knockout = payload.knockout as Record<string, unknown>;
-		const matches = knockout.matches as Array<Record<string, unknown>>;
-		const secondSide = matches[0]!.away;
-		matches[0] = { ...matches[0], away: null };
-		matches.push({
-			...matches[0],
-			matchId: 102,
-			playAgainstId: 103,
-			home: secondSide,
+	it("keeps Knockout phases in the Season index without materializing brackets", async () => {
+		const latest = knockoutPublicationRow({ event_id: 4 });
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				if (String(query) !== MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					throw new Error(`unexpected query: ${String(query)}`);
+				}
+				return { rows: [seasonMetadataRow(latest, [4])] };
+			},
 		});
-		const latest = knockoutPublicationRow({
-			payload,
-			row_count: 2,
-			content_sha256: postgresJsonbContentHash(payload),
+		const result = await createMyTournamentReviewRepository().loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
 		});
+		expect(result.state).toBe("READY");
+		expect(result.format).toBe("KNOCKOUT");
+		expect(result.knockout).toBeNull();
+		expect(result.phases?.[0]?.format).toBe("KNOCKOUT");
+	});
+
+	it("pins the Season index to the observed metadata head", async () => {
+		const observed = publicationRow({ event_id: 4, revision: 8 });
 		let publicationReads = 0;
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async (query: unknown) => {
 				const sql = String(query);
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
-					return { rows: [seasonMetadataRow(latest, [4])] };
-				}
 				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) {
 					publicationReads += 1;
-					return { rows: [latest] };
-				}
-				throw new Error(`unexpected query: ${sql}`);
-			},
-		});
-		const repository = createMyTournamentReviewRepository();
-		const firstPage = await repository.loadSeasonReview(context, {
-			tournamentId: 6953,
-			throughEventId: 4,
-			first: 1,
-		});
-		const cursor = JSON.parse(
-			Buffer.from(firstPage.knockout!.nextCursor!, "base64url").toString("utf8")
-		) as { scope: string };
-		expect(cursor.scope).toBe('[2026,6953,4,"KNOCKOUT","KNOCKOUT"]');
-
-		const secondPage = await repository.loadSeasonReview(context, {
-			tournamentId: 6953,
-			throughEventId: 4,
-			first: 1,
-			after: firstPage.knockout?.nextCursor,
-		});
-		expect(secondPage.knockout?.matches).toHaveLength(1);
-		expect(secondPage.knockout?.matches[0]?.home?.entryId).toBe(6954);
-		expect(secondPage.knockout?.hasNextPage).toBe(false);
-		expect(publicationReads).toBe(2);
-	});
-
-	it("fails closed when the Season payload advances after the observed head", async () => {
-		const observed = publicationRow({ event_id: 4, revision: 8 });
-		const advanced = publicationRow({ event_id: 4, revision: 9 });
-		let seasonArgs: unknown[] | undefined;
-		const context = buildSnapshotContext(new TestRedis(), {
-			databaseQuery: async (query: unknown, values: unknown) => {
-				const sql = String(query);
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) {
-					seasonArgs = values as unknown[];
-					return { rows: [advanced] };
+					return { rows: [publicationRow({ event_id: 4, revision: 9 })] };
 				}
 				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
 					return { rows: [seasonMetadataRow(observed, [4])] };
@@ -3052,13 +2892,16 @@ describe("My Tournament Review V2 repository", () => {
 			},
 		});
 		const repository = createMyTournamentReviewRepository();
-		await expect(
-			repository.loadSeasonReview(context, { tournamentId: 6953, throughEventId: 4 })
-		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
-		expect(seasonArgs?.slice(-3)).toEqual([4, "8", observed.content_sha256]);
+		const result = await repository.loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+		});
+		expect(result.latestRevision).toBe("8");
+		expect(result.semanticSha256).toBe(observed.content_sha256);
+		expect(publicationReads).toBe(0);
 	});
 
-	it("uses cumulative transfer cost for Season rows", async () => {
+	it("keeps cumulative points payloads out of the Season summary", async () => {
 		const latestPayload = structuredClone(publicationRow().payload) as Record<string, unknown>;
 		const latestPoints = latestPayload.points as Record<string, unknown>;
 		const latestRows = latestPoints.rows as Array<Record<string, unknown>>;
@@ -3101,10 +2944,11 @@ describe("My Tournament Review V2 repository", () => {
 			throughEventId: 4,
 			first: 2,
 		});
-		expect(result.points?.rows.map((row) => row.transferCost)).toEqual([4, 4]);
+		expect(result.points).toBeNull();
+		expect(result.phases?.[0]?.format).toBe("POINTS");
 	});
 
-	it("fails closed when an invalid cumulative cost is beyond the first Season page", async () => {
+	it("does not inspect cumulative payload fields in the Season summary", async () => {
 		const base = publicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
 		const points = payload.points as Record<string, unknown>;
@@ -3143,13 +2987,13 @@ describe("My Tournament Review V2 repository", () => {
 				throw new Error(`unexpected query: ${sql}`);
 			},
 		});
-		await expect(
-			createMyTournamentReviewRepository().loadSeasonReview(context, {
-				tournamentId: 6953,
-				throughEventId: 4,
-				first: 1,
-			})
-		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+		const result = await createMyTournamentReviewRepository().loadSeasonReview(context, {
+			tournamentId: 6953,
+			throughEventId: 4,
+			first: 1,
+		});
+		expect(result.state).toBe("READY");
+		expect(result.points).toBeNull();
 	});
 
 	it("accepts H2H pages whose independent match and standings slices are ordered differently", async () => {
@@ -3218,8 +3062,8 @@ describe("My Tournament Review V2 repository", () => {
 			pointsAgainst,
 		});
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "H2H",
 			h2h: {
 				matches,
@@ -3311,7 +3155,7 @@ describe("My Tournament Review V2 repository", () => {
 		).rejects.toMatchObject({ extensions: { code: "BAD_USER_INPUT" } });
 	});
 
-	it("honors the Season default page size when first is explicitly null", async () => {
+	it("keeps Season summary independent of payload page size arguments", async () => {
 		const base = publicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
 		const points = payload.points as Record<string, unknown>;
@@ -3357,8 +3201,8 @@ describe("My Tournament Review V2 repository", () => {
 			throughEventId: 4,
 			first: null,
 		});
-		expect(result.points?.rows).toHaveLength(60);
-		expect(result.points?.hasNextPage).toBe(false);
+		expect(result.points).toBeNull();
+		expect(result.latestEventId).toBe(4);
 	});
 
 	it("fails closed when H2H outcome counts do not add up to played", async () => {
@@ -3382,8 +3226,8 @@ describe("My Tournament Review V2 repository", () => {
 
 	it("fails closed when a completed knockout fixture has unsettled score metrics", async () => {
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "KNOCKOUT",
 			knockout: {
 				matches: [
@@ -3432,8 +3276,8 @@ describe("My Tournament Review V2 repository", () => {
 
 	it("fails closed when an H2H entry appears in multiple matches", async () => {
 		const payload = {
-			schemaVersion: "my-tournament-review-v2",
-			metricVersion: "descriptive-v1",
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
 			format: "H2H",
 			h2h: {
 				matches: [
@@ -3895,103 +3739,29 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(4);
 	});
 
-	it("rejects a self-consistent but truncated Season points witness", async () => {
-		const base = publicationRow();
-		const payload = structuredClone(base.payload) as Record<string, unknown>;
-		const points = payload.points as Record<string, unknown>;
-		const rows = points.rows as Array<Record<string, unknown>>;
-		rows.push({
-			...rows[0],
-			entryId: 6954,
-			entryName: "Second XI",
-			playerName: "Second Manager",
-			rank: 2,
-			grossPoints: 40,
-			transferCost: 0,
-			netPoints: 40,
-			seasonGrossPoints: 40,
-			seasonNetPoints: 40,
-		});
-		points.grossPointsTotal = 95;
-		points.grossPointsAverage = 47.5;
-		points.netPointsTotal = 91;
-		points.seasonGrossPointsTotal = 140;
-		points.seasonGrossPointsAverage = 70;
-		points.seasonNetPointsTotal = 136;
-		const latest = publicationRow({
-			payload,
-			row_count: 2,
-			expected_subject_count: 2,
-			ready_subject_count: 2,
-			content_sha256: postgresJsonbContentHash(payload),
-		});
-		const older = publicationRow({ event_id: 3, revision: 7 });
+	it("keeps truncated payload witnesses out of the Season cache", async () => {
+		const latest = publicationRow({ event_id: 4 });
 		const redis = new TestRedis();
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async (query: unknown) => {
-				const sql = String(query);
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
-					return { rows: [seasonMetadataRow(latest, [3, 4]), seasonMetadataRow(older, [3, 4])] };
+				if (String(query) !== MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) {
+					throw new Error(`unexpected query: ${String(query)}`);
 				}
-				if (sql === MY_TOURNAMENT_REVIEW_SEASON_SQL) return { rows: [latest] };
-				throw new Error(`unexpected query: ${sql}`);
+				return { rows: [seasonMetadataRow(latest, [4])] };
 			},
 		});
 		const repository = createMyTournamentReviewRepository();
-		await repository.loadSeasonReview(context, {
-			tournamentId: 6953,
-			throughEventId: 4,
-			first: 1,
-		});
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			points: {
-				grossPointsTotal: number;
-				grossPointsAverage: number;
-				netPointsTotal: number;
-				seasonGrossPointsTotal: number;
-				seasonGrossPointsAverage: number;
-				seasonNetPointsTotal: number;
-				nextCursor: string | null;
-				hasNextPage: boolean;
-				rows: Array<Record<string, unknown>>;
-				aggregateWitness: Record<string, unknown> & { rows: Array<Record<string, unknown>> };
-			};
-		};
-		const cachedPoints = cached.points;
-		const firstRow = cachedPoints.rows[0]!;
-		const witness = cachedPoints.aggregateWitness;
-		cachedPoints.rows = [firstRow];
-		cachedPoints.nextCursor = null;
-		cachedPoints.hasNextPage = false;
-		cachedPoints.grossPointsTotal = 100;
-		cachedPoints.grossPointsAverage = 100;
-		cachedPoints.netPointsTotal = 96;
-		cachedPoints.seasonGrossPointsTotal = 100;
-		cachedPoints.seasonGrossPointsAverage = 100;
-		cachedPoints.seasonNetPointsTotal = 96;
-		witness.rowCount = 1;
-		witness.applicableRowCount = 1;
-		witness.pageLength = 1;
-		witness.grossPointsTotal = 55;
-		witness.grossPointsAverage = 55;
-		witness.netPointsTotal = 51;
-		witness.seasonGrossPointsTotal = 100;
-		witness.seasonGrossPointsAverage = 100;
-		witness.seasonNetPointsTotal = 96;
-		witness.selectedGrossPointsTotal = 100;
-		witness.selectedGrossPointsAverage = 100;
-		witness.selectedNetPointsTotal = 96;
-		witness.rows = [witness.rows[0]!];
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
 		const result = await repository.loadSeasonReview(context, {
 			tournamentId: 6953,
 			throughEventId: 4,
-			first: 1,
 		});
-		expect(result.points).toMatchObject({ grossPointsTotal: 140, hasNextPage: true });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as Record<string, unknown>;
+		expect(cached.points).toBeNull();
+		expect(cached.h2h).toBeNull();
+		expect(cached.knockout).toBeNull();
+		expect(result.points).toBeNull();
 	});
 
 	it("rejects cached H2H standings outside the full fixture coverage witness", async () => {
@@ -4073,7 +3843,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(result.h2h?.standings[0]).toMatchObject({ groupId: 1, entryId: 6953 });
 	});
 
-	it("rejects cached non-READY status rows that retain a publication identity", async () => {
+	it("reads status directly and never accepts a cached non-READY identity", async () => {
 		const redis = new TestRedis();
 		const context = buildSnapshotContext(redis, {
 			databaseQuery: async () => ({
@@ -4082,10 +3852,15 @@ describe("My Tournament Review V2 repository", () => {
 						event_id: 4,
 						format: "POINTS",
 						state: "READY",
+						eligible_at: "2026-08-20T00:00:00.000Z",
+						ready_at: "2026-08-20T00:00:03.000Z",
+						last_observed_at: "2026-08-20T00:00:04.000Z",
 						next_attempt_at: null,
 						execution_attempts: 1,
 						source_rechecks: 0,
 						degraded_at: null,
+						repair_issue_id: null,
+						last_error_code: null,
 						revision: 8,
 						published_at: "2026-08-20T00:00:03.000Z",
 						latest_finalized_event_id: 4,
@@ -4093,35 +3868,9 @@ describe("My Tournament Review V2 repository", () => {
 				],
 			}),
 		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadStatus(context, 6953);
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
-			events: Array<{ state: string; revision: string | null; publishedAt: string | null }>;
-		};
-		cached.events[0]!.state = "PENDING";
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadStatus(context, 6953);
+		const result = await createMyTournamentReviewRepository().loadStatus(context, 6953);
 		expect(result.events[0]).toMatchObject({ state: "READY", revision: "8" });
-	});
-
-	it("rejects a cached catalog with an invalid DateTime asOf", async () => {
-		const redis = new TestRedis();
-		const context = buildSnapshotContext(redis, {
-			databaseQuery: async () => ({ rows: [catalogRow()] }),
-		});
-		const repository = createMyTournamentReviewRepository();
-		await repository.loadCatalog(context, "ACCESSIBLE");
-		const cacheKey = [...redis.values.keys()][0];
-		expect(cacheKey).toBeDefined();
-		const cached = JSON.parse(redis.values.get(cacheKey!)!) as { asOf: string };
-		cached.asOf = "not-a-date";
-		redis.values.set(cacheKey!, JSON.stringify(cached));
-
-		const result = await repository.loadCatalog(context, "ACCESSIBLE");
-		expect(result.asOf).not.toBe("not-a-date");
+		expect(redis.values.size).toBe(0);
 	});
 
 	it("rejects a cached Gameweek whose scope does not match the observed head", async () => {
@@ -4142,5 +3891,35 @@ describe("My Tournament Review V2 repository", () => {
 
 		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
 		expect(result.scope).toMatchObject({ tournamentId: 6953, eventId: 4, revision: "8" });
+	});
+
+	it("rejects cached Gameweek freshness that differs from the observed head", async () => {
+		const redis = new TestRedis();
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			scope: { freshness: { eventDataCheckedAt: string; publishedAt: string } };
+		};
+		cached.scope.freshness = {
+			...cached.scope.freshness,
+			eventDataCheckedAt: "2026-08-20T00:00:00.500Z",
+			publishedAt: "2026-08-20T00:00:04.000Z",
+		};
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.scope?.freshness).toMatchObject({
+			eventDataCheckedAt: "2026-08-20T00:00:00.000Z",
+			publishedAt: "2026-08-20T00:00:03.000Z",
+		});
 	});
 });

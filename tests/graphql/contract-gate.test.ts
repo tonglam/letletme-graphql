@@ -11,6 +11,7 @@ describe("My Tournament Review V2 contract gate", () => {
 		expect(requiresMyTournamentReviewV2(["events"])).toBe(false);
 		expect(requiresMyTournamentReviewV2(["myTournamentReviewCatalog"])).toBe(true);
 		expect(requiresMyTournamentReviewV2(["myTournamentSeasonReview", "events"])).toBe(true);
+		expect(requiresMyTournamentReviewV2(["myFplCompetitionsDesk"])).toBe(true);
 	});
 
 	it("requires the explicit V2 header", () => {
@@ -31,7 +32,7 @@ describe("My Tournament Review V2 contract gate", () => {
 		expect(accepted).toBeNull();
 	});
 
-	it("does not gate legacy roots", () => {
-		expect(validateMyTournamentReviewContract(["myFplCompetitionBoard"], new Headers())).toBeNull();
+	it("does not gate unrelated roots", () => {
+		expect(validateMyTournamentReviewContract(["events"], new Headers())).toBeNull();
 	});
 });

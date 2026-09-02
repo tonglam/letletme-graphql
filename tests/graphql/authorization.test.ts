@@ -201,14 +201,14 @@ describe("authorizeGraphQLRequest", () => {
 		}
 	});
 
-	it("allows the My FPL competitions desk without a selected tournament", async () => {
-		for (const variables of [{}, { tournamentId: null }]) {
+	it("allows the My Tournament Review catalog without a selected tournament", async () => {
+		for (const variables of [{ scope: "ACCESSIBLE" }, { scope: "MANAGED" }]) {
 			const result = await authorize(
-				`query Desk($tournamentId: Int) {
-					myFplCompetitionsDesk(tournamentId: $tournamentId) { state }
+				`query Catalog($scope: MyTournamentReviewScope!) {
+					myTournamentReviewCatalog(scope: $scope) { state }
 				}`,
 				variables,
-				websitePrincipal
+				variables.scope === "ACCESSIBLE" ? websitePrincipal : websitePrincipal
 			);
 			expect(result).toEqual({ ok: true });
 		}
@@ -216,9 +216,9 @@ describe("authorizeGraphQLRequest", () => {
 
 	it("checks My FPL tournament membership before protected competition reads", async () => {
 		for (const field of [
-			"myFplCompetitionsDesk(tournamentId: $tournamentId)",
-			"myFplCompetitionBoard(tournamentId: $tournamentId, eventId: 1)",
-			"myFplCompetitionSeasonPath(tournamentId: $tournamentId, throughEventId: 1)",
+			"myTournamentGameweekReview(tournamentId: $tournamentId, eventId: 1)",
+			"myTournamentSeasonReview(tournamentId: $tournamentId, throughEventId: 1)",
+			"myTournamentReviewStatus(tournamentId: $tournamentId)",
 			"myFplCompetitionSetupStatus(tournamentId: $tournamentId)",
 		]) {
 			const query = `query Read($tournamentId: Int!) { ${field} { __typename } }`;
@@ -278,8 +278,8 @@ describe("authorizeGraphQLRequest", () => {
 		const result = await authorizeGraphQLRequest({
 			body: {
 				query: `query Read($tournamentId: Int!) {
-					myFplCompetitionBoard(tournamentId: $tournamentId, eventId: 1) { state }
-					myFplCompetitionSeasonPath(tournamentId: $tournamentId, throughEventId: 1) { state }
+					myTournamentGameweekReview(tournamentId: $tournamentId, eventId: 1) { state }
+					myTournamentSeasonReview(tournamentId: $tournamentId, throughEventId: 1) { state }
 				}`,
 				variables: { tournamentId: 7 },
 			},

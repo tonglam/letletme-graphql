@@ -763,7 +763,7 @@ describe("GraphQL request limits", () => {
 		for (const [query, rateLimitCostUnits] of [
 			["query { myFplManagerReview { state } }", 8],
 			["query { myFplManagerGameweek(eventId: 1) { state } }", 5],
-			["query { myFplCompetitionSeasonPath(tournamentId: 1, throughEventId: 1) { state } }", 5],
+			["query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1) { state } }", 20],
 			["query { myFplCompetitionSetupStatus(tournamentId: 1) { ready } }", 5],
 		] as const) {
 			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
@@ -772,15 +772,12 @@ describe("GraphQL request limits", () => {
 			});
 		}
 
-		for (const query of [
-			"query { myFplCompetitionsDesk { state } }",
-			"query { myFplCompetitionBoard(tournamentId: 1, eventId: 1) { state } }",
-		]) {
-			expect(validateGraphQLRequestLimits({ query }, schema)).toMatchObject({
-				ok: true,
-				rateLimitCostUnits: 10,
-			});
-		}
+		expect(
+			validateGraphQLRequestLimits(
+				{ query: "query { myTournamentReviewCatalog(scope: ACCESSIBLE) { state } }" },
+				schema
+			)
+		).toMatchObject({ ok: true, rateLimitCostUnits: 10 });
 	});
 
 	it("scopes wider AST budgets to one exact Manager Review root", () => {
@@ -826,9 +823,16 @@ describe("GraphQL request limits", () => {
 
 	it("charges V2 tournament review roots by bounded workload", () => {
 		const cases = [
-			["query { myTournamentReviewCatalog { tournaments { tournamentId } } }", 10],
+			[
+				"query { myTournamentReviewCatalog(scope: ACCESSIBLE) { tournaments { tournamentId } } }",
+				10,
+			],
 			["query { myTournamentGameweekReview(tournamentId: 6953, eventId: 4) { state } }", 20],
 			["query { myTournamentSeasonReview(tournamentId: 6953, throughEventId: 4) { state } }", 20],
+			[
+				'query { myTournamentSeasonReviewSection(tournamentId: 6953, throughEventId: 4, phaseId: "points", section: POINTS_STANDINGS, revision: "1", semanticSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") { state } }',
+				20,
+			],
 			["query { myTournamentReviewStatus(tournamentId: 6953) { tournamentId } }", 5],
 		] as const;
 		for (const [query, rateLimitCostUnits] of cases) {
@@ -864,17 +868,19 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
-	it("allows one bounded competitions desk projection above the generic AST ceiling", () => {
+	it("allows one bounded tournament review projection above the generic AST ceiling", () => {
 		const fields = Array.from({ length: 110 }, () => "__typename").join(" ");
 		expect(
 			validateGraphQLRequestLimits(
-				{ query: `query { myFplCompetitionsDesk { ${fields} } }` },
+				{
+					query: `query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1) { ${fields} } }`,
+				},
 				schema
 			)
 		).toMatchObject({
 			ok: true,
-			rootFields: ["myFplCompetitionsDesk"],
-			rateLimitCostUnits: 10,
+			rootFields: ["myTournamentSeasonReview"],
+			rateLimitCostUnits: 20,
 		});
 
 		expect(
@@ -884,7 +890,9 @@ describe("GraphQL request limits", () => {
 		const oversized = Array.from({ length: 205 }, () => "__typename").join(" ");
 		expect(
 			validateGraphQLRequestLimits(
-				{ query: `query { myFplCompetitionsDesk { ${oversized} } }` },
+				{
+					query: `query { myTournamentSeasonReview(tournamentId: 1, throughEventId: 1) { ${oversized} } }`,
+				},
 				schema
 			)
 		).toMatchObject({ ok: false, code: "QUERY_TOO_COMPLEX" });

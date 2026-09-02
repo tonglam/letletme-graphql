@@ -2562,9 +2562,6 @@ describe("My FPL review repository", () => {
 				return { state: "EMPTY" as MyFplReviewState } as never;
 			},
 			loadManagerGameweek: async () => ({ state: "PENDING" as MyFplReviewState }) as never,
-			loadCompetitionsDesk: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
-			loadCompetitionBoard: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
-			loadCompetitionSeasonPath: async () => ({ state: "EMPTY" as MyFplReviewState }) as never,
 			loadCompetitionSetupStatus: async () => {
 				throw new GraphQLError("database unavailable", {
 					extensions: { code: "INTERNAL_SERVER_ERROR" },
@@ -2576,17 +2573,6 @@ describe("My FPL review repository", () => {
 		await resolvers.Query.myFplManagerReview(null, {}, context);
 		expect(calls).toEqual(["review"]);
 		await resolvers.Query.myFplManagerGameweek(null, { eventId: 1 }, context);
-		await resolvers.Query.myFplCompetitionsDesk(null, {}, context);
-		await resolvers.Query.myFplCompetitionBoard(
-			null,
-			{ tournamentId: 7, eventId: 1, page: 1, pageSize: 1 },
-			context
-		);
-		await resolvers.Query.myFplCompetitionSeasonPath(
-			null,
-			{ tournamentId: 7, throughEventId: 1 },
-			context
-		);
 		await expect(
 			resolvers.Query.myFplCompetitionSetupStatus(null, { tournamentId: 7 }, context)
 		).rejects.toThrow("database unavailable");
@@ -2654,5 +2640,200 @@ describe("My FPL review repository", () => {
 			complete: true,
 			eligibility: "ELIGIBLE",
 		});
+	});
+
+	it("maps every V2.1 union, phase and catalog shape", async () => {
+		const fixture = makeFixture();
+		const scope = {
+			tournamentId: 7,
+			eventId: 4,
+			revision: "4",
+			format: "POINTS",
+			state: "READY",
+			freshness: {
+				eventDataCheckedAt: "2026-08-20T00:00:00.000Z",
+				publishedAt: "2026-08-20T00:01:00.000Z",
+			},
+			contentSha256: "a".repeat(64),
+			correctedAt: "2026-08-20T00:02:00.000Z",
+			rowCount: 2,
+			expectedSubjectCount: 2,
+			readySubjectCount: 2,
+			notApplicableSubjectCount: 0,
+		};
+		const pointReview = {
+			state: "READY",
+			scope,
+			points: { rows: [] },
+		} as never;
+		const h2hReview = {
+			state: "READY",
+			scope: { ...scope, format: "H2H" },
+			h2h: { matches: [], standings: [] },
+		} as never;
+		const knockoutReview = {
+			state: "READY",
+			scope: { ...scope, format: "KNOCKOUT" },
+			knockout: { matches: [] },
+		} as never;
+		const reviewRepository: MyTournamentReviewRepository = {
+			loadCatalog: async () =>
+				({
+					state: "READY",
+					asOf: "2026-08-20T00:00:00.000Z",
+					viewerEntryId: 123,
+					adminReadAll: true,
+					edges: [
+						{
+							cursor: "cursor-1",
+							node: {
+								tournamentId: 7,
+								name: "Codex Cup",
+								creator: "user-1",
+								leagueId: 7,
+								leagueType: "CLASSIC",
+								totalTeamNum: 2,
+								setupStatus: null,
+								previousReadyEventId: null,
+								latestFinalizedScope: null,
+								phaseSummaries: null,
+							},
+						},
+					],
+					pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+				}) as never,
+			loadGameweekReview: async (_context, args) =>
+				args.eventId === 1 ? pointReview : args.eventId === 2 ? h2hReview : knockoutReview,
+			loadSeasonReview: async (_context, args) =>
+				args.throughEventId === 1
+					? ({
+							state: "READY",
+							tournamentId: 7,
+							throughEventId: 1,
+							latestEventId: 1,
+							finalizedEventIds: [1],
+							phases: [
+								{
+									phaseId: "points",
+									format: "POINTS",
+									startEventId: 1,
+									endEventId: 1,
+									state: "READY",
+								},
+							],
+						} as never)
+					: ({
+							state: "READY",
+							tournamentId: 7,
+							throughEventId: 2,
+							latestRevision: "2",
+							latestEventId: 2,
+							finalizedEventIds: [1, 2],
+							format: "POINTS",
+							freshness: {
+								eventDataCheckedAt: "2026-08-20T00:00:00.000Z",
+								publishedAt: "2026-08-20T00:01:00.000Z",
+							},
+							semanticSha256: "b".repeat(64),
+						} as never),
+			loadSeasonReviewSection: async () =>
+				({
+					state: "READY",
+					tournamentId: 7,
+					throughEventId: 1,
+					phaseId: "points",
+					section: "POINTS_STANDINGS",
+					revision: "1",
+					semanticSha256: "c".repeat(64),
+					pageInfo: { hasNextPage: false, endCursor: null },
+				}) as never,
+			loadStatus: async () => ({ state: "READY" }) as never,
+		};
+		const resolvers = createMyFplResolvers(fixture.repository, reviewRepository);
+		const catalog = await resolvers.Query.myTournamentReviewCatalog(
+			null,
+			{ scope: "MANAGED", first: 50, after: null, search: null },
+			fixture.context
+		);
+		expect(catalog.edges[0]?.node.setupStatus).toBe("unknown");
+		expect(catalog.edges[0]?.node.phaseSummaries).toEqual([]);
+		const point = await resolvers.Query.myTournamentGameweekReview(
+			null,
+			{ tournamentId: 7, eventId: 1 },
+			fixture.context
+		);
+		const h2h = await resolvers.Query.myTournamentGameweekReview(
+			null,
+			{ tournamentId: 7, eventId: 2 },
+			fixture.context
+		);
+		const knockout = await resolvers.Query.myTournamentGameweekReview(
+			null,
+			{ tournamentId: 7, eventId: 3 },
+			fixture.context
+		);
+		expect(point.payload).toMatchObject({ format: "POINTS" });
+		expect(h2h.payload).toMatchObject({ format: "H2H" });
+		expect(knockout.payload).toMatchObject({ format: "KNOCKOUT" });
+		const season = await resolvers.Query.myTournamentSeasonReview(
+			null,
+			{ tournamentId: 7, throughEventId: 1 },
+			fixture.context
+		);
+		const fallbackSeason = await resolvers.Query.myTournamentSeasonReview(
+			null,
+			{ tournamentId: 7, throughEventId: 2 },
+			fixture.context
+		);
+		expect(season.phases).toHaveLength(1);
+		expect((fallbackSeason.phases as Array<{ format?: string }>)[0]?.format).toBe("POINTS");
+		const section = await resolvers.Query.myTournamentSeasonReviewSection(
+			null,
+			{
+				tournamentId: 7,
+				throughEventId: 1,
+				phaseId: "points",
+				section: "POINTS_STANDINGS",
+				revision: "1",
+				semanticSha256: "c".repeat(64),
+			},
+			fixture.context
+		);
+		expect(section.section).toBe("POINTS_STANDINGS");
+		expect(resolvers.MyTournamentGameweekReview.scope({ scope: null })).toBeNull();
+		expect(resolvers.MyTournamentGameweekReview.payload({ payload: null })).toBeNull();
+		expect(resolvers.MyTournamentReviewPayload.__resolveType({ format: "POINTS" })).toBe(
+			"MyTournamentReviewPointsPayload"
+		);
+		expect(resolvers.MyTournamentReviewPayload.__resolveType({ format: "H2H" })).toBe(
+			"MyTournamentReviewH2HPayload"
+		);
+		expect(resolvers.MyTournamentReviewPayload.__resolveType({ format: "KNOCKOUT" })).toBe(
+			"MyTournamentReviewKnockoutPayload"
+		);
+		expect(resolvers.MyTournamentReviewPayload.__resolveType({ format: "UNKNOWN" })).toBeNull();
+		expect(resolvers.MyTournamentReviewPointsPayload.format()).toBe("POINTS");
+		expect(resolvers.MyTournamentReviewH2HPayload.format()).toBe("H2H");
+		expect(resolvers.MyTournamentReviewKnockoutPayload.format()).toBe("KNOCKOUT");
+		const noSectionResolvers = createMyFplResolvers(fixture.repository, {
+			loadCatalog: async () => ({}) as never,
+			loadGameweekReview: async () => ({}) as never,
+			loadSeasonReview: async () => ({}) as never,
+			loadStatus: async () => ({}) as never,
+		});
+		await expect(
+			noSectionResolvers.Query.myTournamentSeasonReviewSection(
+				null,
+				{
+					tournamentId: 7,
+					throughEventId: 1,
+					phaseId: "points",
+					section: "POINTS_STANDINGS",
+					revision: "1",
+					semanticSha256: "c".repeat(64),
+				},
+				fixture.context
+			)
+		).rejects.toThrow("Review section reader is unavailable");
 	});
 });

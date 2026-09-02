@@ -146,20 +146,19 @@ add(
 		"tournament",
 		"tournamentLiveParticipants",
 		"tournamentDetailDesk",
-		"myFplCompetitionBoard",
 		"leagueLiveHead",
 		"entryLiveCompetitionBoard",
-		"myFplCompetitionSeasonPath",
 		"myFplCompetitionSetupStatus",
 		"myTournamentGameweekReview",
 		"myTournamentSeasonReview",
+		"myTournamentSeasonReviewSection",
 		"myTournamentReviewStatus",
 	],
 	"viewerTournamentMember",
 	{ arg: "tournamentId" }
 );
 
-for (const field of ["myFplManagerReview", "myFplManagerGameweek", "myFplCompetitionsDesk"]) {
+for (const field of ["myFplManagerReview", "myFplManagerGameweek"]) {
 	registry.set(field, policy("viewerEntry"));
 }
 registry.set("myTournamentReviewCatalog", policy("viewerEntry"));
@@ -195,6 +194,7 @@ for (const field of [
 	"entryLiveCompetitionBoard",
 	"myTournamentGameweekReview",
 	"myTournamentSeasonReview",
+	"myTournamentSeasonReviewSection",
 	"myTournamentReviewStatus",
 ]) {
 	const current = registry.get(field);
@@ -251,9 +251,6 @@ const lightweightFields = [
 	"managedTournamentStatus",
 	"myFplManagerReview",
 	"myFplManagerGameweek",
-	"myFplCompetitionsDesk",
-	"myFplCompetitionBoard",
-	"myFplCompetitionSeasonPath",
 	"myFplCompetitionSetupStatus",
 	"calcLivePointsByEntry",
 	"calcLivePointsForEntries",
@@ -261,6 +258,7 @@ const lightweightFields = [
 	"myTournamentReviewCatalog",
 	"myTournamentGameweekReview",
 	"myTournamentSeasonReview",
+	"myTournamentSeasonReviewSection",
 	"myTournamentReviewStatus",
 ] as const;
 for (const field of lightweightFields) {
@@ -278,10 +276,6 @@ export const ROOT_FIELD_CONDITIONAL_ACCESS: ReadonlyMap<
 	["trendCohorts", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
 	["trendCohortSnapshot", [{ argument: "access", equals: "MINE", access: "viewerEntry" }]],
 	[
-		"myFplCompetitionsDesk",
-		[{ argument: "tournamentId", when: "provided", access: "viewerTournamentMember" }],
-	],
-	[
 		"myTournamentReviewCatalog",
 		[
 			{ argument: "scope", equals: "MANAGED", access: "verifiedEntry" },
@@ -294,17 +288,6 @@ export const LIGHTWEIGHT_CORE_FIELDS: ReadonlySet<string> = new Set(
 		.filter(([, fieldPolicy]) => fieldPolicy.core === "lightweight")
 		.map(([fieldName]) => fieldName)
 );
-
-/**
- * These roots do not need the Core payload, but their immutable review cache
- * keys must still be fenced by the current Core publication revision.
- */
-export const REVISIONED_QUERY_CACHE_FIELDS: ReadonlySet<string> = new Set([
-	"myTournamentReviewCatalog",
-	"myTournamentGameweekReview",
-	"myTournamentSeasonReview",
-	"myTournamentReviewStatus",
-]);
 
 export const getRootFieldPolicy = (fieldName: string): RootFieldPolicy | undefined =>
 	ROOT_FIELD_POLICIES.get(fieldName);

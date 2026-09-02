@@ -38,7 +38,7 @@ describe("Live Matches V3 contract gate", () => {
 		expect(
 			hasLiveMatchesV3Contract(
 				new Headers({
-					[LIVE_MATCHES_CONTRACT_HEADER]: "live-matches-v3, my-tournament-review-v2",
+					[LIVE_MATCHES_CONTRACT_HEADER]: "live-matches-v3, my-tournament-review-v2.1",
 				})
 			)
 		).toBe(true);

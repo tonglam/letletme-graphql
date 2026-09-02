@@ -49,12 +49,6 @@ describe("GraphQL domain manifest", () => {
 		const myFpl = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "my-fpl");
 		expect(myFpl?.conditionalAuth).toEqual([
 			{
-				field: "myFplCompetitionsDesk",
-				argument: "tournamentId",
-				when: "provided",
-				access: "viewerTournamentMember",
-			},
-			{
 				field: "myTournamentReviewCatalog",
 				argument: "scope",
 				equals: "MANAGED",
@@ -67,9 +61,10 @@ describe("GraphQL domain manifest", () => {
 				access: "platformAdmin",
 			},
 		]);
-		expect(myFpl?.authByRootField.myFplCompetitionsDesk).toEqual([
+		expect(myFpl?.authByRootField.myTournamentReviewCatalog).toEqual([
 			"viewerEntry",
-			"viewerTournamentMember",
+			"verifiedEntry",
+			"platformAdmin",
 		]);
 		const players = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "players");
 		expect(players?.rateLimitBudget.playersForPicker).toBe(5);
@@ -103,7 +98,6 @@ describe("GraphQL domain manifest", () => {
 			type Query {
 				trendCohorts(access: TrendCohortAccess!): String
 				trendCohortSnapshot(access: TrendCohortAccess = PUBLIC): String
-				myFplCompetitionsDesk(tournamentId: Int): String
 				myTournamentReviewCatalog(scope: MyTournamentReviewScope = ACCESSIBLE): String
 			}
 		`);
@@ -111,29 +105,31 @@ describe("GraphQL domain manifest", () => {
 
 		const typoSchema = buildSchema(`
 			enum TrendCohortAccess { PUBLIC MINE }
+			enum MyTournamentReviewScope { ACCESSIBLE MANAGED ALL }
 			type Query {
 				trendCohorts(access: TrendCohortAccess!): String
 				trendCohortSnapshot(access: TrendCohortAccess): String
-				myFplCompetitionsDesk(tournamentID: Int): String
+				myTournamentReviewCatalog(scopeName: MyTournamentReviewScope): String
 			}
 		`);
 		const errors = validateGraphQLConditionalAuthAgainstSchema(typoSchema);
 		expect(errors).toContain(
-			"Query.myFplCompetitionsDesk.tournamentId: conditional auth argument is not defined in the schema"
+			"Query.myTournamentReviewCatalog.scope: conditional auth argument is not defined in the schema"
 		);
 	});
 
 	test("rejects conditional equality values that do not match the argument type", () => {
 		const schemaWithInvalidEnum = buildSchema(`
 			enum TrendCohortAccess { PUBLIC }
+			enum MyTournamentReviewScope { ACCESSIBLE }
 			type Query {
 				trendCohorts(access: TrendCohortAccess!): String
 				trendCohortSnapshot(access: TrendCohortAccess): String
-				myFplCompetitionsDesk(tournamentId: Int): String
+				myTournamentReviewCatalog(scope: MyTournamentReviewScope): String
 			}
 		`);
 		expect(validateGraphQLConditionalAuthAgainstSchema(schemaWithInvalidEnum)).toContain(
-			"Query.trendCohorts.access: equals must name a value in enum TrendCohortAccess"
+			"Query.myTournamentReviewCatalog.scope: equals must name a value in enum MyTournamentReviewScope"
 		);
 	});
 });
