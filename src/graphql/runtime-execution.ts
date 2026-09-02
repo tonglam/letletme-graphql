@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	ApolloServer,
 	HeaderMap,
@@ -11,7 +12,7 @@ import { env } from "../infra/env";
 import { logger } from "../infra/logger";
 import type { RequestTiming } from "../http/request-timing";
 import { metrics } from "../infra/metrics";
-import type { GraphQLContext } from "./context";
+import type { GraphQLContext, LiveMatchExecutionObservation } from "./context";
 import { createDeprecatedSchemaUsageExecutionListener } from "./deprecation-observability";
 import { schema } from "./schema";
 
@@ -77,6 +78,138 @@ export const createGraphQLApolloServer = (): ApolloServer<GraphQLContext> =>
 		],
 	});
 
+type ApolloHttpGraphQLResponse = Awaited<
+	ReturnType<ApolloServer<GraphQLContext>["executeHTTPGraphQLRequest"]>
+>;
+
+type CompleteApolloResponse = Readonly<{
+	status: number;
+	headers: readonly [string, string][];
+	body: string;
+	observation: LiveMatchExecutionObservation;
+}>;
+
+const liveMatchdayExecutionFlights = new Map<string, Promise<CompleteApolloResponse | null>>();
+
+type LiveMatchdayExecutionTransport = Readonly<{
+	method: string;
+	accept: string;
+	contentType: string;
+	apolloRequirePreflight: string;
+	apolloOperationName: string;
+}>;
+
+/**
+ * Build a process-local key for one public liveMatchday operation. The body is
+ * hashed so query text and variables never enter state or telemetry, while the
+ * season and deploy SHA fence the flight to one exact runtime/data scope.
+ */
+export const liveMatchdayExecutionFlightKey = (
+	parsedBody: unknown,
+	season: string,
+	transport: LiveMatchdayExecutionTransport
+): string | null => {
+	let serialized: string | undefined;
+	try {
+		serialized = JSON.stringify({
+			transport: {
+				method: transport.method.toUpperCase(),
+				accept: transport.accept,
+				contentType: transport.contentType,
+				apolloRequirePreflight: transport.apolloRequirePreflight,
+				apolloOperationName: transport.apolloOperationName,
+			},
+			parsedBody,
+		});
+	} catch {
+		return null;
+	}
+	if (serialized === undefined) return null;
+	const bodyHash = createHash("sha256").update(serialized, "utf8").digest("hex");
+	return `live-matchday:${env.DEPLOY_SHA}:${season}:${bodyHash}`;
+};
+
+const materializeCompleteResponse = (
+	response: ApolloHttpGraphQLResponse,
+	observation: LiveMatchExecutionObservation | null
+): CompleteApolloResponse | null => {
+	if (response.body.kind !== "complete" || observation === null) return null;
+	return {
+		status: response.status ?? 200,
+		headers: [...response.headers.entries()],
+		body: response.body.string,
+		observation,
+	};
+};
+
+const materializeCompleteResponseSafely = (
+	response: ApolloHttpGraphQLResponse,
+	getObservation: () => LiveMatchExecutionObservation | null
+): CompleteApolloResponse | null => {
+	try {
+		return materializeCompleteResponse(response, getObservation());
+	} catch {
+		return null;
+	}
+};
+
+const restoreCompleteResponse = (response: CompleteApolloResponse): ApolloHttpGraphQLResponse => {
+	const headers = new HeaderMap();
+	for (const [name, value] of response.headers) headers.set(name, value);
+	return {
+		status: response.status,
+		headers,
+		body: { kind: "complete", string: response.body },
+	};
+};
+
+const isLiveMatchdayResponseShareable = (response: CompleteApolloResponse): boolean =>
+	response.observation.shareUntilMs === null || Date.now() < response.observation.shareUntilMs;
+
+/**
+ * Coalesce only overlapping complete executions. This is intentionally not a
+ * completed-result cache: once the owner settles, a later request performs a
+ * fresh Redis/revision read. Non-complete or rejected executions are never
+ * shared, preserving Apollo's normal streaming/error behavior.
+ */
+const executeLiveMatchdayFlight = async (
+	key: string,
+	execute: () => Promise<ApolloHttpGraphQLResponse>,
+	getObservation: () => LiveMatchExecutionObservation | null
+): Promise<ApolloHttpGraphQLResponse> => {
+	const existing = liveMatchdayExecutionFlights.get(key);
+	if (existing) {
+		const response = await existing;
+		if (response && isLiveMatchdayResponseShareable(response)) {
+			metrics.liveMatchExecutionCoalescedTotal.inc();
+			metrics.liveMatchDeliveryTotal
+				.labels(
+					response.observation.view,
+					response.observation.state,
+					response.observation.servedFrom
+				)
+				.inc();
+			return restoreCompleteResponse(response);
+		}
+		return execute();
+	}
+
+	const ownerExecution = execute();
+	const shared = ownerExecution
+		.then(
+			(response) => materializeCompleteResponseSafely(response, getObservation),
+			() => null
+		)
+		.finally(() => {
+			if (liveMatchdayExecutionFlights.get(key) === shared) {
+				liveMatchdayExecutionFlights.delete(key);
+			}
+		});
+	liveMatchdayExecutionFlights.set(key, shared);
+	const response = await shared;
+	return response ? restoreCompleteResponse(response) : ownerExecution;
+};
+
 export type GraphQLExecutionResult = Readonly<{
 	response: Response;
 	hasErrors: boolean;
@@ -90,6 +223,8 @@ export const executeGraphQLRequest = async ({
 	requestTiming,
 	requestId,
 	corsHeaders,
+	responseFlightKey,
+	responseFlightObservation,
 }: {
 	apollo: ApolloServer<GraphQLContext>;
 	request: Request;
@@ -98,13 +233,17 @@ export const executeGraphQLRequest = async ({
 	requestTiming: RequestTiming;
 	requestId: string;
 	corsHeaders: Record<string, string>;
+	/** Only set for the public, single-root liveMatchday operation. */
+	responseFlightKey?: string;
+	/** Owner-only publication metadata used to guard and observe restored results. */
+	responseFlightObservation?: () => LiveMatchExecutionObservation | null;
 }): Promise<GraphQLExecutionResult> => {
 	const headers = new HeaderMap();
 	request.headers.forEach((value, key) => {
 		headers.set(key, value);
 	});
 
-	const httpGraphQLResponse = await requestTiming.measure("apollo", () =>
+	const execute = (): Promise<ApolloHttpGraphQLResponse> =>
 		apollo.executeHTTPGraphQLRequest({
 			httpGraphQLRequest: {
 				method: request.method.toUpperCase(),
@@ -113,7 +252,11 @@ export const executeGraphQLRequest = async ({
 				search: "",
 			},
 			context: async () => context,
-		})
+		});
+	const httpGraphQLResponse = await requestTiming.measure("apollo", () =>
+		responseFlightKey && responseFlightObservation
+			? executeLiveMatchdayFlight(responseFlightKey, execute, responseFlightObservation)
+			: execute()
 	);
 
 	const stopResponseBuild = requestTiming.start("responseBuild");

@@ -171,6 +171,11 @@ const liveMatchDeliveryTotal = new Counter({
 	labelNames: ["view", "state", "served_from"] as const,
 });
 
+const liveMatchExecutionCoalescedTotal = new Counter({
+	name: "live_match_execution_coalesced_total",
+	help: "Concurrent Live Matches V3 GraphQL executions served from one complete in-flight execution",
+});
+
 // Keep zero-valued fallback/roundtrip series visible before the first
 // request. Ops treats these metric families as required, and an absent
 // series must mean an instrumentation failure rather than a healthy zero.
@@ -249,6 +254,7 @@ registry.registerMetric(liveMatchPayloadBytes);
 registry.registerMetric(liveMatchRedisRoundtripsTotal);
 registry.registerMetric(liveMatchFallbackTotal);
 registry.registerMetric(liveMatchDeliveryTotal);
+registry.registerMetric(liveMatchExecutionCoalescedTotal);
 registry.registerMetric(rateLimitTelemetryOverflows);
 registry.registerMetric(postgresPoolClients);
 registry.registerMetric(postgresPoolWaitEvents);
@@ -284,6 +290,7 @@ export const metrics = {
 	liveMatchRedisRoundtripsTotal,
 	liveMatchFallbackTotal,
 	liveMatchDeliveryTotal,
+	liveMatchExecutionCoalescedTotal,
 	rateLimitTelemetryOverflows,
 	postgresPoolClients,
 	postgresPoolWaitEvents,

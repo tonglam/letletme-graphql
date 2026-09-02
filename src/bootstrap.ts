@@ -1,7 +1,11 @@
 import { graphQLErrorResponse } from "./graphql/authorization";
-import type { GraphQLContext } from "./graphql/context";
+import type { GraphQLContext, LiveMatchExecutionObservation } from "./graphql/context";
 import { buildGraphQLRuntimeContext, resolvePrincipalAndUser } from "./graphql/runtime-context";
-import { createGraphQLApolloServer, executeGraphQLRequest } from "./graphql/runtime-execution";
+import {
+	createGraphQLApolloServer,
+	executeGraphQLRequest,
+	liveMatchdayExecutionFlightKey,
+} from "./graphql/runtime-execution";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
@@ -546,14 +550,40 @@ export const startServer = async (): Promise<void> => {
 					}
 					graphQLContext = contextResult.context;
 					fullCoreLoaded = contextResult.fullCoreLoaded;
+					const liveMatchRequestContext = graphQLContext;
 					const execution = await executeGraphQLRequest({
 						apollo,
 						request,
 						parsedBody,
-						context: graphQLContext,
+						context: liveMatchRequestContext,
 						requestTiming,
 						requestId,
 						corsHeaders,
+						responseFlightKey:
+							liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
+								? (liveMatchdayExecutionFlightKey(
+										parsedBody,
+										liveMatchRequestContext.currentSeason.seasonCode,
+										{
+											method: request.method,
+											accept: request.headers.get("accept") ?? "",
+											contentType: request.headers.get("content-type") ?? "",
+											apolloRequirePreflight: request.headers.get("apollo-require-preflight") ?? "",
+											apolloOperationName: request.headers.get("x-apollo-operation-name") ?? "",
+										}
+									) ?? undefined)
+								: undefined,
+						responseFlightObservation:
+							liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
+								? () =>
+										(
+											liveMatchRequestContext.requestScope as
+												| {
+														liveMatchExecutionObservation?: LiveMatchExecutionObservation;
+												  }
+												| undefined
+										)?.liveMatchExecutionObservation ?? null
+								: undefined,
 					});
 					// A resolver may fall back from a lightweight root to the full Core
 					// publication. Reflect the actual read path in the request log.
