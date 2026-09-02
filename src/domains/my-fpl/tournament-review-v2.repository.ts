@@ -470,6 +470,76 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
 	    AND NOT (${publicationAlias}.payload ? 'points')
 	    AND NOT (${publicationAlias}.payload ? 'h2h'))
 	)
+	AND (
+	  ${publicationAlias}.format <> 'POINTS'
+	  OR (
+	    jsonb_typeof(${publicationAlias}.payload->'points'->'grossPointsTotal') = 'number'
+	    AND jsonb_typeof(${publicationAlias}.payload->'points'->'grossPointsAverage') = 'number'
+	    AND jsonb_typeof(${publicationAlias}.payload->'points'->'netPointsTotal') = 'number'
+	    AND jsonb_typeof(${publicationAlias}.payload->'points'->'seasonGrossPointsTotal') = 'number'
+	    AND jsonb_typeof(${publicationAlias}.payload->'points'->'seasonGrossPointsAverage') = 'number'
+	    AND jsonb_typeof(${publicationAlias}.payload->'points'->'seasonNetPointsTotal') = 'number'
+	    AND NOT EXISTS (
+	      SELECT 1
+	      FROM competition.tournament_review_publication_chunks point_chunk
+	      CROSS JOIN LATERAL jsonb_array_elements(CASE
+	        WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+	        ELSE '[]'::jsonb
+	      END) point_item
+	      WHERE point_chunk.season_id = ${publicationAlias}.season_id
+	        AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+	        AND point_chunk.event_id = ${publicationAlias}.event_id
+	        AND point_chunk.revision = ${publicationAlias}.revision
+	        AND point_chunk.section_key = 'POINTS_STANDINGS'
+	        AND (
+	          jsonb_typeof(point_item->'applicable') IS DISTINCT FROM 'boolean'
+	          OR (
+	            point_item->>'applicable' = 'true'
+	            AND (
+	              jsonb_typeof(point_item->'grossPoints') IS DISTINCT FROM 'number'
+	              OR jsonb_typeof(point_item->'transferCost') IS DISTINCT FROM 'number'
+	              OR jsonb_typeof(point_item->'netPoints') IS DISTINCT FROM 'number'
+	              OR jsonb_typeof(point_item->'seasonGrossPoints') IS DISTINCT FROM 'number'
+	              OR jsonb_typeof(point_item->'seasonNetPoints') IS DISTINCT FROM 'number'
+	            )
+	          )
+	        )
+	    )
+	    AND jsonb_build_object(
+	      'grossPointsTotal', ${publicationAlias}.payload->'points'->'grossPointsTotal',
+	      'grossPointsAverage', ${publicationAlias}.payload->'points'->'grossPointsAverage',
+	      'netPointsTotal', ${publicationAlias}.payload->'points'->'netPointsTotal',
+	      'seasonGrossPointsTotal', ${publicationAlias}.payload->'points'->'seasonGrossPointsTotal',
+	      'seasonGrossPointsAverage', ${publicationAlias}.payload->'points'->'seasonGrossPointsAverage',
+	      'seasonNetPointsTotal', ${publicationAlias}.payload->'points'->'seasonNetPointsTotal'
+	    ) = (
+	      SELECT jsonb_build_object(
+	        'grossPointsTotal', COALESCE(sum((point_item->>'grossPoints')::numeric) FILTER (WHERE point_item->>'applicable' = 'true'), 0),
+	        'grossPointsAverage', COALESCE(round(
+	          sum((point_item->>'grossPoints')::numeric) FILTER (WHERE point_item->>'applicable' = 'true')
+	          / NULLIF(count(*) FILTER (WHERE point_item->>'applicable' = 'true'), 0), 2
+	        ), 0),
+	        'netPointsTotal', COALESCE(sum((point_item->>'netPoints')::numeric) FILTER (WHERE point_item->>'applicable' = 'true'), 0),
+	        'seasonGrossPointsTotal', COALESCE(sum((point_item->>'seasonGrossPoints')::numeric) FILTER (WHERE point_item->>'applicable' = 'true'), 0),
+	        'seasonGrossPointsAverage', COALESCE(round(
+	          sum((point_item->>'seasonGrossPoints')::numeric) FILTER (WHERE point_item->>'applicable' = 'true')
+	          / NULLIF(count(*) FILTER (WHERE point_item->>'applicable' = 'true'), 0), 2
+	        ), 0),
+	        'seasonNetPointsTotal', COALESCE(sum((point_item->>'seasonNetPoints')::numeric) FILTER (WHERE point_item->>'applicable' = 'true'), 0)
+	      )
+	      FROM competition.tournament_review_publication_chunks point_chunk
+	      CROSS JOIN LATERAL jsonb_array_elements(CASE
+	        WHEN jsonb_typeof(point_chunk.items) = 'array' THEN point_chunk.items
+	        ELSE '[]'::jsonb
+	      END) point_item
+	      WHERE point_chunk.season_id = ${publicationAlias}.season_id
+	        AND point_chunk.tournament_id = ${publicationAlias}.tournament_id
+	        AND point_chunk.event_id = ${publicationAlias}.event_id
+	        AND point_chunk.revision = ${publicationAlias}.revision
+	        AND point_chunk.section_key = 'POINTS_STANDINGS'
+	    )
+	  )
+	)
 	AND ${publicationAlias}.content_sha256 ~ '^[0-9a-f]{64}$'
 	AND CASE
 	      WHEN jsonb_typeof(${publicationAlias}.payload) = 'object' THEN
@@ -1227,6 +1297,9 @@ export const MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL = `
 	  AND tournament_id = $2
 	  AND event_id = $3
 	  AND revision = $4::bigint
+	  AND ($5::text IS NULL OR section_key = $5::text)
+	  AND ($6::integer IS NULL OR chunk_index >= $6::integer)
+	  AND ($7::integer IS NULL OR chunk_index <= $7::integer)
 	ORDER BY section_key, chunk_index
 `;
 
@@ -1281,6 +1354,7 @@ type ReviewHeadRow = {
 	revision: number | string | null;
 	format: string | null;
 	content_sha256: string | null;
+	correction_change_id?: string | null;
 	event_data_checked_at: Date | string | null;
 	published_at: Date | string | null;
 	obligation_state?: string | null;
@@ -1296,6 +1370,7 @@ type ValidReviewHeadRow = {
 	revision: number | string;
 	format: string;
 	content_sha256: string;
+	correction_change_id: string | null;
 	event_data_checked_at: Date | string;
 	published_at: Date | string;
 	row_count: number;
@@ -1341,6 +1416,7 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 		       head.revision,
 		       publication.format,
 		       head.content_sha256,
+		       publication.correction_change_id,
 		       publication.event_data_checked_at,
 		       publication.published_at,
 		       publication.row_count,
@@ -1376,6 +1452,7 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 	       selected.revision,
 	       selected.format,
 	       selected.content_sha256,
+	       selected.correction_change_id,
 	       selected.event_data_checked_at,
 	       selected.published_at,
 	       selected.row_count,
@@ -1695,7 +1772,7 @@ export const MY_TOURNAMENT_REVIEW_DATA_SQL_CONTRACT: readonly DataSqlContractPro
 	{
 		name: "my-tournament-review-v2.1.section-chunks",
 		sql: MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL,
-		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1, 1],
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 1, 1, null, null, null],
 		resultTypes: [
 			{
 				relation: "competition.tournament_review_publication_chunks",
@@ -2505,12 +2582,193 @@ async function materializePublicationRow(
 	}
 	const chunkResult = await database.query<PublicationChunkRow>(
 		MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL,
-		[row.season_id, row.tournament_id, row.event_id, row.revision]
+		[row.season_id, row.tournament_id, row.event_id, row.revision, null, null, null]
 	);
 	return {
 		...row,
 		__chunkRows: chunkResult.rows,
 		payload: materializeReviewChunks(row.payload, chunkResult.rows),
+	};
+}
+
+type PublicationSectionPage = {
+	pageRows: unknown[];
+	pageOffset: number;
+	pageLength: number;
+	selectedStart: number;
+	chunkRows: PublicationChunkRow[];
+	chunkIndexes: number[];
+	chunkHashes: string[];
+	chunkItemCounts: number[];
+};
+
+function publicationSectionDescriptor(
+	payload: unknown,
+	section: MyTournamentReviewSeasonSection
+): { itemCount: number; chunkHashes: string[]; chunkItemCounts: number[] } {
+	if (
+		!isRecord(payload) ||
+		!isRecord(payload.manifest) ||
+		!Array.isArray(payload.manifest.sections)
+	) {
+		throw integrityError("Review publication section manifest is missing");
+	}
+	const descriptor = payload.manifest.sections.find(
+		(value): value is Record<string, unknown> => isRecord(value) && value.sectionKey === section
+	);
+	if (!descriptor) throw integrityError("Review publication section descriptor is missing");
+	const itemCount = Number(descriptor.itemCount);
+	const rawHashes: unknown[] = descriptor.chunkHashes as unknown[];
+	const rawCounts: unknown[] = descriptor.chunkItemCounts as unknown[];
+	if (
+		!Number.isSafeInteger(itemCount) ||
+		itemCount < 0 ||
+		!Array.isArray(rawHashes) ||
+		!Array.isArray(rawCounts) ||
+		rawHashes.length !== rawCounts.length ||
+		rawHashes.length === 0 ||
+		!rawHashes.every((hash) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)) ||
+		!rawCounts.every(
+			(count) => Number.isSafeInteger(Number(count)) && Number(count) >= 0 && Number(count) <= 100
+		) ||
+		(itemCount === 0
+			? rawHashes.length !== 1 || Number(rawCounts[0]) !== 0
+			: rawCounts.some((count) => Number(count) <= 0) ||
+				rawCounts.reduce<number>((total, count) => total + Number(count), 0) !== itemCount)
+	) {
+		throw integrityError("Review publication section descriptor is invalid");
+	}
+	return {
+		itemCount,
+		chunkHashes: rawHashes.map((hash) => String(hash)),
+		chunkItemCounts: rawCounts.map((count) => Number(count)),
+	};
+}
+
+function sectionPageChunkRange(
+	chunkItemCounts: readonly number[],
+	pageOffset: number,
+	first: number
+): { pageLength: number; selectedStart: number; firstIndex: number; lastIndex: number } {
+	const total = chunkItemCounts.reduce((sum, count) => sum + count, 0);
+	if (
+		!Number.isSafeInteger(pageOffset) ||
+		pageOffset < 0 ||
+		!Number.isSafeInteger(first) ||
+		first < 1 ||
+		pageOffset > total
+	) {
+		throw new GraphQLError("Review cursor is out of range", {
+			extensions: { code: "BAD_USER_INPUT" },
+		});
+	}
+	const pageLength = Math.min(first, total - pageOffset);
+	if (chunkItemCounts.length === 0) {
+		throw integrityError("Review publication section has no chunks");
+	}
+	if (total === 0) {
+		return {
+			pageLength: 0,
+			selectedStart: 0,
+			firstIndex: 0,
+			lastIndex: 0,
+		};
+	}
+	if (pageLength === 0) {
+		return {
+			pageLength: 0,
+			selectedStart: total - chunkItemCounts.at(-1)!,
+			firstIndex: chunkItemCounts.length - 1,
+			lastIndex: chunkItemCounts.length - 1,
+		};
+	}
+	let offset = 0;
+	let firstIndex = -1;
+	let lastIndex = -1;
+	for (const [index, count] of chunkItemCounts.entries()) {
+		const end = offset + count;
+		if (firstIndex === -1 && pageOffset < end) firstIndex = index;
+		if (firstIndex !== -1 && pageOffset + pageLength > offset) lastIndex = index;
+		offset = end;
+	}
+	if (firstIndex < 0 || lastIndex < firstIndex) {
+		throw integrityError("Review publication page chunk range is invalid");
+	}
+	return {
+		pageLength,
+		selectedStart: chunkItemCounts.slice(0, firstIndex).reduce((sum, count) => sum + count, 0),
+		firstIndex,
+		lastIndex,
+	};
+}
+
+/** Fetch only the immutable chunk siblings intersecting a Season page. The
+ * publication query has already authenticated the complete manifest/chunk
+ * set; this bounded read verifies the selected siblings again before mapping
+ * them into a response and cache witness. */
+async function materializePublicationSectionPage(
+	database: GraphQLContext["database"],
+	row: PublicationRow,
+	section: MyTournamentReviewSeasonSection,
+	pageOffset: number,
+	first: number
+): Promise<PublicationSectionPage> {
+	const descriptor = publicationSectionDescriptor(row.payload, section);
+	const range = sectionPageChunkRange(descriptor.chunkItemCounts, pageOffset, first);
+	const result = await database.query<PublicationChunkRow>(
+		MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL,
+		[
+			row.season_id,
+			row.tournament_id,
+			row.event_id,
+			row.revision,
+			section,
+			range.firstIndex,
+			range.lastIndex,
+		]
+	);
+	const chunkRows = result.rows
+		.slice()
+		.sort((left, right) => Number(left.chunk_index) - Number(right.chunk_index));
+	const expectedIndexes = Array.from(
+		{ length: range.lastIndex - range.firstIndex + 1 },
+		(_, index) => range.firstIndex + index
+	);
+	if (
+		chunkRows.length !== expectedIndexes.length ||
+		chunkRows.some((chunk, position) => {
+			const index = Number(chunk.chunk_index);
+			const itemCount = Number(chunk.item_count);
+			return (
+				chunk.section_key !== section ||
+				index !== expectedIndexes[position] ||
+				itemCount !== descriptor.chunkItemCounts[index] ||
+				!Array.isArray(chunk.items) ||
+				chunk.items.length !== itemCount ||
+				chunk.chunk_sha256 !== descriptor.chunkHashes[index] ||
+				postgresJsonbContentHash(chunk.items) !== chunk.chunk_sha256
+			);
+		})
+	) {
+		throw integrityError("Review publication section page chunk is invalid");
+	}
+	const selectedRows = chunkRows.flatMap((chunk) =>
+		Array.isArray(chunk.items) ? (chunk.items as unknown[]) : []
+	);
+	const localOffset = pageOffset - range.selectedStart;
+	const pageRows = selectedRows.slice(localOffset, localOffset + range.pageLength);
+	if (pageRows.length !== range.pageLength) {
+		throw integrityError("Review publication section page is incomplete");
+	}
+	return {
+		pageRows,
+		pageOffset,
+		pageLength: range.pageLength,
+		selectedStart: range.selectedStart,
+		chunkRows,
+		chunkIndexes: expectedIndexes,
+		chunkHashes: expectedIndexes.map((index) => descriptor.chunkHashes[index]!),
+		chunkItemCounts: expectedIndexes.map((index) => descriptor.chunkItemCounts[index]!),
 	};
 }
 
@@ -2572,6 +2830,12 @@ function freshnessCache(value: unknown): boolean {
 
 function scopeMetaCache(value: unknown): value is MyTournamentReviewScopeMeta {
 	if (!isRecord(value)) return false;
+	const correctedAt = value.correctedAt;
+	const correctedAtValid =
+		correctedAt === null ||
+		(correctedAt !== undefined &&
+			nonEmptyString(correctedAt) &&
+			Number.isFinite(Date.parse(correctedAt)));
 	return (
 		positiveInt(value.tournamentId) !== null &&
 		positiveInt(value.eventId) !== null &&
@@ -2593,7 +2857,8 @@ function scopeMetaCache(value: unknown): value is MyTournamentReviewScopeMeta {
 		Number.isSafeInteger(value.notApplicableSubjectCount) &&
 		value.notApplicableSubjectCount >= 0 &&
 		value.readySubjectCount + value.notApplicableSubjectCount === value.expectedSubjectCount &&
-		(value.contentSha256 === null || /^[0-9a-f]{64}$/.test(String(value.contentSha256)))
+		(value.contentSha256 === null || /^[0-9a-f]{64}$/.test(String(value.contentSha256))) &&
+		correctedAtValid
 	);
 }
 
@@ -3711,6 +3976,7 @@ type GameweekCacheHead = {
 	revision: string;
 	format: MyTournamentReviewFormat;
 	contentSha256: string;
+	correctedAt: string | null;
 	rowCount: number;
 	expectedSubjectCount: number;
 	readySubjectCount: number;
@@ -3751,7 +4017,8 @@ function gameweekCache(
 			scope.eventId !== expectedHead.eventId ||
 			scope.revision !== expectedHead.revision ||
 			scope.format !== expectedHead.format ||
-			scope.contentSha256 !== expectedHead.contentSha256)
+			scope.contentSha256 !== expectedHead.contentSha256 ||
+			(scope.correctedAt ?? null) !== expectedHead.correctedAt)
 	) {
 		return false;
 	}
@@ -4938,7 +5205,7 @@ type SeasonSectionWitness = {
  * publication. The witness contains only the producer chunks intersecting the
  * requested page; their indexes/counts/hashes are checked against the
  * publication manifest before the entry is written to Redis. */
-function seasonSectionWitness(
+function _seasonSectionWitness(
 	payload: unknown,
 	section: MyTournamentReviewSeasonSection,
 	persistedChunks: readonly PublicationChunkRow[] = [],
@@ -5357,7 +5624,7 @@ function knockoutFromPayload(
 
 /** Slice a validated full section. The Redis entry is intentionally shared by
  * all page sizes/cursors; only this returned object is page-specific. */
-function sliceSeasonSection(
+function _sliceSeasonSection(
 	full: MyTournamentSeasonSection,
 	section: MyTournamentReviewSeasonSection,
 	first: number,
@@ -5449,6 +5716,140 @@ function sliceSeasonSection(
 		h2h,
 		knockout,
 		pageInfo,
+	};
+}
+
+function seasonSectionPageFromChunks(
+	row: PublicationRow,
+	section: MyTournamentReviewSeasonSection,
+	page: PublicationSectionPage,
+	first: number,
+	cursorScope: string,
+	summary?: ReviewPointsAggregateSummary
+): Pick<MyTournamentSeasonSection, "points" | "h2h" | "knockout"> {
+	const revision = String(row.revision);
+	const totalRows =
+		section === "H2H_STANDINGS" ? Number(row.ready_subject_count) : Number(row.row_count);
+	if (
+		!Number.isSafeInteger(totalRows) ||
+		totalRows < 0 ||
+		page.pageOffset + page.pageLength > totalRows ||
+		page.pageLength > first
+	) {
+		throw integrityError("Review section page cardinality is invalid");
+	}
+	const hasNextPage = page.pageOffset + page.pageLength < totalRows;
+	const nextCursor = hasNextPage
+		? encodeCursor(page.pageOffset + page.pageLength, revision, cursorScope)
+		: null;
+	if (section === "POINTS_STANDINGS" || section === "POINTS_TRAJECTORIES") {
+		const pointsSummary =
+			summary ??
+			pointsAggregateSummary(
+				isRecord(row.payload) && isRecord(row.payload.points) ? row.payload.points : null
+			);
+		if (!pointsSummary) throw integrityError("Review points aggregate summary is missing");
+		const sourceRows = mapPointsRows(page.pageRows);
+		const outputRows = sourceRows.map((item) => ({
+			...item,
+			grossPoints: item.seasonGrossPoints,
+			transferCost: seasonTransferCost(item),
+			netPoints: item.seasonNetPoints,
+		}));
+		const aggregateWitness: MyTournamentReviewPointsAggregateWitness = {
+			view: "SEASON",
+			pageOnly: true,
+			rowCount: totalRows,
+			applicableRowCount: Number(row.ready_subject_count),
+			pageOffset: page.pageOffset,
+			pageLength: outputRows.length,
+			grossPointsTotal: pointsSummary.grossPointsTotal,
+			grossPointsAverage: pointsSummary.grossPointsAverage,
+			netPointsTotal: pointsSummary.netPointsTotal,
+			seasonGrossPointsTotal: pointsSummary.seasonGrossPointsTotal,
+			seasonGrossPointsAverage: pointsSummary.seasonGrossPointsAverage,
+			seasonNetPointsTotal: pointsSummary.seasonNetPointsTotal,
+			selectedGrossPointsTotal: pointsSummary.seasonGrossPointsTotal,
+			selectedGrossPointsAverage: pointsSummary.seasonGrossPointsAverage,
+			selectedNetPointsTotal: pointsSummary.seasonNetPointsTotal,
+			rows: [],
+		};
+		return {
+			points: {
+				headlineMetric: "gross",
+				grossPointsTotal: pointsSummary.seasonGrossPointsTotal,
+				grossPointsAverage: pointsSummary.seasonGrossPointsAverage,
+				netPointsTotal: pointsSummary.seasonNetPointsTotal,
+				seasonGrossPointsTotal: pointsSummary.seasonGrossPointsTotal,
+				seasonGrossPointsAverage: pointsSummary.seasonGrossPointsAverage,
+				seasonNetPointsTotal: pointsSummary.seasonNetPointsTotal,
+				rows: outputRows,
+				nextCursor,
+				hasNextPage,
+				aggregateWitness,
+			},
+			h2h: null,
+			knockout: null,
+		};
+	}
+	if (section === "H2H_STANDINGS" || section === "H2H_FIXTURES") {
+		const mapped =
+			section === "H2H_FIXTURES"
+				? mapH2H({ matches: page.pageRows, standings: [] }, true, false).matches
+				: mapH2H({ matches: [], standings: page.pageRows }, true, false).standings;
+		const pageMatchParticipantIdentities =
+			section === "H2H_FIXTURES"
+				? (mapped as MyTournamentReviewH2HMatch[]).flatMap((match) =>
+						[match.home, match.away]
+							.filter((side): side is MyTournamentReviewH2HSide => side !== null && !side.isAverage)
+							.map((side) => `${match.groupId}:${side.entryId}`)
+					)
+				: [];
+		const pageStandingIdentities =
+			section === "H2H_STANDINGS"
+				? (mapped as MyTournamentReviewH2HStanding[]).map(
+						(standing) => `${standing.groupId}:${standing.entryId}`
+					)
+				: [];
+		return {
+			points: null,
+			h2h: {
+				matches: section === "H2H_FIXTURES" ? (mapped as MyTournamentReviewH2HMatch[]) : [],
+				standings: section === "H2H_STANDINGS" ? (mapped as MyTournamentReviewH2HStanding[]) : [],
+				nextCursor,
+				hasNextPage,
+				coverageWitness: {
+					pageOnly: true,
+					matchIdentities: [],
+					matchParticipantIdentities: [],
+					matchParticipantIdentitiesByMatch: [],
+					standingIdentities: [],
+					pageOffset: page.pageOffset,
+					pageMatchParticipantIdentities,
+					pageStandingIdentities,
+				},
+			},
+			knockout: null,
+		};
+	}
+	const matches = mapKnockout(page.pageRows);
+	return {
+		points: null,
+		h2h: null,
+		knockout: {
+			matches,
+			nextCursor,
+			hasNextPage,
+			coverageWitness: {
+				pageOnly: true,
+				matchIdentities: [],
+				entryIdentities: [],
+				applicableEntryIdentities: [],
+				notApplicableEntryIdentities: [],
+				pageOffset: page.pageOffset,
+				pageMatchIdentities: matches.map((match) => `${match.matchId}:${match.playAgainstId}`),
+			},
+		},
 	};
 }
 
@@ -5568,6 +5969,7 @@ function validateReviewHeadRow(row: ReviewHeadRow): ValidReviewHeadRow {
 		revision: row.revision!,
 		format: row.format!,
 		content_sha256: row.content_sha256!,
+		correction_change_id: row.correction_change_id ?? null,
 		event_data_checked_at: row.event_data_checked_at!,
 		published_at: row.published_at!,
 		row_count: rowCount,
@@ -5805,6 +6207,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 								revision: String(head.revision),
 								format: reviewFormat(head.format)!,
 								contentSha256: head.content_sha256,
+								correctedAt: head.correction_change_id ? iso(head.published_at) : null,
 								rowCount: Number(head.row_count),
 								expectedSubjectCount: Number(head.expected_subject_count),
 								readySubjectCount: Number(head.ready_subject_count),
@@ -6279,106 +6682,65 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		if (!row) {
 			throw integrityError("Review phase publication disappeared during read");
 		}
-		const materializedRow = await materializePublicationRow(context.database, row);
-		const scope = mapScopeMeta(materializedRow);
+		const scope = mapScopeMeta(row);
 		if (scope.format !== expectedFormat) {
 			throw integrityError("Review phase publication format does not match its phase");
 		}
-		const points =
-			expectedFormat === "POINTS"
-				? pointsFromPayload(
-						materializedRow,
-						Number.MAX_SAFE_INTEGER,
-						null,
-						"SEASON",
-						expectedFormat === "POINTS"
-							? (requestedSection as "POINTS_STANDINGS" | "POINTS_TRAJECTORIES")
-							: undefined,
-						sectionCursorScope
-					)
-				: null;
-		const h2hSection =
-			requestedSection === "H2H_STANDINGS" || requestedSection === "H2H_FIXTURES"
-				? requestedSection
-				: undefined;
-		const h2h =
-			expectedFormat === "H2H"
-				? h2hFromPayload(
-						materializedRow,
-						Number.MAX_SAFE_INTEGER,
-						null,
-						h2hSection,
-						sectionCursorScope,
-						true
-					)
-				: null;
-		const knockout =
-			expectedFormat === "KNOCKOUT"
-				? knockoutFromPayload(materializedRow, Number.MAX_SAFE_INTEGER, null, sectionCursorScope)
-				: null;
-		if (points === null && h2h === null && knockout === null) {
-			throw new GraphQLError("Review section is not available for this phase", {
-				extensions: { code: "BAD_USER_INPUT" },
-			});
-		}
-		const pageLength = points
-			? points.rows.length
-			: h2h
-				? requestedSection === "H2H_FIXTURES"
-					? h2h.matches.length
-					: h2h.standings.length
-				: (knockout?.matches.length ?? 0);
-		if (expectedCache.pageOffset > pageLength) {
-			throw new GraphQLError("Review cursor is out of range", {
-				extensions: { code: "BAD_USER_INPUT" },
-			});
-		}
-		const requestedPageLength = Math.min(first, Math.max(0, pageLength - expectedCache.pageOffset));
-		const sectionWitness = seasonSectionWitness(
-			materializedRow.payload,
+		const sectionPage = await materializePublicationSectionPage(
+			context.database,
+			row,
 			requestedSection,
-			materializedRow.__chunkRows,
 			expectedCache.pageOffset,
-			requestedPageLength
+			first
 		);
-		if (!sectionWitness) {
-			throw integrityError("Review phase section witness is missing");
-		}
 		if (
 			expectedCache.sectionChunkHashes !== null &&
 			(!expectedCache.sectionChunkItemCounts ||
-				sectionWitness.chunkIndexes.some(
+				sectionPage.chunkIndexes.some(
 					(index, position) =>
-						expectedCache.sectionChunkHashes![index] !== sectionWitness.chunkHashes[position] ||
-						expectedCache.sectionChunkItemCounts![index] !==
-							sectionWitness.chunkItemCounts[position]
+						expectedCache.sectionChunkHashes![index] !== sectionPage.chunkHashes[position] ||
+						expectedCache.sectionChunkItemCounts![index] !== sectionPage.chunkItemCounts[position]
 				))
 		) {
 			throw integrityError("Review phase section chunk witness does not match its manifest");
 		}
-		const pageResult = sliceSeasonSection(
-			{
-				state: "READY",
-				tournamentId: args.tournamentId,
-				throughEventId: args.throughEventId,
-				phaseId,
-				section: requestedSection,
-				revision: String(phase.revision),
-				semanticSha256: phase.semanticSha256,
-				points,
-				h2h,
-				knockout,
-				pageInfo: {
-					hasNextPage: false,
-					endCursor: null,
-				},
-			},
+		const projection = seasonSectionPageFromChunks(
+			row,
 			requestedSection,
+			sectionPage,
 			first,
-			cursor,
-			sectionCursorScope
+			sectionCursorScope,
+			expectedCache.pointsAggregateSummary
 		);
-		pageResult.__sectionWitness = sectionWitness;
+		const sectionValue = projection.points ?? projection.h2h ?? projection.knockout;
+		if (!sectionValue) {
+			throw new GraphQLError("Review section is not available for this phase", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
+		const pageResult: MyTournamentSeasonSection = {
+			state: "READY",
+			tournamentId: args.tournamentId,
+			throughEventId: args.throughEventId,
+			phaseId,
+			section: requestedSection,
+			revision: String(phase.revision),
+			semanticSha256: phase.semanticSha256,
+			...projection,
+			pageInfo: {
+				hasNextPage: sectionValue.hasNextPage,
+				endCursor: sectionValue.nextCursor,
+			},
+		};
+		pageResult.__sectionWitness = {
+			pageOffset: sectionPage.pageOffset,
+			sourceRows: sectionPage.chunkRows.flatMap((chunk) =>
+				Array.isArray(chunk.items) ? (chunk.items as unknown[]) : []
+			),
+			chunkIndexes: sectionPage.chunkIndexes,
+			chunkHashes: sectionPage.chunkHashes,
+			chunkItemCounts: sectionPage.chunkItemCounts,
+		};
 		await writeJsonQueryCache(context, key, pageResult, REVIEW_CACHE_TTL_SECONDS);
 		return pageResult;
 	},
