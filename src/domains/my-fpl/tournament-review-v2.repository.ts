@@ -592,6 +592,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
        OR descriptor->>'itemCount' IS NULL
        OR descriptor->>'itemCount' !~ '^[0-9]{1,18}$'
        OR jsonb_typeof(descriptor->'chunkHashes') IS DISTINCT FROM 'array'
+       OR jsonb_typeof(descriptor->'chunkItemCounts') IS DISTINCT FROM 'array'
        OR (CASE
              WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
              THEN (descriptor->>'chunkCount')::numeric
@@ -601,6 +602,33 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
              THEN descriptor->'chunkHashes'
              ELSE '[]'::jsonb
            END)
+       OR (CASE
+             WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
+             THEN (descriptor->>'chunkCount')::numeric
+             ELSE -1
+           END) <> jsonb_array_length(CASE
+             WHEN jsonb_typeof(descriptor->'chunkItemCounts') = 'array'
+             THEN descriptor->'chunkItemCounts'
+             ELSE '[]'::jsonb
+           END)
+       OR EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(CASE
+           WHEN jsonb_typeof(descriptor->'chunkItemCounts') = 'array'
+           THEN descriptor->'chunkItemCounts'
+           ELSE '[]'::jsonb
+         END) item_count
+         WHERE jsonb_typeof(item_count) IS DISTINCT FROM 'number'
+            OR CASE
+                 WHEN jsonb_typeof(item_count) = 'number'
+                 THEN CASE
+                        WHEN item_count::text ~ '^[0-9]{1,3}$'
+                        THEN (item_count::text)::numeric NOT BETWEEN 0 AND 100
+                        ELSE true
+                      END
+                 ELSE true
+               END
+       )
        OR (CASE
              WHEN descriptor->>'chunkCount' ~ '^[0-9]{1,18}$'
              THEN (descriptor->>'chunkCount')::numeric
@@ -663,6 +691,15 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            AND chunk.section_key = descriptor->>'sectionKey'
        ) IS DISTINCT FROM descriptor->'chunkHashes'
        OR (
+         SELECT COALESCE(jsonb_agg(to_jsonb(chunk.item_count) ORDER BY chunk.chunk_index), '[]'::jsonb)
+         FROM competition.tournament_review_publication_chunks chunk
+         WHERE chunk.season_id = ${publicationAlias}.season_id
+           AND chunk.tournament_id = ${publicationAlias}.tournament_id
+           AND chunk.event_id = ${publicationAlias}.event_id
+           AND chunk.revision = ${publicationAlias}.revision
+           AND chunk.section_key = descriptor->>'sectionKey'
+       ) IS DISTINCT FROM descriptor->'chunkItemCounts'
+       OR (
          descriptor->>'itemCount' = '0'
          AND (
            (CASE
@@ -673,6 +710,11 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
            OR (CASE
              WHEN jsonb_typeof(descriptor->'chunkHashes') = 'array'
              THEN jsonb_array_length(descriptor->'chunkHashes')
+             ELSE -1
+           END) <> 1
+           OR (CASE
+             WHEN jsonb_typeof(descriptor->'chunkItemCounts') = 'array'
+             THEN jsonb_array_length(descriptor->'chunkItemCounts')
              ELSE -1
            END) <> 1
          )
@@ -5890,12 +5932,13 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					? h2h.matches.length
 					: h2h.standings.length
 				: (knockout?.matches.length ?? 0);
+		const requestedPageLength = Math.min(first, Math.max(0, pageLength - expectedCache.pageOffset));
 		const sectionWitness = seasonSectionWitness(
 			materializedRow.payload,
 			requestedSection,
 			materializedRow.__chunkRows,
 			expectedCache.pageOffset,
-			pageLength
+			requestedPageLength
 		);
 		if (!sectionWitness) {
 			throw integrityError("Review phase section witness is missing");
