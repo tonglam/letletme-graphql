@@ -129,7 +129,7 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 	]),
 	domain("live-desks", "live-desks", [
 		"liveContext",
-		"entryLiveCompetitionsDesk",
+		"leagueLiveHead",
 		"entryLiveCompetitionBoard",
 		"tournamentSelectionIndex",
 		"tournamentEntrySquads",
@@ -177,7 +177,7 @@ export const GRAPHQL_DOMAIN_MANIFEST: readonly GraphQLDomainManifestEntry[] = [
 		"tournamentBattleGroupResults",
 		"entryH2HMatchResults",
 		"tournamentOfficialH2H",
-		"entryOfficialH2HDesk",
+		"tournamentOfficialH2HHistory",
 		"tournamentDetailDesk",
 		"managedTournamentStatus",
 	]),

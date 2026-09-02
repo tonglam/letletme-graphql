@@ -13,15 +13,20 @@ import type { Player, TopTransfersEnriched } from "../players/repository";
 import { playersService } from "../players/service";
 import { measureRequestStage } from "../../http/request-timing";
 import { homeMarketRepository, type HomeMarketDesk } from "./market-repository";
-import type { EntryOfficialH2HDeskItem } from "../tournaments/repository";
-import { tournamentsService } from "../tournaments/service";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 import type { Event } from "../events/repository";
 import {
 	calcLivePointsForEntriesV2,
+	readLivePublicationByRefV2,
 	type BatchLiveCalcResultV2,
 	type LiveCalcDataV2,
 } from "../entry-live/v2-service";
+import {
+	readH2HLeaguePublicationV2,
+	h2hPublicationMatchesGlobal,
+	type H2HLeaguePublicationReadV2,
+	type H2HStandingsPayloadV2,
+} from "../live-desks/h2h-v2";
 
 export type HomePublicBootstrap = {
 	context: CoreEventContext;
@@ -105,38 +110,6 @@ export const compactHomeMarketPulse = (pulse: MarketPulse): HomeMarketPulse => (
 	priceChanges: pulse.priceChanges.slice(0, HOME_MARKET_LIMIT),
 });
 
-export const reconcileHomeOfficialH2HRanks = (
-	desk: HomePersonalDesk,
-	officialH2HDesk: readonly EntryOfficialH2HDeskItem[]
-): HomePersonalDesk => {
-	const officialByTournament = new Map(
-		officialH2HDesk.map((row) => [row.tournamentId, row] as const)
-	);
-	return {
-		...desk,
-		leagueRanks: desk.leagueRanks.map((league) => {
-			if (league.leagueType !== "H2H" || league.tournamentId === null) return league;
-			const official = officialByTournament.get(league.tournamentId);
-			if (!official) return league;
-			if (
-				!official.isFinal ||
-				!official.standingsPublished ||
-				!official.standingsCurrentEventComplete ||
-				official.rank === null
-			) {
-				return { ...league, rankState: "UPDATING" };
-			}
-			return {
-				...league,
-				rank: official.rank,
-				rankState: "READY",
-				rankCheckedAt: official.scoreCheckedAt ?? league.rankCheckedAt,
-				movement: movementFromRanks(official.rank, official.lastRank),
-			};
-		}),
-	};
-};
-
 const isFinalEvent = (event: Event): boolean => event.finished && event.dataChecked;
 
 const checkedAtOrAfter = (
@@ -175,6 +148,129 @@ export const applyHomeRankLifecycle = (
 				: "UPDATING",
 		leagueRanks,
 	};
+};
+
+const validOfficialH2HRank = (
+	payload: H2HStandingsPayloadV2 | undefined,
+	eventId: number,
+	rank: number | null | undefined
+): boolean =>
+	payload?.state === "READY" &&
+	payload.throughEventId === eventId &&
+	typeof rank === "number" &&
+	Number.isSafeInteger(rank) &&
+	rank > 0;
+
+type HomeOfficialH2HStandingRead = {
+	payload: H2HStandingsPayloadV2;
+	globalRef: H2HLeaguePublicationReadV2["publication"]["globalRef"];
+	globalFinalized: boolean;
+};
+
+type HomeOfficialH2HStandingInput = H2HStandingsPayloadV2 | HomeOfficialH2HStandingRead;
+
+const standingPayload = (
+	value: HomeOfficialH2HStandingInput | null | undefined
+): H2HStandingsPayloadV2 | undefined =>
+	value && "payload" in value ? value.payload : (value ?? undefined);
+
+const standingHasFinalGlobal = (value: HomeOfficialH2HStandingInput | null | undefined): boolean =>
+	value && "payload" in value ? value.globalFinalized : true;
+
+export const applyHomeOfficialH2HRanksV2 = (
+	desk: HomePersonalDesk,
+	eventId: number,
+	standingsByTournament: ReadonlyMap<number, HomeOfficialH2HStandingInput | null>
+): HomePersonalDesk => ({
+	...desk,
+	leagueRanks: desk.leagueRanks.map((league) => {
+		if (league.leagueType !== "H2H" || league.tournamentId === null || league.officialH2H !== true)
+			return league;
+		const raw = standingsByTournament.get(league.tournamentId) ?? undefined;
+		const payload = standingPayload(raw);
+		const standing = payload?.rows.find((row) => row.entryId === desk.entryId);
+		const rank = standing?.rank;
+		if (
+			!standingHasFinalGlobal(raw) ||
+			!validOfficialH2HRank(payload, eventId, rank) ||
+			typeof rank !== "number"
+		) {
+			return { ...league, rankState: "UPDATING" };
+		}
+		return {
+			...league,
+			rank,
+			rankState: "READY" as const,
+			rankCheckedAt: payload?.sourceCheckedAt ?? league.rankCheckedAt,
+			// V2 standings deliberately carries the current official rank only.
+			// Use the persisted rank as the comparison point when it changed, and
+			// retain the persisted movement when it did not.
+			movement: rank === league.rank ? league.movement : movementFromRanks(rank, league.rank),
+		};
+	}),
+});
+
+const reconcileHomeOfficialH2HRanksV2 = async (
+	context: GraphQLContext,
+	desk: HomePersonalDesk,
+	eventId: number
+): Promise<HomePersonalDesk> => {
+	const tournamentIds = [
+		...new Set(
+			desk.leagueRanks.flatMap((league) =>
+				league.leagueType === "H2H" && league.tournamentId !== null && league.officialH2H === true
+					? [league.tournamentId]
+					: []
+			)
+		),
+	];
+	if (tournamentIds.length === 0) return desk;
+	const reads = await Promise.all(
+		tournamentIds.map(async (tournamentId) => {
+			try {
+				const read = await readH2HLeaguePublicationV2(
+					context,
+					tournamentId,
+					eventId,
+					"H2H_STANDINGS"
+				);
+				const payload = read?.payload.standings as H2HStandingsPayloadV2 | undefined;
+				if (!read || !payload) return [tournamentId, null] as const;
+				const global = await readLivePublicationByRefV2(
+					context,
+					eventId,
+					read.publication.globalRef
+				).catch(() => null);
+				if (
+					!global ||
+					global.publication.state !== "FINALIZED" ||
+					!h2hPublicationMatchesGlobal(read.publication, global)
+				)
+					return [tournamentId, null] as const;
+				return [
+					tournamentId,
+					{
+						payload,
+						globalRef: read.publication.globalRef,
+						globalFinalized: true,
+					},
+				] as const;
+			} catch (error) {
+				context.logger.warn(
+					{
+						err: error,
+						requestId: context.requestId,
+						operationName: context.operationName,
+						eventId,
+						tournamentId,
+					},
+					"Home official H2H standings unavailable"
+				);
+				return [tournamentId, null] as const;
+			}
+		})
+	);
+	return applyHomeOfficialH2HRanksV2(desk, eventId, new Map(reads));
 };
 
 const pointsStateFromCalc = (calc: LiveCalcDataV2): HomePersonalDesk["pointsState"] => {
@@ -475,20 +571,10 @@ export const homeService = {
 		}
 		desk = applyHomeScoreLifecycle(desk, event, batch?.results.get(entryId));
 		if (batch) desk = applyHomePairScores(desk, event, batch.results);
-
-		const hasOfficialH2H = desk.leagueRanks.some(
-			(league) => league.leagueType === "H2H" && league.tournamentId !== null
-		);
-		if (!event || !isFinalEvent(event) || !hasOfficialH2H) return desk;
-		try {
-			const officialH2HDesk = await tournamentsService.getEntryOfficialH2HDesk(context, entryId);
-			return reconcileHomeOfficialH2HRanks(desk, officialH2HDesk);
-		} catch (error) {
-			context.logger.warn(
-				{ err: error, requestId: context.requestId, operationName: context.operationName, entryId },
-				"Home official H2H rank reconciliation unavailable"
-			);
-			return desk;
+		if (event && isFinalEvent(event)) {
+			desk = await reconcileHomeOfficialH2HRanksV2(context, desk, event.id);
 		}
+
+		return desk;
 	},
 };

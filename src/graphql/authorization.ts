@@ -27,6 +27,8 @@ type AuthorizationInput = {
 	schema: GraphQLSchema;
 	requestScope?: object;
 	authorizedTournamentMemberships?: Set<number>;
+	/** V2 live resolvers prove membership from their immutable publication. */
+	deferLiveTournamentMembership?: boolean;
 };
 
 export type AuthorizationResult =
@@ -49,6 +51,12 @@ const viewerEntryArgFields = new Map(
 const protectedFields = new Set(
 	[...ROOT_FIELD_POLICIES].filter(([, value]) => value.access !== "public").map(([key]) => key)
 );
+
+const LIVE_PUBLICATION_AUTH_FIELDS = new Set([
+	"leagueLiveHead",
+	"entryLiveCompetitionBoard",
+	"tournamentOfficialH2H",
+]);
 
 const getRequestPayloads = (body: unknown): GraphQLRequestPayload[] => {
 	if (Array.isArray(body)) {
@@ -378,7 +386,8 @@ const authorizeRootField = async (
 	principal: Principal | null | undefined,
 	dataClient: ReadModelClient,
 	requestScope?: object,
-	authorizedTournamentMemberships?: Set<number>
+	authorizedTournamentMemberships?: Set<number>,
+	deferLiveTournamentMembership = false
 ): Promise<AuthorizationResult> => {
 	const fieldPolicy = getRootFieldPolicy(field.name);
 	for (const condition of getConditionalRootFieldConditions(field.name, field.args)) {
@@ -460,7 +469,10 @@ const authorizeRootField = async (
 		}
 	}
 
-	if (fieldPolicy.tournamentMember === true) {
+	if (
+		fieldPolicy.tournamentMember === true &&
+		!(deferLiveTournamentMembership && LIVE_PUBLICATION_AUTH_FIELDS.has(field.name))
+	) {
 		const tournamentId = asPositiveInt(field.args.tournamentId);
 		if (!tournamentId || !viewerEntryId) {
 			return {
@@ -555,6 +567,7 @@ const authorizePayload = async ({
 	requestScope,
 	schema,
 	authorizedTournamentMemberships,
+	deferLiveTournamentMembership,
 }: {
 	payload: GraphQLRequestPayload;
 	principal?: Principal | null;
@@ -562,6 +575,7 @@ const authorizePayload = async ({
 	requestScope?: object;
 	schema: GraphQLSchema;
 	authorizedTournamentMemberships?: Set<number>;
+	deferLiveTournamentMembership?: boolean;
 }): Promise<AuthorizationResult> => {
 	if (typeof payload.query !== "string") return { ok: true };
 
@@ -574,7 +588,8 @@ const authorizePayload = async ({
 			principal,
 			data,
 			requestScope,
-			authorizedTournamentMemberships
+			authorizedTournamentMemberships,
+			deferLiveTournamentMembership
 		);
 		if (!result.ok) return result;
 	}
@@ -606,6 +621,7 @@ export const authorizeGraphQLRequest = async (
 				schema: input.schema,
 				requestScope: input.requestScope,
 				authorizedTournamentMemberships: input.authorizedTournamentMemberships,
+				deferLiveTournamentMembership: input.deferLiveTournamentMembership,
 			});
 			if (!result.ok) return result;
 		} catch (error) {

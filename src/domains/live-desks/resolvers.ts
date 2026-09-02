@@ -13,25 +13,37 @@ import { metrics } from "../../infra/metrics";
 import { getPlayerAndTeamMaps, getTournamentSelectionIndexRows } from "../event-stats/repository";
 import { Position } from "../players/repository";
 import { tournamentsService } from "../tournaments/service";
-import { LeagueType } from "../leagues/repository";
-import { entriesRepository } from "../entries/repository";
-import {
-	loadTournamentEventEligibility,
-	MAX_TOURNAMENT_DESK_ENTRIES,
-	selectTournamentDeskEntryWindow,
-} from "./tournament-entry-window";
 import {
 	calcLivePointsForEntriesV2,
+	readLivePublicationByRefV2,
 	getLivePointsFreshnessV2,
 	readLivePublicationV2,
 	type LivePublicationReadV2,
 } from "../entry-live/v2-service";
 import {
-	buildEntryLiveCompetitionBoardV2,
 	normalizeEntryLiveCompetitionBoardRequestV2,
 	queryEntryLiveCompetitionBoardV2,
+	readEntryLiveCompetitionBoardProcessLkgV2,
+	readEntryLiveCompetitionBoardWithPreviousV2,
 	type EntryLiveCompetitionBoardRequest,
 } from "./v2-board";
+import {
+	leagueLiveDeliveryV2,
+	leagueLiveTimesV2,
+	readLeagueLiveHeadV2,
+	readLeagueLivePublicationMembershipV2,
+	readLeagueLivePublicationPointerV2,
+	type LeagueLiveHeadReadV2,
+	type LeagueLiveManifestV2,
+} from "./league-v2";
+import { assertLiveTournamentAccessV2 } from "./access-v2";
+import {
+	h2hLeagueDeliveryV2,
+	h2hLeagueTimesV2,
+	readH2HLeagueHeadV2,
+	readH2HLeagueMembershipV2,
+	type H2HLeagueHeadReadV2,
+} from "./h2h-v2";
 
 type LiveRef = { season: string; eventId: number; scoreCoreRevision: string };
 
@@ -240,176 +252,193 @@ const assertMember = async (context: GraphQLContext, tournamentId: number, entry
 	return tournament;
 };
 
-const assertMemberOrManager = async (
-	context: GraphQLContext,
-	tournamentId: number,
-	entryId: number
-) => {
-	const member = await tournamentsService.getTournamentForMember(context, tournamentId, entryId);
-	if (member) return member;
-	const principalEntryId = context.principal?.fplEntryId;
-	if (
-		typeof principalEntryId === "number" &&
-		principalEntryId > 0 &&
-		context.principal?.fplEntryVerifiedAt
-	) {
-		const managed = await tournamentsService.getManagedTournament(
-			context,
-			tournamentId,
-			principalEntryId
-		);
-		if (managed) return managed;
-	}
-	throw new GraphQLError("Tournament access denied", { extensions: { code: "FORBIDDEN" } });
+const leagueRevisionVector = (publication: LeagueLiveManifestV2) => ({
+	publicationId: publication.publicationId,
+	generation: publication.generation,
+	roster: publication.revisions.roster,
+	scoreCore: publication.revisions.scoreCore,
+	fixtureIdentity: publication.revisions.fixtureIdentity,
+	entryInputSet: publication.revisions.entryInputSet,
+	identity: publication.revisions.identity,
+	officialRank: publication.revisions.officialRank,
+	rules: publication.revisions.rules,
+	algorithm: publication.revisions.algorithm,
+	content: publication.revisions.content,
+});
+
+const unavailableLeagueHead = (context: GraphQLContext, eventId: number, tournamentId: number) => {
+	return {
+		season: context.currentSeason.seasonCode,
+		eventId,
+		tournamentId,
+		mode: "CLASSIC",
+		availability: "MISSING",
+		contentRevision: null,
+		publication: null,
+		delivery: { state: "UNAVAILABLE", servedFrom: "UNAVAILABLE", reasonCodes: ["NO_PUBLICATION"] },
+		nextRefreshAt: null,
+	};
 };
 
-const eligibleEntryWindowForEvent = async (
+const leagueHead = (
 	context: GraphQLContext,
-	entryIds: readonly number[],
+	read: LeagueLiveHeadReadV2 | null,
 	eventId: number,
-	requestingEntryId: number
-): Promise<{
-	entryIds: number[];
-	deferredEntryIds: number[];
-	totalEntries: number;
-	eligibilityUnavailable: boolean;
-}> => {
-	const uniqueEntryIds = [...new Set(entryIds)];
-	const admissionWindow = selectTournamentDeskEntryWindow(
-		uniqueEntryIds,
-		requestingEntryId,
-		MAX_TOURNAMENT_DESK_ENTRIES
-	);
-	try {
-		const eligibility = await loadTournamentEventEligibility(uniqueEntryIds, eventId, (ids) =>
-			entriesRepository.getEntriesByIds(context, ids)
-		);
-		const eligibleWindow = selectTournamentDeskEntryWindow(
-			eligibility.entryIds,
-			requestingEntryId,
-			MAX_TOURNAMENT_DESK_ENTRIES
-		);
-		return {
-			entryIds: eligibleWindow.entryIds,
-			deferredEntryIds: eligibleWindow.deferredEntryIds,
-			totalEntries: eligibility.entryIds.length,
-			eligibilityUnavailable: false,
-		};
-	} catch (error) {
-		// Eligibility is an optimization boundary. If metadata is unavailable,
-		// retain only the bounded admission window and let the V2 projector fail
-		// closed per entry rather than taking down the entire live board.
-		context.logger.warn({ err: error, eventId }, "Live board entry eligibility unavailable");
-		return {
-			entryIds: admissionWindow.entryIds,
-			deferredEntryIds: admissionWindow.deferredEntryIds,
-			totalEntries: uniqueEntryIds.length,
-			eligibilityUnavailable: true,
-		};
-	}
+	tournamentId: number,
+	availability: "READY" | "PENDING" | "MISSING" | "ERROR" = read ? "READY" : "MISSING"
+) => {
+	if (!read) return unavailableLeagueHead(context, eventId, tournamentId);
+	const publication = read.publication;
+	return {
+		season: context.currentSeason.seasonCode,
+		eventId: publication.eventId,
+		tournamentId: publication.tournamentId,
+		mode: "CLASSIC",
+		availability,
+		contentRevision: publication.revisions.content,
+		publication: {
+			revisions: leagueRevisionVector(publication),
+			times: leagueLiveTimesV2(publication),
+		},
+		delivery: leagueLiveDeliveryV2(read),
+		nextRefreshAt: publication.times.expectedNextCheckAt,
+	};
 };
+
+const unavailableH2HHead = (context: GraphQLContext, eventId: number, tournamentId: number) => ({
+	season: context.currentSeason.seasonCode,
+	eventId,
+	tournamentId,
+	mode: "H2H",
+	availability: "MISSING",
+	contentRevision: null,
+	publication: null,
+	delivery: {
+		state: "UNAVAILABLE",
+		servedFrom: "UNAVAILABLE",
+		reasonCodes: ["NO_PUBLICATION"],
+	},
+	nextRefreshAt: null,
+});
+
+const h2hHead = (
+	context: GraphQLContext,
+	read: H2HLeagueHeadReadV2 | null,
+	eventId: number,
+	tournamentId: number,
+	availability: "READY" | "PENDING" | "MISSING" | "ERROR" = read ? "READY" : "MISSING"
+) => {
+	if (!read) return unavailableH2HHead(context, eventId, tournamentId);
+	const publication = read.publication;
+	return {
+		season: context.currentSeason.seasonCode,
+		eventId: publication.eventId,
+		tournamentId: publication.tournamentId,
+		mode: "H2H",
+		availability,
+		contentRevision: publication.revisions.content,
+		publication: {
+			revisions: {
+				publicationId: publication.publicationId,
+				generation: publication.generation,
+				roster: publication.revisions.roster,
+				scoreCore: publication.revisions.scoreCore,
+				fixtureIdentity: publication.revisions.fixtureIdentity,
+				entryInputSet: publication.revisions.entryInputSet,
+				identity: publication.revisions.identity,
+				officialRank: publication.revisions.officialRank,
+				rules: publication.revisions.rules,
+				algorithm: publication.revisions.algorithm,
+				content: publication.revisions.content,
+			},
+			times: h2hLeagueTimesV2(publication),
+		},
+		delivery: h2hLeagueDeliveryV2(read),
+		nextRefreshAt: publication.times.expectedNextCheckAt,
+	};
+};
+
+const unavailableBoardResponse = (head: ReturnType<typeof leagueHead>) => ({
+	head,
+	totalEntries: 0,
+	filteredEntries: 0,
+	pageInfo: { hasNextPage: false, endCursor: null },
+	highestEventPoints: null,
+	averageEventPoints: null,
+	rows: [],
+	viewerRow: null,
+});
 
 const boardResponse = async (
 	context: GraphQLContext,
-	request: EntryLiveCompetitionBoardRequest,
-	memberTournament: { leagueType?: string | null },
-	ref: LiveRef | null
+	request: EntryLiveCompetitionBoardRequest
 ) => {
-	const entryIds = await tournamentsService.getTournamentEntryIdsUncached(
-		context,
-		request.tournamentId
-	);
-	const entryWindow = await eligibleEntryWindowForEvent(
-		context,
-		entryIds,
-		request.eventId,
-		request.entryId
-	);
-	const { board } = await buildEntryLiveCompetitionBoardV2(context, {
-		eventId: request.eventId,
-		tournamentId: request.tournamentId,
-		entryIds: entryWindow.entryIds,
-		requireNet: memberTournament.leagueType === LeagueType.H2H,
-		scoreCoreRevision: ref?.scoreCoreRevision,
-	});
-	const page = queryEntryLiveCompetitionBoardV2(board, request);
-	const sample =
-		board.rows.find((row) => row.entry === request.entryId && row.score.source !== "UNAVAILABLE") ??
-		board.rows.find((row) => row.score.source !== "UNAVAILABLE") ??
-		board.rows[0] ??
-		null;
-	const delivery = sample?.score.delivery ?? {
-		state: "UNAVAILABLE",
-		servedFrom: "UNAVAILABLE",
-		reasonCodes: ["NO_COMPLETE_ENTRY_PROJECTION"],
-	};
-	const effectiveDelivery = entryWindow.eligibilityUnavailable
-		? {
-				...delivery,
-				reasonCodes: [...new Set([...delivery.reasonCodes, "ENTRY_ELIGIBILITY_UNAVAILABLE"])],
-			}
-		: delivery;
-	const revisions = sample?.score.revisions ?? {
-		publicationId: `unavailable:${request.eventId}`,
-		generation: 0,
-		lifecycle: "unavailable",
-		fixtureIdentity: "unavailable",
-		scoreCore: board.scoreCoreRevision ?? "unavailable",
-		displayStats: "unavailable",
-		explain: "unavailable",
-		picksBase: null,
-		officialAdjustment: null,
-		previousTotals: null,
-		finalResult: null,
-		rules: "unavailable",
-		algorithm: "live-points-v2-algorithm-1",
-		input: "unavailable",
-	};
-	const now = new Date().toISOString();
-	const times = sample?.score.times ?? {
-		sourceCheckedAt: now,
-		contentUpdatedAt: now,
-		publishedAt: now,
-		checkpointedAt: null,
-		servedAt: now,
-		staleAt: now,
-		nextRefreshAt: null,
-	};
-	const unavailableEntryIds = board.unavailableEntryIds;
-	const totalEntries = entryWindow.totalEntries;
-	const deferredEntryCount = entryWindow.deferredEntryIds.length + board.deferredEntryCount;
-	const partial =
-		entryWindow.eligibilityUnavailable ||
-		entryWindow.deferredEntryIds.length > 0 ||
-		board.partial ||
-		board.rows.length !== totalEntries;
-	return {
+	const scope = {
 		season: context.currentSeason.seasonCode,
 		eventId: request.eventId,
 		tournamentId: request.tournamentId,
-		boardRevision: board.boardRevision,
-		scoreCoreRevision: board.scoreCoreRevision,
-		dataAvailability: effectiveDelivery.state,
-		coverageState: board.computedEntries === 0 ? "UNAVAILABLE" : partial ? "PARTIAL" : "COMPLETE",
-		rankScope: partial ? "AVAILABLE_ROWS" : "FULL_FIELD",
-		computedEntries: board.computedEntries,
-		deferredEntryCount,
-		failedEntryCount: board.failedEntryCount,
-		unavailableEntryCount: board.unavailableEntryCount,
-		officialCoverage: totalEntries === 0 ? 0 : board.computedEntries / totalEntries,
-		unavailableEntryIds,
-		failedEntryIds: board.failedEntryIds,
-		partial,
-		totalEntries,
+		mode: "CLASSIC",
+	} as const;
+	// Check membership from the immutable roster before loading or projecting
+	// the full board.  Unauthorized requests must not be able to trigger the
+	// expensive all-entry projection path.
+	const membership = await readLeagueLivePublicationMembershipV2(context, scope, request.entryId);
+	await assertLiveTournamentAccessV2(context, request.tournamentId, request.entryId, membership);
+	const headRead = await readLeagueLiveHeadV2(context, scope);
+	const global = headRead
+		? await readLivePublicationByRefV2(
+				context,
+				request.eventId,
+				headRead.publication.globalRef
+			).catch(() => null)
+		: await readLivePublicationV2(context, request.eventId).catch(() => null);
+	const fallbackGlobal =
+		!global && headRead?.servedFrom === "REDIS_CURRENT"
+			? await readLeagueLivePublicationPointerV2(
+					context,
+					{
+						season: context.currentSeason.seasonCode,
+						eventId: request.eventId,
+						tournamentId: request.tournamentId,
+						mode: "CLASSIC",
+					},
+					"previous"
+				)
+					.then((previous) =>
+						previous
+							? readLivePublicationByRefV2(
+									context,
+									request.eventId,
+									previous.publication.globalRef
+								).catch(() => null)
+							: null
+					)
+					.catch(() => null)
+			: null;
+	const servingGlobal = global ?? fallbackGlobal;
+	const board = servingGlobal
+		? await readEntryLiveCompetitionBoardWithPreviousV2(context, scope, servingGlobal)
+		: readEntryLiveCompetitionBoardProcessLkgV2(scope);
+	if (!board) {
+		return unavailableBoardResponse(
+			leagueHead(
+				context,
+				headRead,
+				request.eventId,
+				request.tournamentId,
+				headRead ? "ERROR" : "MISSING"
+			)
+		);
+	}
+	const page = queryEntryLiveCompetitionBoardV2(board, request);
+	const read = { publication: board.publication, servedFrom: board.servedFrom };
+	return {
+		head: leagueHead(context, read, request.eventId, request.tournamentId),
+		totalEntries: board.totalEntries,
 		filteredEntries: page.filteredEntries,
-		page: request.page,
-		pageSize: request.pageSize,
-		hasMore: page.hasMore,
+		pageInfo: page.pageInfo,
 		highestEventPoints: board.highestEventPoints,
 		averageEventPoints: board.averageEventPoints,
-		revisions,
-		times,
-		delivery: effectiveDelivery,
 		rows: page.rows,
 		viewerRow: page.viewerRow,
 	};
@@ -456,136 +485,48 @@ export const liveDesksResolvers = {
 				delivery: publicationDelivery(publication),
 			};
 		},
+		leagueLiveHead: async (
+			_parent: unknown,
+			args: { entryId: number; tournamentId: number; eventId: number; mode: "CLASSIC" | "H2H" },
+			context: GraphQLContext
+		) => {
+			if (args.mode === "H2H") {
+				const membership = await readH2HLeagueMembershipV2(
+					context,
+					args.tournamentId,
+					args.eventId,
+					args.entryId
+				);
+				await assertLiveTournamentAccessV2(context, args.tournamentId, args.entryId, membership);
+				const read = await readH2HLeagueHeadV2(context, args.tournamentId, args.eventId);
+				return h2hHead(context, read, args.eventId, args.tournamentId);
+			}
+			const membership = await readLeagueLivePublicationMembershipV2(
+				context,
+				{
+					season: context.currentSeason.seasonCode,
+					eventId: args.eventId,
+					tournamentId: args.tournamentId,
+					mode: "CLASSIC",
+				},
+				args.entryId
+			);
+			await assertLiveTournamentAccessV2(context, args.tournamentId, args.entryId, membership);
+			const read = await readLeagueLiveHeadV2(context, {
+				season: context.currentSeason.seasonCode,
+				eventId: args.eventId,
+				tournamentId: args.tournamentId,
+				mode: "CLASSIC",
+			});
+			return leagueHead(context, read, args.eventId, args.tournamentId);
+		},
 		entryLiveCompetitionBoard: async (
 			_parent: unknown,
 			args: Record<string, unknown>,
 			context: GraphQLContext
 		) => {
 			const request = normalizeEntryLiveCompetitionBoardRequestV2(args);
-			const ref = (args.ref as LiveRef | null | undefined) ?? null;
-			const publication = await readLivePublicationV2(context, request.eventId).catch(() => null);
-			assertRef(context, ref, publication);
-			const memberTournament = await assertMemberOrManager(
-				context,
-				request.tournamentId,
-				request.entryId
-			);
-			await getCoreEventSnapshot(context);
-			return boardResponse(context, request, memberTournament, ref);
-		},
-		entryLiveCompetitionsDesk: async (
-			_parent: unknown,
-			args: { entryId: number; selectedTournamentId?: number | null; ref?: LiveRef | null },
-			context: GraphQLContext
-		) => {
-			const tournaments = await tournamentsService.getEntryTournaments(context, args.entryId);
-			const selected =
-				args.selectedTournamentId &&
-				tournaments.some((tournament) => tournament.id === args.selectedTournamentId)
-					? args.selectedTournamentId
-					: (tournaments[0]?.id ?? null);
-			if (!selected)
-				return {
-					season: context.currentSeason.seasonCode,
-					eventId: args.ref?.eventId ?? 0,
-					scoreCoreRevision: null,
-					state: "UNAVAILABLE",
-					windowState: "PRE_DEADLINE",
-					dataAvailability: "UNAVAILABLE",
-					nextRefreshAt: null,
-					tournaments,
-					selectedTournamentId: null,
-					board: [],
-					officialCoverage: 0,
-					revisions: null,
-					times: null,
-					delivery: {
-						state: "UNAVAILABLE",
-						servedFrom: "UNAVAILABLE",
-						reasonCodes: ["NO_TOURNAMENT"],
-					},
-					unavailableEntryIds: [],
-					partial: false,
-					failedEntryIds: [],
-					deferredEntryCount: 0,
-					totalEntries: 0,
-				};
-			await assertMember(context, selected, args.entryId);
-			const eventCore = await getCoreEventSnapshot(context);
-			const eventId =
-				args.ref?.eventId ??
-				eventCore?.currentEventId ??
-				eventCore?.events.find((event) => event.isPrevious)?.id ??
-				0;
-			const publication =
-				eventId > 0 ? await readLivePublicationV2(context, eventId).catch(() => null) : null;
-			assertRef(context, args.ref, publication);
-			const allEntryIds = await tournamentsService.getTournamentEntryIdsUncached(context, selected);
-			const entryWindow = await eligibleEntryWindowForEvent(
-				context,
-				allEntryIds,
-				eventId,
-				args.entryId
-			);
-			const { results, errors } = await calcLivePointsForEntriesV2(
-				context,
-				eventId,
-				entryWindow.entryIds,
-				{
-					scoreCoreRevision: args.ref?.scoreCoreRevision,
-				}
-			);
-			const usable = (row: { availability: string; score: { source: string } }): boolean =>
-				row.availability === "READY" && row.score.source !== "UNAVAILABLE";
-			const sample =
-				results.get(args.entryId) && usable(results.get(args.entryId)!)
-					? results.get(args.entryId)!
-					: ([...results.values()].find(usable) ?? results.values().next().value ?? null);
-			const selectedTournament = tournaments.find((tournament) => tournament.id === selected);
-			const useNetEventPoints = selectedTournament?.leagueType === LeagueType.H2H;
-			const orderedResults = [...results.values()].sort(
-				(left, right) =>
-					Number(usable(right)) - Number(usable(left)) ||
-					(useNetEventPoints
-						? right.score.netEventPoints - left.score.netEventPoints
-						: right.score.eventPoints - left.score.eventPoints) ||
-					left.entry - right.entry
-			);
-			return {
-				season: context.currentSeason.seasonCode,
-				eventId,
-				scoreCoreRevision: publication?.publication.revisions.scoreCore.revision ?? null,
-				state: publication?.publication.state ?? "UNAVAILABLE",
-				windowState: windowStateForPublication(publication?.publication ?? null),
-				dataAvailability: publicationAvailability(publication),
-				nextRefreshAt: publication?.publication.expectedNextCheckAt ?? null,
-				tournaments,
-				selectedTournamentId: selected,
-				board: orderedResults,
-				officialCoverage:
-					entryWindow.totalEntries === 0
-						? 0
-						: [...results.values()].filter((row) => row.availability === "READY").length /
-							entryWindow.totalEntries,
-				unavailableEntryIds: entryWindow.entryIds.filter(
-					(entryId) => !results.get(entryId) || results.get(entryId)?.availability !== "READY"
-				),
-				partial:
-					entryWindow.eligibilityUnavailable ||
-					entryWindow.deferredEntryIds.length > 0 ||
-					[...results.values()].some((row) => row.availability !== "READY") ||
-					results.size !== entryWindow.entryIds.length,
-				failedEntryIds: errors.map((error) => error.entryId).sort((left, right) => left - right),
-				deferredEntryCount: entryWindow.deferredEntryIds.length,
-				totalEntries: entryWindow.totalEntries,
-				revisions: sample?.score.revisions ?? null,
-				times: sample?.score.times ?? null,
-				delivery: sample?.delivery ?? {
-					state: "UNAVAILABLE",
-					servedFrom: "UNAVAILABLE",
-					reasonCodes: ["NO_COMPLETE_ENTRY_PROJECTION"],
-				},
-			};
+			return boardResponse(context, request);
 		},
 		tournamentSelectionIndex: async (
 			_parent: unknown,
