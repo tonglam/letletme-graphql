@@ -313,9 +313,20 @@ export type MyTournamentSeasonReview = {
 		sectionChunkHashes?: Partial<Record<MyTournamentReviewSeasonSection, string[]>>;
 		/** Exact producer chunk boundaries for section-page authentication. */
 		sectionChunkItemCounts?: Partial<Record<MyTournamentReviewSeasonSection, number[]>>;
+		/** Authenticated aggregate shell used to validate cached Season pages. */
+		pointsAggregateSummary?: ReviewPointsAggregateSummary;
 	}>;
 	/** Internal publication identity used by the V2.1 resolver adapter. */
 	semanticSha256?: string | null;
+};
+
+type ReviewPointsAggregateSummary = {
+	grossPointsTotal: number;
+	grossPointsAverage: number;
+	netPointsTotal: number;
+	seasonGrossPointsTotal: number;
+	seasonGrossPointsAverage: number;
+	seasonNetPointsTotal: number;
 };
 
 export type MyTournamentReviewEventStatus = {
@@ -437,7 +448,7 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
 	          extensions.digest(
 	            convert_to(
 	              (
-	                (${publicationAlias}.payload - 'freshness' - 'observation' - 'observedAt' - 'lastObservedAt' - 'publishedAt' - 'updatedAt' - 'createdAt')::text
+	                extensions.strip_review_operational_metadata(${publicationAlias}.payload)::text
 	                || E'\\n' ||
 	                COALESCE(
 	                  (
@@ -1172,6 +1183,7 @@ type SeasonMetadataRow = {
 	ready_subject_count: number | null;
 	not_applicable_subject_count: number | null;
 	manifest: unknown | null;
+	points_summary: unknown | null;
 	obligation_format: string | null;
 	obligation_state: string | null;
 	finalized_event_ids: unknown;
@@ -1318,7 +1330,8 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 		       publication.expected_subject_count,
 		       publication.ready_subject_count,
 		       publication.not_applicable_subject_count,
-		       publication.payload->'manifest' AS manifest
+		       publication.payload->'manifest' AS manifest,
+		       publication.payload->'points' AS points_summary
 		FROM tournament_scope tournament
 		JOIN competition.tournament_review_heads head
 		  ON head.season_id = tournament.season_id
@@ -1356,6 +1369,7 @@ export const MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL = `
 	       coherent_heads.ready_subject_count,
 	       coherent_heads.not_applicable_subject_count,
 	       coherent_heads.manifest,
+	       coherent_heads.points_summary,
 	       obligations.obligation_format,
 	       obligations.obligation_state,
 	       finalized_window.finalized_event_ids
@@ -1706,6 +1720,28 @@ function requiredInteger(value: unknown, label: string): number {
 		throw integrityError(`Review points aggregate ${label} is not an integer`);
 	}
 	return number;
+}
+
+function pointsAggregateSummary(value: unknown): ReviewPointsAggregateSummary | null {
+	if (!isRecord(value)) return null;
+	try {
+		return {
+			grossPointsTotal: requiredInteger(value.grossPointsTotal, "grossPointsTotal"),
+			grossPointsAverage: requiredNumber(value.grossPointsAverage, "grossPointsAverage"),
+			netPointsTotal: requiredInteger(value.netPointsTotal, "netPointsTotal"),
+			seasonGrossPointsTotal: requiredInteger(
+				value.seasonGrossPointsTotal,
+				"seasonGrossPointsTotal"
+			),
+			seasonGrossPointsAverage: requiredNumber(
+				value.seasonGrossPointsAverage,
+				"seasonGrossPointsAverage"
+			),
+			seasonNetPointsTotal: requiredInteger(value.seasonNetPointsTotal, "seasonNetPointsTotal"),
+		};
+	} catch {
+		return null;
+	}
 }
 
 function roundedAverage(total: number, count: number): number {
@@ -3550,9 +3586,28 @@ function phaseDescriptorsCache(
 			(candidate.readySubjectCount ?? null) === (phase.readySubjectCount ?? null) &&
 			(candidate.notApplicableSubjectCount ?? null) === (phase.notApplicableSubjectCount ?? null) &&
 			sectionHashMapsEqual(candidate.sectionChunkHashes, phase.sectionChunkHashes) &&
-			sectionItemCountMapsEqual(candidate.sectionChunkItemCounts, phase.sectionChunkItemCounts)
+			sectionItemCountMapsEqual(candidate.sectionChunkItemCounts, phase.sectionChunkItemCounts) &&
+			pointsAggregateSummariesEqual(candidate.pointsAggregateSummary, phase.pointsAggregateSummary)
 		);
 	});
+}
+
+function pointsAggregateSummariesEqual(
+	left: unknown,
+	right: ReviewPointsAggregateSummary | undefined
+): boolean {
+	if (left === undefined || left === null || right === undefined) {
+		return (left === undefined || left === null) && right === undefined;
+	}
+	if (!isRecord(left)) return false;
+	return (
+		left.grossPointsTotal === right.grossPointsTotal &&
+		left.grossPointsAverage === right.grossPointsAverage &&
+		left.netPointsTotal === right.netPointsTotal &&
+		left.seasonGrossPointsTotal === right.seasonGrossPointsTotal &&
+		left.seasonGrossPointsAverage === right.seasonGrossPointsAverage &&
+		left.seasonNetPointsTotal === right.seasonNetPointsTotal
+	);
 }
 
 function sectionHashMapsEqual(
@@ -3659,6 +3714,7 @@ type SeasonSectionCacheExpectation = {
 	notApplicableSubjectCount: number;
 	sectionChunkHashes: string[] | null;
 	sectionChunkItemCounts: number[] | null;
+	pointsAggregateSummary?: ReviewPointsAggregateSummary;
 	pageOffset: number;
 	first: number;
 };
@@ -3752,6 +3808,25 @@ function seasonSectionCache(
 	const typedPoints = points as MyTournamentReviewPoints | null;
 	const typedH2H = h2h as MyTournamentReviewH2H | null;
 	const typedKnockout = knockout as MyTournamentReviewKnockout | null;
+	if (expectedPoints) {
+		const expectedSummary = expected.pointsAggregateSummary;
+		// A page-only Points cache carries whole-section aggregates. Without the
+		// publication's authenticated shell there is no trusted value to compare
+		// them with, so force a PostgreSQL materialization rather than accepting a
+		// self-consistent but unbound cache entry.
+		if (
+			!expectedSummary ||
+			!typedPoints ||
+			typedPoints.grossPointsTotal !== expectedSummary.seasonGrossPointsTotal ||
+			typedPoints.grossPointsAverage !== expectedSummary.seasonGrossPointsAverage ||
+			typedPoints.netPointsTotal !== expectedSummary.seasonNetPointsTotal ||
+			typedPoints.seasonGrossPointsTotal !== expectedSummary.seasonGrossPointsTotal ||
+			typedPoints.seasonGrossPointsAverage !== expectedSummary.seasonGrossPointsAverage ||
+			typedPoints.seasonNetPointsTotal !== expectedSummary.seasonNetPointsTotal
+		) {
+			return false;
+		}
+	}
 	const page = typedPoints ?? typedH2H ?? typedKnockout;
 	if (!isRecord(page)) return false;
 	const sectionWitness = value.__sectionWitness;
@@ -5653,6 +5728,18 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				const publishedAt = iso(row.published_at);
 				const sectionChunkHashes = manifestSectionChunkHashes(row.manifest) ?? undefined;
 				const sectionChunkItemCounts = manifestSectionChunkItemCounts(row.manifest) ?? undefined;
+				const pointsSummary =
+					format === "POINTS" && headsByEvent.has(eventId)
+						? pointsAggregateSummary(row.points_summary)
+						: undefined;
+				if (
+					env.isProduction &&
+					format === "POINTS" &&
+					headsByEvent.has(eventId) &&
+					pointsSummary === null
+				) {
+					throw integrityError("Review points aggregate summary is missing");
+				}
 				if (existing) {
 					existing.startEventId = Math.min(existing.startEventId, eventId);
 					existing.endEventId = Math.max(existing.endEventId, eventId);
@@ -5669,6 +5756,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 						existing.notApplicableSubjectCount = row.not_applicable_subject_count;
 						existing.sectionChunkHashes = sectionChunkHashes;
 						existing.sectionChunkItemCounts = sectionChunkItemCounts;
+						existing.pointsAggregateSummary = pointsSummary ?? undefined;
 					}
 					return phases;
 				}
@@ -5689,6 +5777,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					notApplicableSubjectCount: row.not_applicable_subject_count,
 					sectionChunkHashes,
 					sectionChunkItemCounts,
+					pointsAggregateSummary: pointsSummary ?? undefined,
 				});
 				return phases;
 			},
@@ -5849,6 +5938,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			notApplicableSubjectCount: Number(phase.notApplicableSubjectCount),
 			sectionChunkHashes: phase.sectionChunkHashes?.[requestedSection] ?? null,
 			sectionChunkItemCounts: phase.sectionChunkItemCounts?.[requestedSection] ?? null,
+			pointsAggregateSummary: phase.pointsAggregateSummary,
 			pageOffset: cursor?.offset ?? 0,
 			first,
 		};
@@ -5932,6 +6022,11 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					? h2h.matches.length
 					: h2h.standings.length
 				: (knockout?.matches.length ?? 0);
+		if (expectedCache.pageOffset > pageLength) {
+			throw new GraphQLError("Review cursor is out of range", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
 		const requestedPageLength = Math.min(first, Math.max(0, pageLength - expectedCache.pageOffset));
 		const sectionWitness = seasonSectionWitness(
 			materializedRow.payload,
