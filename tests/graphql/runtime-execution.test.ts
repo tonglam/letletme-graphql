@@ -62,7 +62,7 @@ describe("liveMatchday GraphQL execution coalescing", () => {
 		const differentOperationHeader = key({ apolloOperationName: "LiveMatchday" });
 		const differentMethod = key({ method: "GET" });
 
-		expect(same).toMatch(/^live-matchday:[^:]+:2627:[0-9a-f]{64}$/);
+		expect(same).toMatch(/^live-matchday:[^:]+:2627:event-2:[0-9a-f]{64}$/);
 		expect(differentSeason).not.toBe(same);
 		expect(differentEvent).not.toBe(same);
 		expect(differentAccept).not.toBe(same);
@@ -70,6 +70,20 @@ describe("liveMatchday GraphQL execution coalescing", () => {
 		expect(differentPreflight).not.toBe(same);
 		expect(differentOperationHeader).not.toBe(same);
 		expect(differentMethod).not.toBe(same);
+		expect(
+			liveMatchdayExecutionFlightKey(
+				{ query: "query { liveMatchday { availability } }", variables: { eventId: null } },
+				"2627",
+				transport
+			)
+		).toBeNull();
+		expect(
+			liveMatchdayExecutionFlightKey(
+				{ query: "query { liveMatchday { availability } }" },
+				"2627",
+				transport
+			)
+		).toBeNull();
 	});
 
 	const shareableObservation = () => ({
@@ -200,6 +214,68 @@ describe("liveMatchday GraphQL execution coalescing", () => {
 		release();
 		await Promise.all([first, second]);
 		expect(calls).toBe(2);
+	});
+
+	it("elects one replacement for all followers after a stale flight", async () => {
+		let calls = 0;
+		let releaseFirst!: () => void;
+		let releaseSecond!: () => void;
+		let resolveSecondStarted!: () => void;
+		const firstGate = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		const secondGate = new Promise<void>((resolve) => {
+			releaseSecond = resolve;
+		});
+		const secondStarted = new Promise<void>((resolve) => {
+			resolveSecondStarted = resolve;
+		});
+		const apollo = {
+			executeHTTPGraphQLRequest: async () => {
+				calls += 1;
+				if (calls === 1) await firstGate;
+				if (calls === 2) {
+					resolveSecondStarted();
+					await secondGate;
+				}
+				return {
+					status: 200,
+					headers: responseHeaders(),
+					body: { kind: "complete" as const, string: '{"data":{"liveMatchday":{}}}' },
+				};
+			},
+		} as unknown as ApolloServer<GraphQLContext>;
+		const run = (requestId: string) =>
+			executeGraphQLRequest({
+				apollo,
+				request: request(),
+				parsedBody: { query: "query { liveMatchday { availability } }" },
+				context,
+				requestTiming: new RequestTiming(),
+				requestId,
+				corsHeaders: {},
+				responseFlightKey: "test-live-matchday-stale-replacement-flight",
+				responseFlightObservation: () => ({
+					...shareableObservation(),
+					shareUntilMs: Date.now() - 1,
+				}),
+			});
+
+		const owner = run("request-owner");
+		await Promise.resolve();
+		const followers = ["request-one", "request-two", "request-three"].map(run);
+		await Promise.resolve();
+		expect(calls).toBe(1);
+
+		releaseFirst();
+		await secondStarted;
+		const lateFollower = run("request-late");
+		releaseSecond();
+		const results = await Promise.all([owner, ...followers, lateFollower]);
+		expect(calls).toBe(2);
+		for (const result of results) {
+			expect(await result.response.text()).toBe('{"data":{"liveMatchday":{}}}');
+		}
 	});
 
 	it("does not share a rejected execution", async () => {

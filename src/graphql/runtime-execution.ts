@@ -89,7 +89,13 @@ type CompleteApolloResponse = Readonly<{
 	observation: LiveMatchExecutionObservation;
 }>;
 
-const liveMatchdayExecutionFlights = new Map<string, Promise<CompleteApolloResponse | null>>();
+type LiveMatchdayExecutionFlight = Readonly<{
+	shared: Promise<CompleteApolloResponse | null>;
+	ownerExecution: Promise<ApolloHttpGraphQLResponse>;
+	shareExpiredResult: boolean;
+}>;
+
+const liveMatchdayExecutionFlights = new Map<string, LiveMatchdayExecutionFlight>();
 
 type LiveMatchdayExecutionTransport = Readonly<{
 	method: string;
@@ -99,16 +105,33 @@ type LiveMatchdayExecutionTransport = Readonly<{
 	apolloOperationName: string;
 }>;
 
+const explicitLiveMatchdayEventId = (parsedBody: unknown): number | null => {
+	if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) return null;
+	const variables = (parsedBody as { variables?: unknown }).variables;
+	if (!variables || typeof variables !== "object" || Array.isArray(variables)) return null;
+	const eventId = (variables as { eventId?: unknown }).eventId;
+	return typeof eventId === "number" && Number.isSafeInteger(eventId) && eventId > 0
+		? eventId
+		: null;
+};
+
 /**
- * Build a process-local key for one public liveMatchday operation. The body is
- * hashed so query text and variables never enter state or telemetry, while the
- * season and deploy SHA fence the flight to one exact runtime/data scope.
+ * Build a process-local key for one public liveMatchday operation when its event
+ * scope is known before resolver execution. The body is hashed so query text and
+ * variables never enter state or telemetry, while the season and deploy SHA
+ * fence the flight to one exact runtime/data scope.
  */
 export const liveMatchdayExecutionFlightKey = (
 	parsedBody: unknown,
 	season: string,
 	transport: LiveMatchdayExecutionTransport
 ): string | null => {
+	// An omitted or inline eventId is resolved from the mutable active-event
+	// pointer, or is not available to this pre-resolver helper. Neither form can
+	// share a flight safely because the pointer may advance while it is in
+	// progress. Only a positive variable-supplied event ID is safe to key here.
+	const eventId = explicitLiveMatchdayEventId(parsedBody);
+	if (eventId === null) return null;
 	let serialized: string | undefined;
 	try {
 		serialized = JSON.stringify({
@@ -126,7 +149,7 @@ export const liveMatchdayExecutionFlightKey = (
 	}
 	if (serialized === undefined) return null;
 	const bodyHash = createHash("sha256").update(serialized, "utf8").digest("hex");
-	return `live-matchday:${env.DEPLOY_SHA}:${season}:${bodyHash}`;
+	return `live-matchday:${env.DEPLOY_SHA}:${season}:event-${eventId}:${bodyHash}`;
 };
 
 const materializeCompleteResponse = (
@@ -166,6 +189,40 @@ const restoreCompleteResponse = (response: CompleteApolloResponse): ApolloHttpGr
 const isLiveMatchdayResponseShareable = (response: CompleteApolloResponse): boolean =>
 	response.observation.shareUntilMs === null || Date.now() < response.observation.shareUntilMs;
 
+const recordCoalescedLiveMatchdayResponse = (
+	response: CompleteApolloResponse
+): ApolloHttpGraphQLResponse => {
+	metrics.liveMatchExecutionCoalescedTotal.inc();
+	metrics.liveMatchDeliveryTotal
+		.labels(response.observation.view, response.observation.state, response.observation.servedFrom)
+		.inc();
+	return restoreCompleteResponse(response);
+};
+
+const startLiveMatchdayExecutionFlight = (
+	key: string,
+	execute: () => Promise<ApolloHttpGraphQLResponse>,
+	getObservation: () => LiveMatchExecutionObservation | null,
+	shareExpiredResult: boolean
+): LiveMatchdayExecutionFlight => {
+	const ownerExecution = execute();
+	const flightRef: { value?: LiveMatchdayExecutionFlight } = {};
+	const shared = ownerExecution
+		.then(
+			(response) => materializeCompleteResponseSafely(response, getObservation),
+			() => null
+		)
+		.finally(() => {
+			if (liveMatchdayExecutionFlights.get(key) === flightRef.value) {
+				liveMatchdayExecutionFlights.delete(key);
+			}
+		});
+	const flight: LiveMatchdayExecutionFlight = { shared, ownerExecution, shareExpiredResult };
+	flightRef.value = flight;
+	liveMatchdayExecutionFlights.set(key, flight);
+	return flight;
+};
+
 /**
  * Coalesce only overlapping complete executions. This is intentionally not a
  * completed-result cache: once the owner settles, a later request performs a
@@ -178,36 +235,34 @@ const executeLiveMatchdayFlight = async (
 	getObservation: () => LiveMatchExecutionObservation | null
 ): Promise<ApolloHttpGraphQLResponse> => {
 	const existing = liveMatchdayExecutionFlights.get(key);
-	if (existing) {
-		const response = await existing;
-		if (response && isLiveMatchdayResponseShareable(response)) {
-			metrics.liveMatchExecutionCoalescedTotal.inc();
-			metrics.liveMatchDeliveryTotal
-				.labels(
-					response.observation.view,
-					response.observation.state,
-					response.observation.servedFrom
-				)
-				.inc();
-			return restoreCompleteResponse(response);
-		}
-		return execute();
+	if (!existing) {
+		const owner = startLiveMatchdayExecutionFlight(key, execute, getObservation, false);
+		const response = await owner.shared;
+		return response ? restoreCompleteResponse(response) : owner.ownerExecution;
 	}
 
-	const ownerExecution = execute();
-	const shared = ownerExecution
-		.then(
-			(response) => materializeCompleteResponseSafely(response, getObservation),
-			() => null
-		)
-		.finally(() => {
-			if (liveMatchdayExecutionFlights.get(key) === shared) {
-				liveMatchdayExecutionFlights.delete(key);
-			}
-		});
-	liveMatchdayExecutionFlights.set(key, shared);
-	const response = await shared;
-	return response ? restoreCompleteResponse(response) : ownerExecution;
+	const response = await existing.shared;
+	if (!response) return execute();
+	if (existing.shareExpiredResult || isLiveMatchdayResponseShareable(response)) {
+		return recordCoalescedLiveMatchdayResponse(response);
+	}
+
+	// The complete old response crossed its freshness boundary. Claim exactly one
+	// replacement flight synchronously; other followers that were already waiting
+	// join it. A replacement complete response is shared only with this waiter
+	// cohort and is never retained for a later request, so a stale result cannot
+	// become a cache. Rejected/non-complete flights take the direct retry above and
+	// remain intentionally unshared.
+	const current = liveMatchdayExecutionFlights.get(key);
+	const replacement =
+		current && current !== existing
+			? current
+			: startLiveMatchdayExecutionFlight(key, execute, getObservation, true);
+	const replacementResponse = await replacement.shared;
+	if (replacementResponse) {
+		return recordCoalescedLiveMatchdayResponse(replacementResponse);
+	}
+	return execute();
 };
 
 export type GraphQLExecutionResult = Readonly<{
