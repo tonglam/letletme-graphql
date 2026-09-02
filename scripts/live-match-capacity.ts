@@ -146,6 +146,9 @@ export const validateCapacityHealthEndpoint = (url: URL): void => {
 	if (url.hash) {
 		throw new Error("capacity health URLs must not include a fragment");
 	}
+	if (url.search) {
+		throw new Error("capacity health URLs must not include a query string");
+	}
 };
 
 const endpoint = new URL(required("LIVE_MATCH_LOAD_URL"));
@@ -1469,6 +1472,7 @@ const verifyDeploymentIdentity = async (
 	try {
 		const response = await fetch(healthEndpoint, {
 			headers: { accept: "application/json" },
+			redirect: "error",
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 		const payload = (await response.json()) as unknown;
@@ -1504,6 +1508,7 @@ const verifyRuntimeReadiness = async (phase: string): Promise<boolean> => {
 	try {
 		const response = await fetch(readyHealthEndpoint, {
 			headers: { accept: "application/json" },
+			redirect: "error",
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 		const payload = (await response.json()) as unknown;

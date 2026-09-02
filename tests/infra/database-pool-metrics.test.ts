@@ -59,6 +59,8 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain('"/health/ready"');
 		expect(capacitySource).toContain("must not include credentials");
 		expect(capacitySource).toContain("must not include a fragment");
+		expect(capacitySource).toContain("must not include a query string");
+		expect(capacitySource).toContain('redirect: "error"');
 		expect(capacitySource).toContain("runtimeReadinessHealthy");
 		expect(capacitySource).toContain("playerValue.price < 0");
 		expect(capacitySource).toContain("metadataOnlyHead");
