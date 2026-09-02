@@ -1,6 +1,7 @@
 import type { GraphQLIngress } from "../infra/ingress-context";
 import { env } from "../infra/env";
 import { logger } from "../infra/logger";
+import type Redis from "ioredis";
 import {
 	rateLimitFingerprint,
 	enqueueRateLimitAggregate,
@@ -29,6 +30,7 @@ import {
 import { handleRateLimitStorageFailure } from "./security";
 import {
 	checkTokenBucketStageV3,
+	checkTokenBucketShadowStageV3,
 	type GraphQLRateLimitHeaderScope,
 	type TokenBucketCheckV3,
 	type TokenBucketStageResultV3,
@@ -106,19 +108,26 @@ export type GraphQLRateLimitStageExecution = {
 	readonly v3Decision?: TokenBucketStageResultV3;
 };
 
+type TokenBucketStageChecker = (
+	redis: Redis,
+	checks: readonly TokenBucketCheckV3[]
+) => Promise<TokenBucketStageResultV3>;
+
 export const checkV3GraphQLRateLimits = async ({
 	checks,
 	corsHeaders,
 	enforce,
 	rateLimitWorkload,
+	stageChecker = checkTokenBucketStageV3,
 }: {
 	checks: readonly TokenBucketCheckV3[];
 	corsHeaders: Record<string, string>;
 	enforce: boolean;
 	rateLimitWorkload?: string;
+	stageChecker?: TokenBucketStageChecker;
 }): Promise<{ response: Response | null; decision?: TokenBucketStageResultV3 }> => {
 	try {
-		const decision = await checkTokenBucketStageV3(getRateLimitRedis(), checks);
+		const decision = await stageChecker(getRateLimitRedis(), checks);
 		if (!decision.allowed && shouldEnforceRateLimitDecision(decision, enforce)) {
 			return {
 				decision,
@@ -166,31 +175,24 @@ export const runGraphQLRateLimitStage = async ({
 	rateLimitWorkload?: string;
 }): Promise<GraphQLRateLimitStageExecution> => {
 	if (v3Checks.length === 0) return { response: null };
-	// In shadow mode the global emergency valve is still enforcing. Evaluate it
-	// separately so an observational client/workload denial cannot suppress the
-	// global debit or turn a global outage into an allowed request.
+	// In shadow mode the global emergency valve is still enforcing. The split
+	// stage checker keeps its debit/denial semantics while evaluating both
+	// buckets in one atomic Redis round trip.
 	if (isGraphQLRateLimitShadowMode && v3Checks.length > 1) {
 		const globalChecks = v3Checks.filter((check) => check.scope === "global");
 		const observationalChecks = v3Checks.filter((check) => check.scope !== "global");
 		if (globalChecks.length > 0 && observationalChecks.length > 0) {
-			const global = await checkV3GraphQLRateLimits({
-				checks: globalChecks,
-				corsHeaders,
-				enforce: true,
-				rateLimitWorkload,
-			});
-			if (global.response || observationalChecks.length === 0) {
-				return { response: global.response, v3Decision: global.decision };
-			}
-			const observational = await checkV3GraphQLRateLimits({
-				checks: observationalChecks,
+			const combined = await checkV3GraphQLRateLimits({
+				checks: v3Checks,
 				corsHeaders,
 				enforce: false,
 				rateLimitWorkload,
+				stageChecker: (redis) =>
+					checkTokenBucketShadowStageV3(redis, globalChecks, observationalChecks),
 			});
 			return {
-				response: observational.response,
-				v3Decision: observational.decision,
+				response: combined.response,
+				v3Decision: combined.decision,
 			};
 		}
 	}
