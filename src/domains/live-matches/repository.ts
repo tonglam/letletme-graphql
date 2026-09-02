@@ -302,6 +302,10 @@ const processDetailDecodeCache = new Map<string, DetailDecodeCacheEntry>();
 let processRedisBundleDecodeCacheBytes = 0;
 let processDeskDecodeCacheBytes = 0;
 let processDetailDecodeCacheBytes = 0;
+// Requests for the same scope and pointer may arrive together during a client
+// refresh burst. Share only the in-flight Redis read; this is not a TTL cache
+// and never serves a completed read without revalidating the current pointer.
+let processRedisReadFlights = new WeakMap<Redis, Map<string, Promise<RedisReadBundle | null>>>();
 
 const cacheStringBytes = (values: readonly (string | null)[]): number =>
 	values.reduce(
@@ -1667,6 +1671,40 @@ const readRedisBundle = async (
 	}
 };
 
+const redisReadFlightKey = (
+	season: string,
+	eventId: number | undefined,
+	mode: LiveMatchReadMode,
+	pointer: "active" | "previous"
+): string => `${season}:${eventId === undefined ? "active-event" : eventId}:${mode}:${pointer}`;
+
+const readRedisBundleSingleFlight = (
+	redis: Redis,
+	season: string,
+	eventId: number | undefined,
+	mode: LiveMatchReadMode,
+	pointer: "active" | "previous"
+): Promise<RedisReadBundle | null> => {
+	const key = redisReadFlightKey(season, eventId, mode, pointer);
+	let flights = processRedisReadFlights.get(redis);
+	if (!flights) {
+		flights = new Map<string, Promise<RedisReadBundle | null>>();
+		processRedisReadFlights.set(redis, flights);
+	}
+	const existing = flights.get(key);
+	if (existing) return existing;
+	const flight = readRedisBundle(redis, season, eventId, mode, pointer);
+	flights.set(key, flight);
+	const clearFlight = (): void => {
+		if (flights?.get(key) !== flight) return;
+		flights.delete(key);
+		if (flights.size === 0 && processRedisReadFlights.get(redis) === flights)
+			processRedisReadFlights.delete(redis);
+	};
+	void flight.then(clearFlight, clearFlight);
+	return flight;
+};
+
 const lkgKey = (season: string, eventId: number): string => `${season}:${eventId}`;
 
 const rememberActiveEvent = (season: string, eventId: number): void => {
@@ -2418,7 +2456,7 @@ export const readLiveMatchday = async (
 		pointer: "active" | "previous"
 	): Promise<RedisReadBundle | null> => {
 		redisRoundtrips += 1;
-		return readRedisBundle(context.redis, season, requestedEvent, mode, pointer);
+		return readRedisBundleSingleFlight(context.redis, season, requestedEvent, mode, pointer);
 	};
 	const activeBundle = await readRedis(requested, "active");
 	let redisReadFailed = activeBundle === null;
@@ -2684,6 +2722,7 @@ export const resetLiveMatchProcessStateForTests = (): void => {
 	processRedisBundleDecodeCache.clear();
 	processDeskDecodeCache.clear();
 	processDetailDecodeCache.clear();
+	processRedisReadFlights = new WeakMap();
 	processRedisBundleDecodeCacheBytes = 0;
 	processDeskDecodeCacheBytes = 0;
 	processDetailDecodeCacheBytes = 0;
