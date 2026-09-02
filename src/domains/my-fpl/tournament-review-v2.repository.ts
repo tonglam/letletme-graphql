@@ -1920,13 +1920,21 @@ function decodePublicationCursor(
 
 function reviewSectionCursorScope(
 	row: Pick<PublicationRow, "season_id" | "tournament_id" | "event_id" | "format" | "revision">,
+	viewerEntryId: number | null,
 	phaseId: string,
 	section: MyTournamentReviewSeasonSection,
 	semanticSha256: string
 ): string {
 	return reviewCursorScope(
 		row,
-		JSON.stringify(["SEASON_SECTION", phaseId, section, String(row.revision), semanticSha256])
+		JSON.stringify([
+			"SEASON_SECTION",
+			viewerEntryId,
+			phaseId,
+			section,
+			String(row.revision),
+			semanticSha256,
+		])
 	);
 }
 
@@ -3747,6 +3755,7 @@ function seasonCache(
 type SeasonSectionCacheExpectation = {
 	seasonId: number;
 	tournamentId: number;
+	viewerEntryId: number | null;
 	eventId: number;
 	throughEventId: number;
 	phaseId: string;
@@ -4016,6 +4025,7 @@ function seasonSectionCache(
 					? "H2H"
 					: "KNOCKOUT",
 		},
+		expected.viewerEntryId,
 		expected.phaseId,
 		expected.section,
 		expected.semanticSha256
@@ -5966,8 +5976,10 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 			revision: phase.revision,
 			format: phase.format,
 		};
+		const viewerEntryId = context.principal ? viewerEntryIdForPrincipal(context.principal) : null;
 		const sectionCursorScope = reviewSectionCursorScope(
 			phaseIdentity,
+			viewerEntryId,
 			phaseId,
 			requestedSection,
 			phase.semanticSha256
@@ -5976,6 +5988,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		const expectedCache: SeasonSectionCacheExpectation = {
 			seasonId: context.currentSeason.seasonId,
 			tournamentId: args.tournamentId,
+			viewerEntryId,
 			eventId: phase.endEventId,
 			throughEventId: args.throughEventId,
 			phaseId,
@@ -6000,7 +6013,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		}
 		const key = gqlCacheKey(
 			context,
-			`my-tournament-review-v2.1:season-section-page:${args.tournamentId}:${args.throughEventId}:${phaseId}:${requestedSection}:${expectedCache.revision}:${expectedCache.semanticSha256}:offset:${expectedCache.pageOffset}:first:${expectedCache.first}`,
+			`my-tournament-review-v2.1:season-section-page:${args.tournamentId}:${args.throughEventId}:${phaseId}:${requestedSection}:viewer:${viewerEntryId ?? "none"}:${expectedCache.revision}:${expectedCache.semanticSha256}:offset:${expectedCache.pageOffset}:first:${expectedCache.first}`,
 			expectedCache.semanticSha256
 		);
 		const cached = await readJsonQueryCache(context, key, (value) =>
