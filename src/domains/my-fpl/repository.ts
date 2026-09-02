@@ -206,17 +206,9 @@ export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
 
 export const MY_FPL_SNAPSHOT_ENTRY_SQL = `
 	SELECT
-		(SELECT count(*)::integer
-			FROM competition.my_fpl_snapshot_entries all_entries
-			WHERE all_entries.season_id = publication.season_id
-				AND all_entries.event_id = publication.event_id
-				AND all_entries.revision = publication.revision) AS entry_row_count,
-		(SELECT count(*)::integer
-			FROM competition.my_fpl_snapshot_tournament_aggregates all_aggregates
-			WHERE all_aggregates.season_id = publication.season_id
-				AND all_aggregates.event_id = publication.event_id
-				AND all_aggregates.revision = publication.revision) AS aggregate_row_count,
-		snapshot.payload, snapshot.is_empty, snapshot.picks_count
+		snapshot.payload, snapshot.is_empty, snapshot.picks_count,
+		publication.expected_entry_count + publication.not_applicable_entry_count AS entry_row_count,
+		publication.expected_tournament_count AS aggregate_row_count
 	FROM competition.my_fpl_snapshot_publications publication
 	JOIN competition.my_fpl_snapshot_entries snapshot
 		ON snapshot.season_id = publication.season_id
