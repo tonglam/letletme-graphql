@@ -12,18 +12,18 @@ describe("GraphQL database pool configuration", () => {
 		expect(source).not.toContain("max: 20");
 	});
 
-	test("defaults production and development pools to two connections", () => {
-		expect(parseDatabasePoolMax(undefined)).toBe(2);
-		expect(parseDatabasePoolMax("")).toBe(2);
+	test("defaults production and development pools to four connections", () => {
+		expect(parseDatabasePoolMax(undefined)).toBe(4);
+		expect(parseDatabasePoolMax("")).toBe(4);
 	});
 
-	test("accepts only integer limits from one through two", () => {
-		for (const value of [1, 2]) {
+	test("accepts only integer limits from one through four", () => {
+		for (const value of [1, 2, 3, 4]) {
 			expect(parseDatabasePoolMax(String(value))).toBe(value);
 		}
-		for (const value of ["0", "3", "1.5", "not-a-number"]) {
+		for (const value of ["0", "5", "1.5", "not-a-number"]) {
 			expect(() => parseDatabasePoolMax(value)).toThrow(
-				"DATABASE_POOL_MAX must be an integer between 1 and 2"
+				"DATABASE_POOL_MAX must be an integer between 1 and 4"
 			);
 		}
 	});
