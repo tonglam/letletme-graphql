@@ -6,6 +6,8 @@ import type { GraphQLContext } from "../../graphql/context";
 import {
 	readLeagueLivePublicationPointerV2,
 	readLeagueLivePublicationV2,
+	liveDeliveryFreshnessStateV2,
+	liveDeliveryFreshnessWindowV2,
 	type LeagueLiveIndexRowV2,
 	type LeagueLiveManifestV2,
 	type LeagueLivePublicationReadV2,
@@ -338,11 +340,33 @@ const deliverySeverity = (servedFrom: LiveCalcDataV2["delivery"]["servedFrom"]):
 	}
 };
 
+type DeliverySource = LiveDeliveryV2["servedFrom"];
+
 const worstServedFrom = (
 	left: LeagueLivePublicationReadV2["servedFrom"],
 	right: LivePublicationReadV2["servedFrom"]
 ): LeagueLivePublicationReadV2["servedFrom"] =>
 	deliverySeverity(left) >= deliverySeverity(right) ? left : right;
+
+const deliveryStateForSource = (
+	servedFrom: DeliverySource,
+	previousState: LiveDeliveryV2["state"],
+	times: Pick<LiveCalcDataV2["score"]["times"], "sourceCheckedAt" | "staleAt" | "nextRefreshAt">
+): LiveDeliveryV2["state"] => {
+	if (previousState === "FINAL" || servedFrom === "FINAL_RESULT") return "FINAL";
+	if (servedFrom !== "REDIS_CURRENT") return "DEGRADED";
+	return liveDeliveryFreshnessStateV2(times);
+};
+
+const reasonCodesForSource = (
+	reasonCodes: readonly string[],
+	servedFrom: DeliverySource
+): string[] => {
+	const retained = reasonCodes.filter((reason) => reason !== "LEAGUE_PUBLICATION_FALLBACK");
+	return servedFrom === "REDIS_CURRENT" || servedFrom === "FINAL_RESULT"
+		? retained
+		: [...new Set([...retained, "LEAGUE_PUBLICATION_FALLBACK"])];
+};
 
 const withBoardDelivery = (
 	value: LiveCalcDataV2,
@@ -352,14 +376,24 @@ const withBoardDelivery = (
 		deliverySeverity(value.delivery.servedFrom) >= deliverySeverity(servedFrom)
 			? value.delivery.servedFrom
 			: servedFrom;
-	if (effectiveServedFrom === value.delivery.servedFrom && servedFrom === "REDIS_CURRENT")
-		return value;
+	const state = deliveryStateForSource(
+		effectiveServedFrom,
+		value.delivery.state,
+		value.score.times
+	);
 	const delivery: LiveDeliveryV2 = {
 		...value.delivery,
-		state: value.delivery.state === "FINAL" ? "FINAL" : "DEGRADED",
+		state,
 		servedFrom: effectiveServedFrom,
-		reasonCodes: [...new Set([...value.delivery.reasonCodes, "LEAGUE_PUBLICATION_FALLBACK"])],
+		reasonCodes: reasonCodesForSource(value.delivery.reasonCodes, effectiveServedFrom),
 	};
+	if (
+		effectiveServedFrom === value.delivery.servedFrom &&
+		state === value.delivery.state &&
+		delivery.reasonCodes.length === value.delivery.reasonCodes.length &&
+		delivery.reasonCodes.every((reason, index) => reason === value.delivery.reasonCodes[index])
+	)
+		return value;
 	return {
 		...value,
 		delivery,
@@ -370,35 +404,74 @@ const withBoardDelivery = (
 
 const withBoardRowDelivery = (
 	row: IndexedRow,
-	servedFrom: LeagueLivePublicationReadV2["servedFrom"]
+	servedFrom: LeagueLivePublicationReadV2["servedFrom"],
+	previousBoardSource: LeagueLivePublicationReadV2["servedFrom"],
+	freshnessPublication?: Pick<
+		LivePublicationReadV2["publication"],
+		"sourceCheckedAt" | "expectedNextCheckAt"
+	>
 ): IndexedRow => {
 	if (!row.score) return row;
+	const score = row.score;
+	const times = freshnessPublication
+		? {
+				...score.times,
+				sourceCheckedAt: freshnessPublication.sourceCheckedAt,
+				servedAt: new Date().toISOString(),
+				staleAt: liveDeliveryFreshnessWindowV2({
+					sourceCheckedAt: freshnessPublication.sourceCheckedAt,
+					nextRefreshAt: freshnessPublication.expectedNextCheckAt,
+				}).staleAt,
+				nextRefreshAt: freshnessPublication.expectedNextCheckAt,
+			}
+		: score.times;
+	// A cached projection can be re-served from a recovered current pointer,
+	// but only rows that inherited the old board source may be rebased.  A row
+	// that was independently degraded must keep that worse provenance.
 	const effectiveServedFrom =
-		deliverySeverity(row.score.delivery.servedFrom) >= deliverySeverity(servedFrom)
-			? row.score.delivery.servedFrom
-			: servedFrom;
-	if (effectiveServedFrom === row.score.delivery.servedFrom && servedFrom === "REDIS_CURRENT")
-		return row;
+		score.delivery.servedFrom === previousBoardSource
+			? servedFrom
+			: deliverySeverity(score.delivery.servedFrom) >= deliverySeverity(servedFrom)
+				? score.delivery.servedFrom
+				: servedFrom;
+	const state = deliveryStateForSource(effectiveServedFrom, score.delivery.state, times);
 	const delivery: LiveDeliveryV2 = {
-		...row.score.delivery,
-		state: row.score.delivery.state === "FINAL" ? "FINAL" : "DEGRADED",
+		...score.delivery,
+		state,
 		servedFrom: effectiveServedFrom,
-		reasonCodes: [...new Set([...row.score.delivery.reasonCodes, "LEAGUE_PUBLICATION_FALLBACK"])],
+		reasonCodes: reasonCodesForSource(score.delivery.reasonCodes, effectiveServedFrom),
 	};
-	return { ...row, score: { ...row.score, delivery } };
+	if (
+		!freshnessPublication &&
+		effectiveServedFrom === score.delivery.servedFrom &&
+		state === score.delivery.state &&
+		delivery.reasonCodes.length === score.delivery.reasonCodes.length &&
+		delivery.reasonCodes.every((reason, index) => reason === score.delivery.reasonCodes[index])
+	)
+		return row;
+	return { ...row, score: { ...row.score, times, delivery } };
 };
 
 const withBoardReadDelivery = (
 	board: EntryLiveCompetitionBoardV2,
-	servedFrom: LeagueLivePublicationReadV2["servedFrom"]
-): EntryLiveCompetitionBoardV2 =>
-	board.servedFrom === servedFrom
-		? board
-		: {
-				...board,
-				servedFrom,
-				rows: board.rows.map((row) => withBoardRowDelivery(row, servedFrom)),
-			};
+	servedFrom: LeagueLivePublicationReadV2["servedFrom"],
+	freshnessPublication?: Pick<
+		LivePublicationReadV2["publication"],
+		"sourceCheckedAt" | "expectedNextCheckAt"
+	>
+): EntryLiveCompetitionBoardV2 => {
+	const effectiveServedFrom = worstServedFrom(board.servedFrom, servedFrom);
+	return {
+		...board,
+		servedFrom: effectiveServedFrom,
+		// Rebase even when the authority source is unchanged. A projection can be
+		// served from the cache after its cadence boundary, so returning the object
+		// unchanged would leave every row falsely marked FRESH.
+		rows: board.rows.map((row) =>
+			withBoardRowDelivery(row, effectiveServedFrom, board.servedFrom, freshnessPublication)
+		),
+	};
+};
 
 const noPicksRow = (value: LeagueLiveIndexRowV2): IndexedRow => ({
 	availability: "MISSING",
@@ -644,7 +717,10 @@ const entryFromIndex = (row: LeagueLiveIndexRowV2): Entry => ({
 	lastBank: row.lastBank,
 });
 
-const cacheKey = (scope: LeagueLiveScope, publication: LeagueLiveManifestV2): string =>
+const cacheKey = (
+	scope: LeagueLiveScope,
+	publication: Pick<LeagueLiveManifestV2, "publicationId" | "generation">
+): string =>
 	`${scope.season}:${scope.eventId}:${scope.tournamentId}:${publication.publicationId}:${publication.generation}`;
 
 const rememberProjection = (key: string, value: EntryLiveCompetitionBoardV2): void => {
@@ -707,6 +783,7 @@ const projectCompleteBoard = async (
 					publicationId: indexRow.inputPublicationId,
 					generation: indexRow.inputGeneration,
 					sourceCheckedAt: indexRow.inputContentUpdatedAt,
+					servedFrom,
 				},
 				entryFromIndex(indexRow)
 			);
@@ -779,12 +856,20 @@ const projectBoardRead = async (
 	if (cached) {
 		projectionCache.delete(key);
 		projectionCache.set(key, cached);
-		return withBoardReadDelivery(cached.value, worstServedFrom(read.servedFrom, global.servedFrom));
+		return withBoardReadDelivery(
+			cached.value,
+			worstServedFrom(read.servedFrom, global.servedFrom),
+			global.publication
+		);
 	}
 	const existing = projectionInFlight.get(key);
 	if (existing)
 		return existing.then((value) =>
-			withBoardReadDelivery(value, worstServedFrom(read.servedFrom, global.servedFrom))
+			withBoardReadDelivery(
+				value,
+				worstServedFrom(read.servedFrom, global.servedFrom),
+				global.publication
+			)
 		);
 	const load = projectCompleteBoard(context, read, global)
 		.then((value) => {
@@ -794,6 +879,31 @@ const projectBoardRead = async (
 		.finally(() => projectionInFlight.delete(key));
 	projectionInFlight.set(key, load);
 	return load;
+};
+
+/**
+ * Return a previously completed projection without requiring the global
+ * publication to be readable right now. This is the process LKG boundary for
+ * a warm board: the cached projection is still pinned to its own event and
+ * global reference, and is never combined with a newer global snapshot.
+ */
+export const readEntryLiveCompetitionBoardProcessLkgV2 = (
+	scope: LeagueLiveScope,
+	publication?: Pick<LeagueLiveManifestV2, "publicationId" | "generation">
+): EntryLiveCompetitionBoardV2 | null => {
+	const scopePrefix = `${scope.season}:${scope.eventId}:${scope.tournamentId}:`;
+	const exactKey = publication ? cacheKey(scope, publication) : null;
+	const keys = exactKey
+		? [exactKey]
+		: [...projectionCache.keys()].filter((key) => key.startsWith(scopePrefix)).reverse();
+	for (const key of keys) {
+		const cached = projectionCache.get(key);
+		if (!cached) continue;
+		projectionCache.delete(key);
+		projectionCache.set(key, cached);
+		return withBoardReadDelivery(cached.value, "PROCESS_LKG");
+	}
+	return null;
 };
 
 export const readEntryLiveCompetitionBoardWithPreviousV2 = async (
@@ -839,7 +949,7 @@ export const readEntryLiveCompetitionBoardWithPreviousV2 = async (
 			);
 		}
 	}
-	return null;
+	return readEntryLiveCompetitionBoardProcessLkgV2(scope);
 };
 
 export const readLiveLeagueGlobalForBoardV2 = (

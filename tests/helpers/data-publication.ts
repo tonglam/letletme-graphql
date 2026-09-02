@@ -467,6 +467,11 @@ export class TestRedis {
 	mget = async (...keys: string[]): Promise<Array<string | null>> =>
 		keys.map((key) => this.values.get(key) ?? null);
 
+	strlen = async (key: string): Promise<number> => {
+		const value = this.values.get(key);
+		return value === undefined ? 0 : Buffer.byteLength(value, "utf8");
+	};
+
 	set = async (key: string, value: string, ...args: unknown[]): Promise<"OK"> => {
 		this.values.set(key, value);
 		this.setCalls.push([key, value, ...args]);

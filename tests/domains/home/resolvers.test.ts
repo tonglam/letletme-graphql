@@ -62,6 +62,7 @@ const lifecycleDesk = (): HomePersonalDesk => ({
 			rankCheckedAt: "2026-08-24T00:00:00.000Z",
 			movement: { direction: "FLAT", places: 0 },
 			tournamentId: 8,
+			officialH2H: true,
 			h2hMatchup: {
 				officialMatchId: 88,
 				eventId: 1,

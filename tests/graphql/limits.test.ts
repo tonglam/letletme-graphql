@@ -839,6 +839,21 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges the live H2H publication as a bounded current-page read", () => {
+		expect(
+			validateGraphQLRequestLimits(
+				{
+					query: "query { tournamentOfficialH2H(tournamentId: 6953, eventId: 1) { availability } }",
+				},
+				schema
+			)
+		).toMatchObject({
+			ok: true,
+			rootFields: ["tournamentOfficialH2H"],
+			rateLimitCostUnits: 5,
+		});
+	});
+
 	it("charges a tournament review page once across mutually exclusive format branches", () => {
 		const fields = Array.from({ length: 100 }, () => "state").join(" ");
 		for (const query of [
@@ -1304,7 +1319,7 @@ describe("GraphQL request limits", () => {
 			query:
 				"query { tournamentOfficialH2H(tournamentId: 1, eventId: 3) { eventId } leagueLiveHead(entryId: 7, tournamentId: 1, eventId: 3, mode: H2H) { eventId } }",
 		});
-		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 31 });
+		expect(result).toMatchObject({ ok: true, rateLimitCostUnits: 6 });
 	});
 
 	it("charges every aliased liveScores full-event lookup", () => {

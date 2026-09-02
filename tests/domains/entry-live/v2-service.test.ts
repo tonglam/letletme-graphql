@@ -443,6 +443,36 @@ describe("Live Points V2 projection", () => {
 		expect(databaseCalls).toBe(0);
 	});
 
+	it("does not reuse an entry LKG against a changed global revision vector", async () => {
+		clearLivePointsV2Lkg();
+		const warmRedis = buildV2Redis();
+		const warm = await calcLivePointsByEntryV2(buildSnapshotContext(warmRedis), 1, 6953);
+		expect(warm.availability).toBe("READY");
+
+		const changedRedis = buildV2Redis();
+		const globalKey = "llm:data:v2:fpl:live:2627:1:active";
+		const global = JSON.parse(changedRedis.values.get(globalKey)!) as {
+			revisions: { rules: { revision: string } };
+		};
+		global.revisions.rules.revision = hash({ rules: "changed-after-warm" });
+		changedRedis.values.set(globalKey, JSON.stringify(global));
+		changedRedis.values.delete("llm:data:v2:fpl:entry-live:2627:1:6953:active");
+
+		const result = await calcLivePointsByEntryV2(
+			buildSnapshotContext(changedRedis, {
+				databaseQuery: async () => {
+					throw new Error("postgres down");
+				},
+			}),
+			1,
+			6953
+		);
+
+		expect(result.availability).toBe("PENDING");
+		expect(result.delivery.state).toBe("UNAVAILABLE");
+		expect(result.pickList).toHaveLength(0);
+	});
+
 	it("serves the generic event publication from process LKG before Core", async () => {
 		clearLivePointsV2Lkg();
 		const warm = await readLivePublicationV2(buildSnapshotContext(buildV2Redis()), 1);

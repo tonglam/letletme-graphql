@@ -17,8 +17,10 @@ import {
 } from "../../../src/domains/tournaments/repository";
 import {
 	groupModeToEnum,
+	h2hMatchRevisionVectorV2,
 	knockoutModeToEnum,
 	leagueTypeToEnum,
+	officialH2HStandingsStateV2,
 	tournamentResultChipToEnum,
 	tournamentStateToEnum,
 	tournamentsResolvers,
@@ -59,6 +61,119 @@ describe("tournaments resolver enum mappers", () => {
 		expect(tournamentResultChipToEnum("wc")).toBe("WILDCARD");
 		expect(tournamentResultChipToEnum("unknown")).toBeNull();
 		expect(tournamentResultChipToEnum(null)).toBeNull();
+	});
+});
+
+describe("official H2H standings overlay state", () => {
+	const read = (overrides: Record<string, unknown> = {}) =>
+		({
+			publication: { state: "FINALIZED" },
+			payload: {
+				standings: {
+					state: "READY",
+					throughEventId: 4,
+				},
+			},
+			servedFrom: "REDIS_CURRENT",
+			...overrides,
+		}) as never;
+
+	it("uses only the independent standings publication state", () => {
+		expect(officialH2HStandingsStateV2(read())).toBe("READY");
+		expect(officialH2HStandingsStateV2(read(), false)).toBe("UPDATING");
+		expect(officialH2HStandingsStateV2(read({ servedFrom: "REDIS_PREVIOUS" }))).toBe("STALE");
+		expect(officialH2HStandingsStateV2(read({ publication: { state: "LIVE_ACTIVE" } }))).toBe(
+			"UPDATING"
+		);
+		expect(
+			officialH2HStandingsStateV2(
+				read({
+					payload: { standings: { state: "UPDATING", throughEventId: 4 } },
+				})
+			)
+		).toBe("UPDATING");
+		expect(officialH2HStandingsStateV2(null)).toBe("UNAVAILABLE");
+	});
+});
+
+describe("official H2H match revision vectors", () => {
+	const global = {
+		publication: {
+			publicationId: "00000000-0000-4000-8000-000000000001",
+			generation: 4,
+			revisions: {
+				scoreCore: { revision: "1".repeat(64) },
+				fixtureIdentity: { revision: "2".repeat(64) },
+				rules: { revision: "3".repeat(64) },
+				algorithm: { revision: "4".repeat(64) },
+			},
+		},
+	} as unknown as Parameters<typeof h2hMatchRevisionVectorV2>[2];
+	const publication = {
+		publicationId: "00000000-0000-4000-8000-000000000010",
+		generation: 8,
+		revisions: {},
+	} as unknown as Parameters<typeof h2hMatchRevisionVectorV2>[0];
+	const match = {
+		contractVersion: "live-points-v2",
+		season: "2627",
+		eventId: 1,
+		tournamentId: 7,
+		officialMatchId: 99,
+		groupId: 1,
+		sourceOrder: 0,
+		phase: "REGULAR",
+		knockoutName: null,
+		tiebreak: null,
+		isBye: false,
+		state: "READY",
+		sourceCheckedAt: "2026-09-02T00:00:00.000Z",
+		globalRef: {
+			publicationId: "00000000-0000-4000-8000-000000000001",
+			generation: 4,
+		},
+		home: {
+			entryId: 101,
+			entryName: "Home",
+			playerName: "Home manager",
+			isAverage: false,
+			officialNetPoints: null,
+			inputPublicationId: "00000000-0000-4000-8000-000000000011",
+			inputGeneration: 1,
+			inputRevision: "5".repeat(64),
+			inputContentUpdatedAt: "2026-09-02T00:00:00.000Z",
+			input: {},
+		},
+		away: {
+			entryId: null,
+			entryName: "Average",
+			playerName: null,
+			isAverage: true,
+			officialNetPoints: 65,
+			inputPublicationId: null,
+			inputGeneration: null,
+			inputRevision: null,
+			inputContentUpdatedAt: null,
+			input: null,
+		},
+	} as unknown as Parameters<typeof h2hMatchRevisionVectorV2>[1];
+
+	it("does not copy unrelated head revisions into a retained match", () => {
+		const first = h2hMatchRevisionVectorV2(publication, match, global);
+		const changedHead = h2hMatchRevisionVectorV2({ ...publication, generation: 9 }, match, global);
+		expect(changedHead).toEqual(first);
+		expect(first.publicationId).toBe(match.globalRef.publicationId);
+		expect(first.generation).toBe(match.globalRef.generation);
+		expect(first.averageSide).not.toBeNull();
+
+		const changedScore = h2hMatchRevisionVectorV2(
+			publication,
+			{ ...match, away: { ...match.away, officialNetPoints: 66 } },
+			global
+		);
+		expect(changedScore.content).not.toBe(first.content);
+		expect(changedScore.averageSide).not.toBe(first.averageSide);
+		expect(changedScore.scoreCore).toBe(first.scoreCore);
 	});
 });
 

@@ -1,6 +1,7 @@
 import { GraphQLError } from "graphql";
 
 import type { GraphQLContext } from "../../graphql/context";
+import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import {
 	hasPlatformAdminAccess,
 	hasVerifiedEntry,
@@ -40,6 +41,16 @@ const LIVE_TOURNAMENT_ACCESS_SQL = `
 		AND tournament.tournament_id = $2
 	LIMIT 1
 `;
+
+/** Planner and reader-role contract for the cold tournament access fallback. */
+export const LIVE_TOURNAMENT_ACCESS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "live-tournament-access-v2.cold-fallback",
+		sql: LIVE_TOURNAMENT_ACCESS_SQL,
+		values: [2026, 1, 1],
+		runtime: "must-return-row",
+	},
+];
 
 const forbidden = (): GraphQLError =>
 	new GraphQLError("Tournament access denied", { extensions: { code: "FORBIDDEN" } });

@@ -23,6 +23,7 @@ import {
 import {
 	normalizeEntryLiveCompetitionBoardRequestV2,
 	queryEntryLiveCompetitionBoardV2,
+	readEntryLiveCompetitionBoardProcessLkgV2,
 	readEntryLiveCompetitionBoardWithPreviousV2,
 	type EntryLiveCompetitionBoardRequest,
 } from "./v2-board";
@@ -415,21 +416,9 @@ const boardResponse = async (
 					.catch(() => null)
 			: null;
 	const servingGlobal = global ?? fallbackGlobal;
-	if (!servingGlobal) {
-		return unavailableBoardResponse(
-			leagueHead(context, headRead, request.eventId, request.tournamentId, "ERROR")
-		);
-	}
-	const board = await readEntryLiveCompetitionBoardWithPreviousV2(
-		context,
-		{
-			season: context.currentSeason.seasonCode,
-			eventId: request.eventId,
-			tournamentId: request.tournamentId,
-			mode: "CLASSIC",
-		},
-		servingGlobal
-	);
+	const board = servingGlobal
+		? await readEntryLiveCompetitionBoardWithPreviousV2(context, scope, servingGlobal)
+		: readEntryLiveCompetitionBoardProcessLkgV2(scope);
 	if (!board) {
 		return unavailableBoardResponse(
 			leagueHead(
@@ -502,7 +491,6 @@ export const liveDesksResolvers = {
 			context: GraphQLContext
 		) => {
 			if (args.mode === "H2H") {
-				const read = await readH2HLeagueHeadV2(context, args.tournamentId, args.eventId);
 				const membership = await readH2HLeagueMembershipV2(
 					context,
 					args.tournamentId,
@@ -510,6 +498,7 @@ export const liveDesksResolvers = {
 					args.entryId
 				);
 				await assertLiveTournamentAccessV2(context, args.tournamentId, args.entryId, membership);
+				const read = await readH2HLeagueHeadV2(context, args.tournamentId, args.eventId);
 				return h2hHead(context, read, args.eventId, args.tournamentId);
 			}
 			const membership = await readLeagueLivePublicationMembershipV2(

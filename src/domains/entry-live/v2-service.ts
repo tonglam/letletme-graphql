@@ -222,7 +222,7 @@ export type LivePublicationRefV2 = Readonly<{
 type EntryRead = {
 	publication: EntryPublication;
 	input: EntryLiveInput;
-	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "POSTGRES_CHECKPOINT";
+	servedFrom: "REDIS_CURRENT" | "REDIS_PREVIOUS" | "PROCESS_LKG" | "POSTGRES_CHECKPOINT";
 };
 
 const GLOBAL_LKG_MAX_BYTES = 64 * 1024 * 1024;
@@ -298,12 +298,29 @@ const matchesPublicationRef = (
 	(publication.publicationId === expected.publicationId &&
 		publication.generation === expected.generation);
 
-const lkgMatchesGlobal = (value: LiveCalcDataV2, global: GlobalRead): boolean =>
-	value.event === global.publication.eventId &&
-	value.snapshot.state === global.publication.state &&
-	(global.publication.state === "FINALIZED"
-		? value.score.calculationMode === "FINAL_RESULT"
-		: value.score.calculationMode === "PROJECTED_AUTOSUBS");
+const lkgMatchesGlobal = (value: LiveCalcDataV2, global: GlobalRead): boolean => {
+	const matchesRevision = (vector: LiveRevisionVectorV2): boolean =>
+		vector.publicationId === global.publication.publicationId &&
+		vector.generation === global.publication.generation &&
+		vector.lifecycle === global.publication.revisions.lifecycle.revision &&
+		vector.fixtureIdentity === global.publication.revisions.fixtureIdentity.revision &&
+		vector.scoreCore === global.publication.revisions.scoreCore.revision &&
+		vector.displayStats === global.publication.revisions.displayStats.revision &&
+		vector.explain === global.publication.revisions.explain.revision &&
+		vector.rules === global.publication.revisions.rules.revision &&
+		vector.algorithm === LIVE_POINTS_ALGORITHM_VERSION;
+	return (
+		value.event === global.publication.eventId &&
+		value.snapshot.season === global.publication.season &&
+		value.snapshot.eventId === global.publication.eventId &&
+		value.snapshot.state === global.publication.state &&
+		matchesRevision(value.snapshot.revisions) &&
+		matchesRevision(value.score.revisions) &&
+		(global.publication.state === "FINALIZED"
+			? value.score.calculationMode === "FINAL_RESULT"
+			: value.score.calculationMode === "PROJECTED_AUTOSUBS")
+	);
+};
 
 export type LiveRevisionVectorV2 = {
 	publicationId: string;
@@ -2052,48 +2069,6 @@ const requireCompleteGlobalPublication = (
 	return null;
 };
 
-/**
- * Exact league/H2H references are read on the availability-first path, where
- * opening a new PostgreSQL request would defeat the Redis hot-path contract.
- * If this request already has an authoritative Core/fixture snapshot, use its
- * event-scoped expectations. Otherwise the producer's immutable, checksum-
- * validated publication is the only safe local witness and is checked through
- * the same complete-publication gate before it can enter the LKG.
- */
-const validateExactRedisGlobal = async (
-	context: GraphQLContext,
-	global: GlobalRead
-): Promise<GlobalRead | null> => {
-	const scope = requestScope(context);
-	const cachedCorePromise = requestCoreMemo.get(scope);
-	if (cachedCorePromise) {
-		const core = await cachedCorePromise;
-		if (core) {
-			const expectedPlayerIds = await expectedPlayerIdsForEvent(
-				context,
-				global.publication.eventId,
-				core
-			);
-			const expectedFixtureIds = await expectedFixtureIdsForEvent(
-				context,
-				global.publication.eventId
-			);
-			return requireCompleteGlobalPublication(
-				context,
-				global,
-				expectedPlayerIds,
-				expectedFixtureIds
-			);
-		}
-	}
-	return requireCompleteGlobalPublication(
-		context,
-		global,
-		new Set(global.eventLives.map((row) => row.elementId)),
-		new Set(global.fixtures.map((fixture) => fixture.id))
-	);
-};
-
 const readGlobal = async (
 	context: GraphQLContext,
 	eventId: number,
@@ -2116,11 +2091,12 @@ const readGlobal = async (
 			expectedPublicationRef
 		);
 		if (exactRedis) {
-			const completeExactRedis = await validateExactRedisGlobal(context, exactRedis);
-			if (completeExactRedis) {
-				rememberGlobalLkg(context, eventId, completeExactRedis);
-				return completeExactRedis;
-			}
+			// The producer has already accepted this immutable publication as a
+			// coherent event snapshot, and readRedisGlobal has validated its item
+			// checksums/schema. An exact retained reference must not acquire a
+			// mutable PostgreSQL dependency during a database incident.
+			rememberGlobalLkg(context, eventId, exactRedis);
+			return exactRedis;
 		}
 		const exactLkg = readGlobalLkg(
 			context,
@@ -3522,6 +3498,7 @@ export async function projectLivePointsFromPublishedEntryV2(
 		publicationId: string;
 		generation: number;
 		sourceCheckedAt: string;
+		servedFrom?: LivePublicationReadV2["servedFrom"];
 	},
 	entry: Entry
 ): Promise<LiveCalcDataV2> {
@@ -3556,7 +3533,10 @@ export async function projectLivePointsFromPublishedEntryV2(
 			},
 		},
 		input,
-		servedFrom: "REDIS_CURRENT",
+		// The embedded input may be carried by a retained league publication.
+		// Preserve that read's provenance instead of making every projected row
+		// look like it came from the current entry snapshot.
+		servedFrom: publicationRef.servedFrom ?? "REDIS_CURRENT",
 	};
 	const core = await readCore(context);
 	return buildReady(context, global, entryRead, { entry, available: true }, core);

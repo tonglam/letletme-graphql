@@ -183,7 +183,8 @@ export const applyHomeOfficialH2HRanksV2 = (
 ): HomePersonalDesk => ({
 	...desk,
 	leagueRanks: desk.leagueRanks.map((league) => {
-		if (league.leagueType !== "H2H" || league.tournamentId === null) return league;
+		if (league.leagueType !== "H2H" || league.tournamentId === null || league.officialH2H !== true)
+			return league;
 		const raw = standingsByTournament.get(league.tournamentId) ?? undefined;
 		const payload = standingPayload(raw);
 		const standing = payload?.rows.find((row) => row.entryId === desk.entryId);
@@ -216,7 +217,9 @@ const reconcileHomeOfficialH2HRanksV2 = async (
 	const tournamentIds = [
 		...new Set(
 			desk.leagueRanks.flatMap((league) =>
-				league.leagueType === "H2H" && league.tournamentId !== null ? [league.tournamentId] : []
+				league.leagueType === "H2H" && league.tournamentId !== null && league.officialH2H === true
+					? [league.tournamentId]
+					: []
 			)
 		),
 	];
