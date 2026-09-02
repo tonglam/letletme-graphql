@@ -1090,6 +1090,25 @@ describe("My FPL review repository", () => {
 		expect(
 			parseSnapshotPublicationRow({
 				...snapshotPublicationRow,
+				coverage_state: "COMPLETE",
+				status_expected_entry_count: 2,
+				observed_entry_count: 1,
+				pending_correction_entry_count: 1,
+				expected_entry_scope_sha256: "3".repeat(64),
+				observed_entry_scope_sha256: "1".repeat(64),
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				coverage_state: "COMPLETE",
+				expected_tournament_scope_sha256: "3".repeat(64),
+				observed_tournament_scope_sha256: "2".repeat(64),
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
 				coverage_state: "UNKNOWN",
 			})
 		).toBeNull();
@@ -1802,6 +1821,60 @@ describe("My FPL review repository", () => {
 		expect(
 			fixture.queries.filter(({ sql }) => sql.includes("JOIN competition.my_fpl_snapshot_entries"))
 		).toHaveLength(entryQueriesBefore + 1);
+	});
+
+	it("does not serve a cached FINAL gameweek with invalid ranks", async () => {
+		const payload = JSON.parse(JSON.stringify(snapshotPayload())) as {
+			gameweek: {
+				result: { eventRank: number | null; overallRank: number | null };
+			};
+			review: {
+				summary: { provisionalGameweeks: number };
+				timeline: Array<{
+					status: "PROVISIONAL" | "FINAL";
+					eventRank: number | null;
+					overallRank: number | null;
+				}>;
+			};
+		};
+		payload.gameweek.result!.eventRank = 10;
+		payload.gameweek.result!.overallRank = 1000;
+		payload.review.summary.provisionalGameweeks = 0;
+		payload.review.timeline[0]!.status = "FINAL";
+		payload.review.timeline[0]!.eventRank = 10;
+		payload.review.timeline[0]!.overallRank = 1000;
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			publicationRows: [
+				{
+					...snapshotPublicationRow,
+					kind: "FINAL",
+					score_source: "FPL_FINAL_RESULT",
+					live_publication_id: null,
+					live_revision: null,
+					algorithm_version: null,
+				},
+			],
+			snapshotEntryRow: { ...snapshotEntryRow(), payload },
+		});
+		const first = await fixture.repository.loadManagerGameweek(fixture.context, 1);
+		expect(first.state).toBe("READY");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v12:manager-gameweek:123:1:rev:42");
+		const cached = JSON.parse((await fixture.redis.get(key)) ?? "null") as {
+			entry: { overallRank: number | null };
+			result: { eventRank: number | null; overallRank: number | null } | null;
+		};
+		cached.entry.overallRank = null;
+		cached.result!.eventRank = null;
+		cached.result!.overallRank = 0;
+		await fixture.redis.set(key, JSON.stringify(cached));
+
+		const second = await fixture.repository.loadManagerGameweek(fixture.context, 1);
+
+		expect(second.state).toBe("READY");
+		expect(second.entry?.overallRank).toBe(1000);
+		expect(second.result?.eventRank).toBe(10);
+		expect(second.result?.overallRank).toBe(1000);
 	});
 
 	it("keeps transfer and gameweek readiness fail-closed", async () => {

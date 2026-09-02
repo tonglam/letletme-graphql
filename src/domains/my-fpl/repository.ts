@@ -2121,6 +2121,12 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 			row.expected_entry_scope_sha256 === row.observed_entry_scope_sha256) ||
 		(row.status_expected_tournament_count !== row.observed_tournament_count &&
 			row.expected_tournament_scope_sha256 === row.observed_tournament_scope_sha256) ||
+		(row.coverage_state === "COMPLETE" &&
+			(row.pending_correction_entry_count !== 0 ||
+				row.status_expected_entry_count !== row.observed_entry_count ||
+				row.status_expected_tournament_count !== row.observed_tournament_count ||
+				row.expected_entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+				row.expected_tournament_scope_sha256 !== row.observed_tournament_scope_sha256)) ||
 		typeof row.lifecycle_finished !== "boolean" ||
 		typeof row.lifecycle_data_checked !== "boolean" ||
 		(row.lifecycle_data_checked
@@ -2514,6 +2520,27 @@ const isAuthoritativeFinalUnrankedFirstEvent = (payload: SnapshotEntryPayload): 
 	);
 };
 
+const isFinalManagerGameweekCacheValid = (
+	value: MyFplManagerGameweek,
+	settlementState: MyFplSettlementState,
+	eventId: number
+): boolean => {
+	if (settlementState !== "FINAL" || value.state === "EMPTY") return true;
+	if (value.state !== "READY" || !value.entry || !value.result) return false;
+	const allowUnrankedFirstEvent =
+		eventId === Math.max(1, value.entry.startedEvent ?? 1) &&
+		value.entry.overallPoints === 0 &&
+		value.entry.overallRank === 0 &&
+		value.result.overallPoints === 0;
+	const rankIsValid = (rank: unknown): boolean =>
+		allowUnrankedFirstEvent ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
+	return (
+		rankIsValid(value.entry.overallRank) &&
+		rankIsValid(value.result.eventRank) &&
+		rankIsValid(value.result.overallRank)
+	);
+};
+
 const isFinalSnapshotEntryPayloadValid = (
 	payload: SnapshotEntryPayload,
 	settlementState: MyFplSettlementState
@@ -2783,7 +2810,9 @@ const loadManagerGameweekPrepared = async (
 		context,
 		cacheKey,
 		(value): value is MyFplManagerGameweek =>
-			isManagerGameweekCache(value) && value.eventId === eventId
+			isManagerGameweekCache(value) &&
+			value.eventId === eventId &&
+			isFinalManagerGameweekCacheValid(value, snapshot.publication.settlementState, eventId)
 	);
 	if (cached) {
 		return {
