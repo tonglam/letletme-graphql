@@ -2,14 +2,14 @@
 
 ## 端到端实现与发布验收报告
 
-| 项目 | 值 |
-|---|---|
-| Workset | `WS-20260901-myfpl-v2-hard-cut` |
-| 评审对象 | Data → PostgreSQL → GraphQL → Redis query cache → Web → 小程序 → VPS Ops |
-| 业务示例 | `6953`，始终表示 FPL Entry ID；不是 tournament ID，也不是 admin capability |
-| 锁定合约 | `X-LetLetMe-Contract: my-tournament-review-v2.1` |
-| 数据 metric | `settled-review-v2` |
-| 评审日期 | 2026-09-01 |
+| 项目         | 值                                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Workset      | `WS-20260901-myfpl-v2-hard-cut`                                                                                     |
+| 评审对象     | Data → PostgreSQL → GraphQL → Redis query cache → Web → 小程序 → VPS Ops                                            |
+| 业务示例     | `6953`，始终表示 FPL Entry ID；不是 tournament ID，也不是 admin capability                                          |
+| 锁定合约     | `X-LetLetMe-Contract: my-tournament-review-v2.1`                                                                    |
+| 数据 metric  | `settled-review-v2`                                                                                                 |
+| 评审日期     | 2026-09-01                                                                                                          |
 | 本文证据边界 | 本地隔离 worktree 的代码、静态门禁和测试；不把生产迁移、部署、Chrome 登录态、小程序发布或 24 小时运行证据写成已完成 |
 
 ## 1. 结论先行
@@ -28,12 +28,12 @@
 
 “我的 LetLetMe 赛事复盘”是以已结算快照为基础的赛事复盘中心，不是准实时积分页：
 
-| 场景 | 数据边界 | 页面行为 |
-|---|---|---|
-| Season | 截止所选 finalized GW 的累计 bundle，包含此前冻结 phases | 默认打开；看累计竞争格局、排名走势、跨阶段 history |
-| Gameweek | 一个 finalized GW 的固定快照 | 看单轮表现；Points 的“本轮积分”=Gross，Cost/Net 分列 |
-| Live | 未 finalized 或正在处理的 GW | 复盘页不猜测，统一提供 Live 入口 |
-| Previous ready | 用户主动选择的历史已 READY GW | 仅作为显式历史导航，不是最新 GW 不 READY 时的 fallback |
+| 场景           | 数据边界                                                 | 页面行为                                               |
+| -------------- | -------------------------------------------------------- | ------------------------------------------------------ |
+| Season         | 截止所选 finalized GW 的累计 bundle，包含此前冻结 phases | 默认打开；看累计竞争格局、排名走势、跨阶段 history     |
+| Gameweek       | 一个 finalized GW 的固定快照                             | 看单轮表现；Points 的“本轮积分”=Gross，Cost/Net 分列   |
+| Live           | 未 finalized 或正在处理的 GW                             | 复盘页不猜测，统一提供 Live 入口                       |
+| Previous ready | 用户主动选择的历史已 READY GW                            | 仅作为显式历史导航，不是最新 GW 不 READY 时的 fallback |
 
 最新 finalized GW 的状态必须原样展示：`PENDING`、`WAITING_SOURCE`、`PROCESSING`、`DEGRADED`、`READY` 或 `NOT_STARTED`。如果最新轮尚未 READY，页面不得偷偷显示旧 READY 数据。
 
@@ -49,11 +49,11 @@
 
 ### 2.2 权限语义
 
-| scope | 允许主体 | 说明 |
-|---|---|---|
-| `ACCESSIBLE` | 当前 verified entry 是赛事成员 | 普通用户默认范围 |
-| `MANAGED` | 当前 verified entry 是赛事 admin | 管理员可见其管理赛事 |
-| `ALL` | signed platform-admin capability + 正常 ingress | 不是传入 6953 就自动成为 admin |
+| scope        | 允许主体                                        | 说明                           |
+| ------------ | ----------------------------------------------- | ------------------------------ |
+| `ACCESSIBLE` | 当前 verified entry 是赛事成员                  | 普通用户默认范围               |
+| `MANAGED`    | 当前 verified entry 是赛事 admin                | 管理员可见其管理赛事           |
+| `ALL`        | signed platform-admin capability + 正常 ingress | 不是传入 6953 就自动成为 admin |
 
 `6953` 只用于 watch/示例 entry。每个 catalog、gameweek、season、section、status 请求重新校验 principal 与赛事关系；cursor 不能绕过授权。Web 只有在 ALL 明确返回 403/FORBIDDEN 时才回到 ACCESSIBLE，不能把任意网络错误当成 fallback。
 
@@ -126,14 +126,14 @@ Points/H2H upsert 在业务字段不变时保留 `updated_at`，观察时间单�
 
 继续复用现有 `tournament-repair`，不新增第二套修复基础设施：
 
-| 失败 | issue/fingerprint | 补偿 |
-|---|---|---|
-| 结果缺失或数值不一致 | `TOURNAMENT_RESULTS_INCOMPLETE:<eventId>` | 去重 issue，repair 成功后精确 enqueue tournament/event review |
-| roster/group/bracket 不一致 | `STRUCTURE_INTEGRITY_FAILED` | obligation 保存 `repair_issue_id`，成功后重试原 scope |
-| source retry | 60、180、600 秒，后续每 900 秒至 24 小时 | 24 小时后 DEGRADED，仍每 3600 秒重试并告警 |
-| execution retry | 60、300、900 秒，后续每 900 秒至 24 小时 | 同上；重复 fingerprint 只抑制通知，不抑制重试 |
-| custom setup READY | targeted bootstrap | 不等待下一次 5 分钟全局轮询 |
-| 显式 correction | `{tournamentId,eventId,mode:"CORRECTION",reason,changeId}` | 重建被纠正 GW 及其后的 Season bundles |
+| 失败                        | issue/fingerprint                                          | 补偿                                                          |
+| --------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------- |
+| 结果缺失或数值不一致        | `TOURNAMENT_RESULTS_INCOMPLETE:<eventId>`                  | 去重 issue，repair 成功后精确 enqueue tournament/event review |
+| roster/group/bracket 不一致 | `STRUCTURE_INTEGRITY_FAILED`                               | obligation 保存 `repair_issue_id`，成功后重试原 scope         |
+| source retry                | 60、180、600 秒，后续每 900 秒至 24 小时                   | 24 小时后 DEGRADED，仍每 3600 秒重试并告警                    |
+| execution retry             | 60、300、900 秒，后续每 900 秒至 24 小时                   | 同上；重复 fingerprint 只抑制通知，不抑制重试                 |
+| custom setup READY          | targeted bootstrap                                         | 不等待下一次 5 分钟全局轮询                                   |
+| 显式 correction             | `{tournamentId,eventId,mode:"CORRECTION",reason,changeId}` | 重建被纠正 GW 及其后的 Season bundles                         |
 
 ## 5. GraphQL V2.1 合约与读路径
 
@@ -162,7 +162,7 @@ myTournamentReviewStatus(tournamentId: Int!): MyTournamentReviewStatus!
 - Gameweek 返回 format union，不再返回三个 nullable sibling；Season 返回有序 `phases[]`。
 - Season section enum 固定为 `POINTS_STANDINGS`、`POINTS_TRAJECTORIES`、`H2H_STANDINGS`、`H2H_FIXTURES`、`KNOCKOUT_BRACKET`，通过 chunks 分页。
 - 公共 freshness 字段改为 `settledAt`、`publishedAt`、`correctedAt`、`semanticSha256`；不把 observation age 当业务 freshness。
-- Data `PROCESSING` 映射为 API `PENDING`；状态增加 `NOT_STARTED`。status 只返回安全 state、eligible/ready/observed 时间、nextAttempt、repairState 和错误码。
+- Data `PROCESSING` 映射为 API `PENDING`；状态增加 `NOT_STARTED`。`MyTournamentReviewEventStatus` 明确返回 `eligibleAt`、`readyAt`、`observedAt`、`nextAttemptAt`、`executionAttempts`、`sourceRechecks`、`degradedAt`、`revision`、`publishedAt`、`repairState` 和 `errorCode`；只返回安全 state、时间、计数、revision 与受控错误码，不返回原始错误或源 payload。
 
 旧 roots 已从 schema、root policy 和客户端 operations 移除：
 
@@ -184,13 +184,13 @@ Redis miss、timeout、unavailable 或 corrupt JSON/hash 都旁路 PostgreSQL；
 
 ### 5.3 缓存和限流
 
-| root | 数据源 | cache TTL | 权重 |
-|---|---|---:|---:|
-| Catalog | PostgreSQL indexed keyset | 无 | 10 |
-| Status | PostgreSQL indexed status | 无 | 5 |
-| Gameweek | GraphQL Redis query cache → PG | 300 秒 | 20 |
-| Season summary | GraphQL Redis query cache → PG | 300 秒 | 20 |
-| Season section | GraphQL Redis query cache → PG | 300 秒 | 20 |
+| root           | 数据源                         | cache TTL | 权重 |
+| -------------- | ------------------------------ | --------: | ---: |
+| Catalog        | PostgreSQL indexed keyset      |        无 |   10 |
+| Status         | PostgreSQL indexed status      |        无 |    5 |
+| Gameweek       | GraphQL Redis query cache → PG |    300 秒 |   20 |
+| Season summary | GraphQL Redis query cache → PG |    300 秒 |   20 |
+| Season section | GraphQL Redis query cache → PG |    300 秒 |   20 |
 
 revisioned key 包含 contract、current season、tournament/event、semantic SHA、phase/section、cursor 和授权维度；不再使用无关的全局 Core revision。head 先读，所以 head 变化立即生成新 key，TTL 不会把旧 revision 冒充当前结果。Redis 与 publication/rate-limit Redis 继续隔离。
 
@@ -242,15 +242,15 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 ### 7.2 SLO 和硬门槛
 
-| 链路 | 目标 | 硬门槛/告警 |
-|---|---:|---:|
-| finalized eligibility → obligation discovery | ≤300s | 300s |
-| 普通 GW eligibility → READY | p95 ≤600s | 900s warning |
-| active 非 READY | — | 3600s critical |
-| custom setup READY → 历史 bundles READY | ≤1800s | 3600s |
-| Ops status `checkedAt` age | ≤300s | 600s |
-| Catalog 新建/状态可见 | ≤5s | 30s |
-| GraphQL review cache TTL | 300s | 不跨 head |
+| 链路                                         |      目标 |    硬门槛/告警 |
+| -------------------------------------------- | --------: | -------------: |
+| finalized eligibility → obligation discovery |     ≤300s |           300s |
+| 普通 GW eligibility → READY                  | p95 ≤600s |   900s warning |
+| active 非 READY                              |         — | 3600s critical |
+| custom setup READY → 历史 bundles READY      |    ≤1800s |          3600s |
+| Ops status `checkedAt` age                   |     ≤300s |           600s |
+| Catalog 新建/状态可见                        |       ≤5s |            30s |
+| GraphQL review cache TTL                     |      300s |      不跨 head |
 
 任何 incoherent head、缺 chunk、hash mismatch 或 READY 无 publication 立即 critical，不等待年龄阈值。
 
@@ -264,18 +264,18 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 ### 8.1 Data
 
-| 验收 | 结果（本地实现） | 发布窗口证据 |
-|---|---|---|
-| observation/published/updated 时间变化不影响 semantic SHA | 已有单测 | 在 staging/生产副本重复运行 |
-| 重复 H2H/review scheduler 10 次不新增 revision | 代码路径与 focused test 已覆盖 | 运行 10 次有结果的 job 并保存 head diff |
-| T3/T4/T5 业务值不变不进入 DEGRADED | upsert 语义已修正 | 生产副本回放 |
-| READY 后无 correction 不移动 head | freeze/no-op 已实现 | 并发同步压测 |
-| reason + Change ID correction 生成下一 revision 并重建后续 Season | correction API/事务已实现 | service-only job 演练 |
-| chunks ≤100、count/hash/manifest/head 闭合 | publication/reconciliation 已实现 | 5000-entry synthetic tournament |
-| chunks/publication/head 任意点崩溃不暴露 partial | 同一事务/advisory lock | crash injection |
-| 并发 publisher、lease 丢失、repair dedupe | 现有队列约束复用 | 生产结构副本并发演练 |
-| custom setup READY 立即 bootstrap，历史按 GW 升序 | targeted enqueue 已实现 | staging controlled fixture |
-| migration forward/backup restore/RLS/grant | migration 与 schema 已提交 | 执行 0084 之前必须完成 |
+| 验收                                                              | 结果（本地实现）                  | 发布窗口证据                            |
+| ----------------------------------------------------------------- | --------------------------------- | --------------------------------------- |
+| observation/published/updated 时间变化不影响 semantic SHA         | 已有单测                          | 在 staging/生产副本重复运行             |
+| 重复 H2H/review scheduler 10 次不新增 revision                    | 代码路径与 focused test 已覆盖    | 运行 10 次有结果的 job 并保存 head diff |
+| T3/T4/T5 业务值不变不进入 DEGRADED                                | upsert 语义已修正                 | 生产副本回放                            |
+| READY 后无 correction 不移动 head                                 | freeze/no-op 已实现               | 并发同步压测                            |
+| reason + Change ID correction 生成下一 revision 并重建后续 Season | correction API/事务已实现         | service-only job 演练                   |
+| chunks ≤100、count/hash/manifest/head 闭合                        | publication/reconciliation 已实现 | 5000-entry synthetic tournament         |
+| chunks/publication/head 任意点崩溃不暴露 partial                  | 同一事务/advisory lock            | crash injection                         |
+| 并发 publisher、lease 丢失、repair dedupe                         | 现有队列约束复用                  | 生产结构副本并发演练                    |
+| custom setup READY 立即 bootstrap，历史按 GW 升序                 | targeted enqueue 已实现           | staging controlled fixture              |
+| migration forward/backup restore/RLS/grant                        | migration 与 schema 已提交        | 执行 0084 之前必须完成                  |
 
 ### 8.2 GraphQL
 
@@ -303,12 +303,12 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 在生产级数据副本运行 30 分钟、2 倍近期峰值负载，硬门槛为：
 
-| 指标 | 门槛 |
-|---|---:|
-| Catalog p95 | ≤300ms |
-| Review cache hit p95 | ≤200ms |
-| PostgreSQL/cache miss p95 | ≤800ms |
-| statement timeout/pool exhaustion/integrity error | 0 |
+| 指标                                              |   门槛 |
+| ------------------------------------------------- | -----: |
+| Catalog p95                                       | ≤300ms |
+| Review cache hit p95                              | ≤200ms |
+| PostgreSQL/cache miss p95                         | ≤800ms |
+| statement timeout/pool exhaustion/integrity error |      0 |
 
 生产开放后 shadow-v4 至少 24 小时；只有 zero global/storage would-deny、Mini organic would-deny ≤1% 等现有门槛通过后才切 enforce-v4。使用用户现有 Chrome 登录态验收 6953 时不创建新实例、不读取或记录 cookie/token；验证 ACCESSIBLE 与 DB membership、ALL 全量分页、Points/H2H/KO/custom 各一例、latest finalized 状态/GW/revision/SHA、Season/section/Gameweek rows 以及 T3/T4/T5 恢复 READY、T6/T7 revision 稳定。
 
@@ -316,16 +316,16 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 ## 9. 复杂度与 trade-off
 
-| 方案 | 优点 | 成本/风险 | V2.1 决策 |
-|---|---|---|---|
-| payload 保存全部数组 | 读取简单 | 大 payload、无法可靠分页、partial 风险高 | 舍弃 |
-| PostgreSQL manifest + ≤100 chunks | 可校验、可分页、事务内原子可见 | 表/查询/重建复杂度增加 | 采用 |
-| Data Redis 作为 review authority | 读取快 | PostgreSQL/Redis 双权威、sibling 原子发布、恢复复杂 | 不采用 |
-| 每次源表变化重算历史 | 实现直观 | 过去 GW 漂移、Season/Gameweek 不一致 | 不采用 |
-| READY 后自动移动 head | 数据“新鲜” | 复盘不可重复、无审计纠错边界 | 不采用 |
-| silent previous-ready fallback | 页面不空 | 用户看到过期结果且无法识别 | 不采用 |
-| 复用 repair queue | 少一套基础设施 | 需要 issue 去重与 obligation 关联 | 采用 |
-| GraphQL Redis 300s revision cache | 降低读压、实现可控 | cache miss 路径需保护 | 采用；PG 是真相 |
+| 方案                              | 优点                           | 成本/风险                                           | V2.1 决策       |
+| --------------------------------- | ------------------------------ | --------------------------------------------------- | --------------- |
+| payload 保存全部数组              | 读取简单                       | 大 payload、无法可靠分页、partial 风险高            | 舍弃            |
+| PostgreSQL manifest + ≤100 chunks | 可校验、可分页、事务内原子可见 | 表/查询/重建复杂度增加                              | 采用            |
+| Data Redis 作为 review authority  | 读取快                         | PostgreSQL/Redis 双权威、sibling 原子发布、恢复复杂 | 不采用          |
+| 每次源表变化重算历史              | 实现直观                       | 过去 GW 漂移、Season/Gameweek 不一致                | 不采用          |
+| READY 后自动移动 head             | 数据“新鲜”                     | 复盘不可重复、无审计纠错边界                        | 不采用          |
+| silent previous-ready fallback    | 页面不空                       | 用户看到过期结果且无法识别                          | 不采用          |
+| 复用 repair queue                 | 少一套基础设施                 | 需要 issue 去重与 obligation 关联                   | 采用            |
+| GraphQL Redis 300s revision cache | 降低读压、实现可控             | cache miss 路径需保护                               | 采用；PG 是真相 |
 
 整体 trade-off 是以较高的发布/写入约束换取“固定、可重放、可解释”的复盘结果。 finalized review 写频率低，不值得再引入第二个 business snapshot authority。
 
@@ -333,13 +333,13 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 代码在五个隔离 worktree 中完成，未触碰用户原有 dirty worktree：
 
-| 资产 | worktree | branch | 关键本地门禁 |
-|---|---|---|---|
-| Data | `/private/tmp/myfpl-v2-hardcut-20260901-data` | `codex/myfpl-v2-hardcut-data-20260901` | format、typecheck、lint、focused tests 通过 |
-| GraphQL | `/private/tmp/myfpl-v2-hardcut-20260901-gql` | `codex/myfpl-v2-hardcut-gql-20260901` | format、typecheck、lint、121 focused tests 通过 |
-| Web | `/private/tmp/myfpl-v2-hardcut-20260901-web` | `codex/myfpl-v2-hardcut-web-20260901` | typecheck、lint、全量 825 tests（820 pass、5 skipped）和 UI regression 通过 |
-| 小程序 | `/private/tmp/myfpl-v2-hardcut-20260901-mini` | `codex/myfpl-v2-hardcut-mini-20260901` | 616 tests、typecheck、strict lint、style 通过 |
-| VPS Ops | `/private/tmp/myfpl-v2-hardcut-20260901-ops` | `codex/myfpl-v2-hardcut-ops-20260901` | 156 unittest、py_compile 通过 |
+| 资产    | worktree                                      | branch                                 | 关键本地门禁                                                                |
+| ------- | --------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------- |
+| Data    | `/private/tmp/myfpl-v2-hardcut-20260901-data` | `codex/myfpl-v2-hardcut-data-20260901` | format、typecheck、lint、focused tests 通过                                 |
+| GraphQL | `/private/tmp/myfpl-v2-hardcut-20260901-gql`  | `codex/myfpl-v2-hardcut-gql-20260901`  | format、typecheck、lint、121 focused tests 通过                             |
+| Web     | `/private/tmp/myfpl-v2-hardcut-20260901-web`  | `codex/myfpl-v2-hardcut-web-20260901`  | typecheck、lint、全量 825 tests（820 pass、5 skipped）和 UI regression 通过 |
+| 小程序  | `/private/tmp/myfpl-v2-hardcut-20260901-mini` | `codex/myfpl-v2-hardcut-mini-20260901` | 616 tests、typecheck、strict lint、style 通过                               |
+| VPS Ops | `/private/tmp/myfpl-v2-hardcut-20260901-ops`  | `codex/myfpl-v2-hardcut-ops-20260901`  | 156 unittest、py_compile 通过                                               |
 
 证据分层：
 
@@ -390,20 +390,20 @@ READY 是冻结点。`lastObservedAt` 可以变化，semantic revision/head 不�
 
 ## 附录 A：6953 验收矩阵
 
-| 检查项 | 期望 | 证据位置/方法 |
-|---|---|---|
-| 身份语义 | 6953 是 FPL Entry ID | Data `/jobs/status?watchEntryId=6953`；不得作为 tournamentId |
-| ACCESSIBLE | catalog 集合=DB membership | 登录态 GraphQL + DB read-only 对账 |
-| ALL | 全 active tournament，多页无截断 | platform-admin capability + connection cursor 对账 |
-| 最新轮 | latest finalized；非 READY 原样显示 | catalog/status/gameweek 与 head 对账 |
-| previous-ready | 仅用户显式点击才读取 | Web/Mini UI event + revision 对账 |
-| Points | 本轮 Gross；Cost、Net 分列；排名按 Net | entry_event_results / transfers / publication 对账 |
-| H2H | Net、3/1/0、W-D-L、PF/PA、form | frozen fixtures/chunks 对账 |
-| KO | bracket、winner、advancement/champion path | complete bracket/chunks 对账；6953 无 KO 时从 ALL 选实际 KO |
-| custom | setup/catalog/bootstrap 状态可见 | staging controlled fixture；生产只读已有 custom |
-| revision | 重复同步不变；correction 有 reason+Change ID 才递增 | head/obligation/no-op/correction logs |
-| integrity | manifest/chunk/head/obligation 四方闭合 | producer probe + GraphQL fail-closed test |
-| cache | head 变化即新 key；Redis 故障结果不变 | cache hit/miss/corrupt/unavailable matrix |
+| 检查项         | 期望                                                | 证据位置/方法                                                |
+| -------------- | --------------------------------------------------- | ------------------------------------------------------------ |
+| 身份语义       | 6953 是 FPL Entry ID                                | Data `/jobs/status?watchEntryId=6953`；不得作为 tournamentId |
+| ACCESSIBLE     | catalog 集合=DB membership                          | 登录态 GraphQL + DB read-only 对账                           |
+| ALL            | 全 active tournament，多页无截断                    | platform-admin capability + connection cursor 对账           |
+| 最新轮         | latest finalized；非 READY 原样显示                 | catalog/status/gameweek 与 head 对账                         |
+| previous-ready | 仅用户显式点击才读取                                | Web/Mini UI event + revision 对账                            |
+| Points         | 本轮 Gross；Cost、Net 分列；排名按 Net              | entry_event_results / transfers / publication 对账           |
+| H2H            | Net、3/1/0、W-D-L、PF/PA、form                      | frozen fixtures/chunks 对账                                  |
+| KO             | bracket、winner、advancement/champion path          | complete bracket/chunks 对账；6953 无 KO 时从 ALL 选实际 KO  |
+| custom         | setup/catalog/bootstrap 状态可见                    | staging controlled fixture；生产只读已有 custom              |
+| revision       | 重复同步不变；correction 有 reason+Change ID 才递增 | head/obligation/no-op/correction logs                        |
+| integrity      | manifest/chunk/head/obligation 四方闭合             | producer probe + GraphQL fail-closed test                    |
+| cache          | head 变化即新 key；Redis 故障结果不变               | cache hit/miss/corrupt/unavailable matrix                    |
 
 ## 附录 B：变更后的关键不变量
 

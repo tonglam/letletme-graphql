@@ -453,10 +453,24 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
   AND jsonb_typeof(${publicationAlias}.payload) = 'object'
   AND ${publicationAlias}.schema_version = 'my-tournament-review-v2.1'
   AND ${publicationAlias}.metric_version = 'settled-review-v2'
-  AND ${publicationAlias}.payload->>'schemaVersion' = ${publicationAlias}.schema_version
-  AND ${publicationAlias}.payload->>'metricVersion' = ${publicationAlias}.metric_version
-  AND ${publicationAlias}.payload->>'format' = ${publicationAlias}.format
-  AND ${publicationAlias}.content_sha256 ~ '^[0-9a-f]{64}$'
+	AND ${publicationAlias}.payload->>'schemaVersion' = ${publicationAlias}.schema_version
+	AND ${publicationAlias}.payload->>'metricVersion' = ${publicationAlias}.metric_version
+	AND ${publicationAlias}.payload->>'format' = ${publicationAlias}.format
+	AND (
+	  (${publicationAlias}.format = 'POINTS'
+	    AND jsonb_typeof(${publicationAlias}.payload->'points') = 'object'
+	    AND NOT (${publicationAlias}.payload ? 'h2h')
+	    AND NOT (${publicationAlias}.payload ? 'knockout'))
+	  OR (${publicationAlias}.format = 'H2H'
+	    AND jsonb_typeof(${publicationAlias}.payload->'h2h') = 'object'
+	    AND NOT (${publicationAlias}.payload ? 'points')
+	    AND NOT (${publicationAlias}.payload ? 'knockout'))
+	  OR (${publicationAlias}.format = 'KNOCKOUT'
+	    AND jsonb_typeof(${publicationAlias}.payload->'knockout') = 'object'
+	    AND NOT (${publicationAlias}.payload ? 'points')
+	    AND NOT (${publicationAlias}.payload ? 'h2h'))
+	)
+	AND ${publicationAlias}.content_sha256 ~ '^[0-9a-f]{64}$'
 	AND CASE
 	      WHEN jsonb_typeof(${publicationAlias}.payload) = 'object' THEN
 	        ${publicationAlias}.content_sha256 = encode(
@@ -1811,6 +1825,15 @@ function iso(value: Date | string | null | undefined): string | null {
 function positiveInt(value: unknown): number | null {
 	const number = Number(value);
 	return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+/** IDs are PostgreSQL `integer` values on the catalog path.  Keep cursor
+ * decoding inside that range before interpolation so a forged but otherwise
+ * safe JavaScript integer cannot become a database `integer out of range`
+ * error. */
+function catalogCursorInt(value: unknown): number | null {
+	const number = positiveInt(value);
+	return number !== null && number <= GRAPHQL_INT_MAX ? number : null;
 }
 
 function strictPositiveInt(value: unknown): number | null {
@@ -5635,12 +5658,13 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					!isRecord(decoded) ||
 					decoded.scope !== scope ||
 					decoded.viewerEntryId !== (viewerEntryId ?? null) ||
+					decoded.catalogEntryId !== (catalogEntryId ?? null) ||
 					decoded.adminReadAll !== adminReadAll ||
 					decoded.search !== search
 				) {
 					throw new Error("scope mismatch");
 				}
-				afterTournamentId = positiveInt(decoded.tournamentId);
+				afterTournamentId = catalogCursorInt(decoded.tournamentId);
 			} catch {
 				throw new GraphQLError("Catalog cursor does not match this viewer or scope", {
 					extensions: { code: "BAD_USER_INPUT" },
@@ -5667,6 +5691,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					JSON.stringify({
 						scope,
 						viewerEntryId: viewerEntryId ?? null,
+						catalogEntryId: catalogEntryId ?? null,
 						adminReadAll,
 						search,
 						tournamentId: rows.at(-1)?.tournamentId,
@@ -5689,6 +5714,7 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 					JSON.stringify({
 						scope,
 						viewerEntryId: viewerEntryId ?? null,
+						catalogEntryId: catalogEntryId ?? null,
 						adminReadAll,
 						search,
 						tournamentId: node.tournamentId,
