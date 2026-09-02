@@ -587,12 +587,17 @@ export const myFplTypeDefs = /* GraphQL */ `
 		eventId: Int!
 		format: MyTournamentReviewFormat!
 		state: MyTournamentReviewState!
+		eligibleAt: DateTime
+		readyAt: DateTime
+		observedAt: DateTime
 		nextAttemptAt: DateTime
 		executionAttempts: Int!
 		sourceRechecks: Int!
 		degradedAt: DateTime
 		revision: String
 		publishedAt: DateTime
+		repairState: String!
+		errorCode: String
 	}
 
 	type MyTournamentReviewStatus {
