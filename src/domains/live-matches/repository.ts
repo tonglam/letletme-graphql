@@ -2261,8 +2261,9 @@ export const readLiveMatchday = async (
 	const activeDetailNeedsFallback =
 		activeBundle !== null &&
 		active.desk !== null &&
-		(mode === "FULL" ? chooseCompleteDetail(active.desk, [active.detail]) : active.detail) ===
-			null &&
+		(mode === "FULL"
+			? chooseCompleteDetail(active.desk, [active.detail])
+			: chooseDetailObservation(active.desk, [active.detail])) === null &&
 		(activeBundle.detail.active.publication !== null || allFixturesStarted(active.desk));
 	const previousAttempted =
 		activeBundle !== null && (active.desk === null || activeDetailNeedsFallback);
