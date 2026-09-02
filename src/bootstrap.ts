@@ -1,7 +1,11 @@
 import { graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext } from "./graphql/context";
 import { buildGraphQLRuntimeContext, resolvePrincipalAndUser } from "./graphql/runtime-context";
-import { createGraphQLApolloServer, executeGraphQLRequest } from "./graphql/runtime-execution";
+import {
+	createGraphQLApolloServer,
+	executeGraphQLRequest,
+	liveMatchdayExecutionFlightKey,
+} from "./graphql/runtime-execution";
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
@@ -554,6 +558,14 @@ export const startServer = async (): Promise<void> => {
 						requestTiming,
 						requestId,
 						corsHeaders,
+						responseFlightKey:
+							liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
+								? (liveMatchdayExecutionFlightKey(
+										parsedBody,
+										graphQLContext.currentSeason.seasonCode,
+										request.headers.get("accept") ?? ""
+									) ?? undefined)
+								: undefined,
 					});
 					// A resolver may fall back from a lightweight root to the full Core
 					// publication. Reflect the actual read path in the request log.
