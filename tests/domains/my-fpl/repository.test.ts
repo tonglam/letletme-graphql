@@ -1071,6 +1071,25 @@ describe("My FPL review repository", () => {
 		expect(
 			parseSnapshotPublicationRow({
 				...snapshotPublicationRow,
+				status_expected_entry_count: 2,
+				observed_entry_count: 1,
+				pending_correction_entry_count: 1,
+				expected_entry_scope_sha256: "1".repeat(64),
+				observed_entry_scope_sha256: "1".repeat(64),
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
+				status_expected_tournament_count: 2,
+				observed_tournament_count: 1,
+				expected_tournament_scope_sha256: "2".repeat(64),
+				observed_tournament_scope_sha256: "2".repeat(64),
+			})
+		).toBeNull();
+		expect(
+			parseSnapshotPublicationRow({
+				...snapshotPublicationRow,
 				coverage_state: "UNKNOWN",
 			})
 		).toBeNull();
@@ -1129,10 +1148,17 @@ describe("My FPL review repository", () => {
 
 		const zeroRankPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
 			entry: { overallRank: number };
-			gameweek: { result: { eventRank: number | null; overallRank: number | null } };
+			gameweek: {
+				result: {
+					eventRank: number | null;
+					overallRank: number | null;
+					overallPoints: number;
+				};
+			};
 			review: {
 				timeline: Array<{
 					status: "PROVISIONAL" | "FINAL";
+					overallPoints: number;
 					eventRank: number | null;
 					overallRank: number | null;
 				}>;
@@ -1155,11 +1181,18 @@ describe("My FPL review repository", () => {
 
 		const firstEventUnrankedPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
 			entry: { overallPoints: number; overallRank: number };
-			gameweek: { result: { eventRank: number | null; overallRank: number | null } };
+			gameweek: {
+				result: {
+					eventRank: number | null;
+					overallRank: number | null;
+					overallPoints: number;
+				};
+			};
 			review: {
 				summary: { provisionalGameweeks: number };
 				timeline: Array<{
 					status: "PROVISIONAL" | "FINAL";
+					overallPoints: number;
 					eventRank: number | null;
 					overallRank: number | null;
 				}>;
@@ -1167,10 +1200,12 @@ describe("My FPL review repository", () => {
 		};
 		firstEventUnrankedPayload.entry.overallPoints = 0;
 		firstEventUnrankedPayload.entry.overallRank = 0;
+		firstEventUnrankedPayload.gameweek.result!.overallPoints = 0;
 		firstEventUnrankedPayload.gameweek.result!.eventRank = 0;
 		firstEventUnrankedPayload.gameweek.result!.overallRank = 0;
 		firstEventUnrankedPayload.review.summary.provisionalGameweeks = 0;
 		firstEventUnrankedPayload.review.timeline[0]!.status = "FINAL";
+		firstEventUnrankedPayload.review.timeline[0]!.overallPoints = 0;
 		firstEventUnrankedPayload.review.timeline[0]!.eventRank = 0;
 		firstEventUnrankedPayload.review.timeline[0]!.overallRank = 0;
 		expect(
@@ -1181,6 +1216,19 @@ describe("My FPL review repository", () => {
 				1
 			)
 		).not.toBeNull();
+
+		const contradictoryFirstEventPayload = JSON.parse(
+			JSON.stringify(firstEventUnrankedPayload)
+		) as typeof firstEventUnrankedPayload;
+		contradictoryFirstEventPayload.gameweek.result.overallPoints = 100;
+		expect(
+			parseSnapshotEntryContractRow(
+				{ ...snapshotEntryRow(), payload: contradictoryFirstEventPayload },
+				finalPublication!,
+				123,
+				1
+			)
+		).toBeNull();
 
 		const negativeRankPayload = JSON.parse(JSON.stringify(snapshotPayload())) as {
 			entry: { overallRank: number };
@@ -1645,6 +1693,33 @@ describe("My FPL review repository", () => {
 		await malformed.redis.set(malformedKey, "{");
 		await malformed.repository.loadManagerReview(malformed.context);
 		expect(await malformed.redis.get(malformedKey)).not.toBe("{");
+	});
+
+	it("preserves an authoritative provisional correction state in the cache", async () => {
+		const fixture = makeFixture({
+			finalizedIds: [1],
+			publicationRows: [{ ...snapshotPublicationRow, coverage_state: "CORRECTION_PENDING" }],
+			snapshotEntryRow: snapshotEntryRow(),
+		});
+		const first = await fixture.repository.loadManagerReview(fixture.context);
+		expect(first.state).toBe("READY");
+		expect(first.snapshotMeta?.coverageState).toBe("CORRECTION_PENDING");
+		const key = gqlCacheKey(fixture.context, "my-fpl:v12:snapshot-entry:1:42:123");
+		const cached = JSON.parse((await fixture.redis.get(key)) ?? "null") as {
+			publication: { coverageState: string };
+		};
+		expect(cached.publication.coverageState).toBe("CORRECTION_PENDING");
+		const entryQueriesBefore = fixture.queries.filter(({ sql }) =>
+			sql.includes("JOIN competition.my_fpl_snapshot_entries")
+		).length;
+
+		const second = await fixture.repository.loadManagerReview(fixture.context);
+
+		expect(second.state).toBe("READY");
+		expect(second.snapshotMeta?.coverageState).toBe("CORRECTION_PENDING");
+		expect(
+			fixture.queries.filter(({ sql }) => sql.includes("JOIN competition.my_fpl_snapshot_entries"))
+		).toHaveLength(entryQueriesBefore);
 	});
 
 	it("rejects a cached review whose timeline does not reach its published event", async () => {

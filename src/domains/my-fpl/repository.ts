@@ -2117,6 +2117,10 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!Number.isSafeInteger(row.observed_tournament_count) ||
 		row.observed_tournament_count < 0 ||
 		row.observed_tournament_count > row.status_expected_tournament_count ||
+		(row.status_expected_entry_count !== row.observed_entry_count &&
+			row.expected_entry_scope_sha256 === row.observed_entry_scope_sha256) ||
+		(row.status_expected_tournament_count !== row.observed_tournament_count &&
+			row.expected_tournament_scope_sha256 === row.observed_tournament_scope_sha256) ||
 		typeof row.lifecycle_finished !== "boolean" ||
 		typeof row.lifecycle_data_checked !== "boolean" ||
 		(row.lifecycle_data_checked
@@ -2281,14 +2285,20 @@ const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPubli
 		candidate.observedEntryCount >= 0 &&
 		candidate.observedEntryCount <= candidate.expectedEntryCount &&
 		candidate.observedEntryCount === candidate.capturedExpectedEntryCount &&
+		(candidate.expectedEntryCount === candidate.observedEntryCount ||
+			candidate.expectedEntryScopeSha256 !== candidate.entryScopeSha256) &&
 		candidate.readyTournamentCount <= candidate.expectedTournamentCount &&
-		candidate.coverageState ===
-			(candidate.observedEntryCount === candidate.expectedEntryCount &&
-			candidate.readyTournamentCount === candidate.expectedTournamentCount &&
-			candidate.expectedEntryScopeSha256 === candidate.entryScopeSha256 &&
-			candidate.expectedTournamentScopeSha256 === candidate.tournamentScopeSha256
-				? "COMPLETE"
-				: "CORRECTION_PENDING") &&
+		(candidate.expectedTournamentCount === candidate.readyTournamentCount ||
+			candidate.expectedTournamentScopeSha256 !== candidate.tournamentScopeSha256) &&
+		(candidate.coverageState === "CORRECTION_PENDING"
+			? candidate.kind === "PROVISIONAL"
+			: candidate.coverageState ===
+				(candidate.observedEntryCount === candidate.expectedEntryCount &&
+				candidate.readyTournamentCount === candidate.expectedTournamentCount &&
+				candidate.expectedEntryScopeSha256 === candidate.entryScopeSha256 &&
+				candidate.expectedTournamentScopeSha256 === candidate.tournamentScopeSha256
+					? "COMPLETE"
+					: "CORRECTION_PENDING")) &&
 		typeof candidate.expectedEntryScopeSha256 === "string" &&
 		/^[0-9a-f]{64}$/.test(candidate.expectedEntryScopeSha256) &&
 		typeof candidate.expectedTournamentScopeSha256 === "string" &&
@@ -2497,8 +2507,10 @@ const isAuthoritativeFinalUnrankedFirstEvent = (payload: SnapshotEntryPayload): 
 		result !== null &&
 		result.eventId === firstScoringEvent &&
 		payload.entry.overallPoints === 0 &&
+		result.overallPoints === 0 &&
 		payload.entry.overallRank === 0 &&
-		!payload.review.timeline.some((row) => row.eventId < result.eventId)
+		!payload.review.timeline.some((row) => row.eventId < result.eventId) &&
+		payload.review.timeline.every((row) => row.overallPoints === 0)
 	);
 };
 
