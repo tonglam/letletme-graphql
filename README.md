@@ -132,9 +132,20 @@ bun run rate-limit:load --output load-test/run-123.json
 
 For Live Matches V3, run `bun run live-match:capacity` separately for each
 `HEAD` and `FULL` mode. The harness requires `LIVE_MATCH_LOAD_DEPLOY_SHA` to
-be the exact deployed Git SHA and verifies `/health/deploy` before and after
-every stage; a missing or changing identity fails the run. Short stage
-overrides remain smoke diagnostics and are not capacity evidence.
+be the exact deployed Git SHA and verifies the configured deployment-health
+URL before and after every stage; a missing or changing identity fails the
+run. Short stage overrides remain smoke diagnostics and are not capacity
+evidence.
+
+If the public ingress exposes GraphQL health under a path different from the
+load endpoint, set `LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL` and
+`LIVE_MATCH_LOAD_READY_HEALTH_URL` to the exact GraphQL health URLs. The
+defaults remain `/health/deploy` and `/health/ready` on the load endpoint's
+origin. Health overrides accept HTTPS, or HTTP only for loopback diagnostics;
+they cannot contain credentials or URL fragments. For example, a public
+GraphQL endpoint at `https://letletme.top/api/graphql` can use the GraphQL
+readiness URL exposed by the API ingress for both identity and readiness
+checks.
 
 Required environment names are `LOAD_WEB_ORIGIN`, `LOAD_GRAPHQL_ORIGIN`,
 `BACKEND_PROXY_SECRET`, `GRAPHQL_SERVICE_TOKEN`, `LOAD_METRICS_TOKEN`,

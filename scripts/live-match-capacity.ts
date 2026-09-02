@@ -133,6 +133,21 @@ export const validateCapacityEndpoint = (url: URL, transport: Transport): void =
 	}
 };
 
+export const validateCapacityHealthEndpoint = (url: URL): void => {
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new Error("capacity health URLs must use http or https");
+	}
+	if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+		throw new Error("plaintext capacity health URLs require a loopback endpoint");
+	}
+	if (url.username || url.password) {
+		throw new Error("capacity health URLs must not include credentials");
+	}
+	if (url.hash) {
+		throw new Error("capacity health URLs must not include a fragment");
+	}
+};
+
 const endpoint = new URL(required("LIVE_MATCH_LOAD_URL"));
 const serviceToken = required("LIVE_MATCH_GRAPHQL_SERVICE_TOKEN");
 const contractHeader = "live-matches-v3";
@@ -151,7 +166,6 @@ if (metricsEndpoint !== null) validateCapacityEndpoint(metricsEndpoint, "cold");
 const metricsDeployHealthEndpoint = metricsEndpoint
 	? new URL("/health/deploy", metricsEndpoint.origin)
 	: null;
-const readyHealthEndpoint = new URL("/health/ready", endpoint.origin);
 const stages = [
 	...new Set(
 		(process.env.LIVE_MATCH_LOAD_STAGES ?? "50,100,200,300")
@@ -178,7 +192,22 @@ const expectedDeploySha = required("LIVE_MATCH_LOAD_DEPLOY_SHA").toLowerCase();
 if (!/^[0-9a-f]{40}$/.test(expectedDeploySha)) {
 	throw new Error("LIVE_MATCH_LOAD_DEPLOY_SHA must be the exact 40-character lowercase Git SHA");
 }
-const deployHealthEndpoint = new URL("/health/deploy", endpoint.origin);
+
+const configuredHealthEndpoint = (name: string, defaultPath: string): URL => {
+	const configured = process.env[name]?.trim();
+	const url = configured ? new URL(configured) : new URL(defaultPath, endpoint.origin);
+	validateCapacityHealthEndpoint(url);
+	return url;
+};
+
+const deployHealthEndpoint = configuredHealthEndpoint(
+	"LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL",
+	"/health/deploy"
+);
+const readyHealthEndpoint = configuredHealthEndpoint(
+	"LIVE_MATCH_LOAD_READY_HEALTH_URL",
+	"/health/ready"
+);
 
 const query =
 	mode === "HEAD"
@@ -1450,13 +1479,13 @@ const verifyDeploymentIdentity = async (
 		const ok = response.ok && observedSha === expectedDeploySha;
 		deploymentIdentitySamples.push({ phase, source, observedSha, ok });
 		if (!ok) {
-			deploymentIdentityFailure = `${phase} (${source}): /health/deploy did not report expected deploy SHA`;
+			deploymentIdentityFailure = `${phase} (${source}): deployment identity URL did not report expected deploy SHA`;
 			return false;
 		}
 		return true;
 	} catch (error) {
 		deploymentIdentitySamples.push({ phase, source, observedSha: null, ok: false });
-		deploymentIdentityFailure = `${phase} (${source}): /health/deploy identity check failed (${error instanceof Error ? error.message : String(error)})`;
+		deploymentIdentityFailure = `${phase} (${source}): deployment identity URL request failed (${error instanceof Error ? error.message : String(error)})`;
 		return false;
 	}
 };
@@ -1832,7 +1861,7 @@ const report = {
 		"Run HEAD and FULL separately to produce separate evidence. A smoke override shorter than 900 seconds is diagnostic only.",
 		"Encoded bytes are measured before decompression; decoded bytes are measured after decompression.",
 		"Global denial evidence includes enforced denied and shadow would_deny counters.",
-		"Every capacity stage is bounded by /health/deploy identity checks for LIVE_MATCH_LOAD_DEPLOY_SHA and /health/ready checks for healthy Redis, rate-limit Redis, PostgreSQL, and season state; any mismatch or unhealthy result aborts the run and fails the gate.",
+		"Every capacity stage is bounded by the configured deployment identity URL for LIVE_MATCH_LOAD_DEPLOY_SHA and the configured readiness URL for healthy Redis, rate-limit Redis, PostgreSQL, and season state; any mismatch or unhealthy result aborts the run and fails the gate.",
 		"When metrics are configured, the metrics origin is independently pinned to the same deploy SHA before and around every required stage.",
 		"Pool waiting is gated by both the sampled waiting gauge and the monotonic postgres_pool_wait_events_total counter; transient queue waits cannot disappear between scrapes.",
 		"Any semantic, non-429, or client/workload 429 failure in a required stage fails the stepped capacity gate even if a later stage recovers.",
