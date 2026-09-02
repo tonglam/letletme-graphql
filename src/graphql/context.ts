@@ -8,6 +8,14 @@ import type { ReadModelClient } from "../infra/read-model-client";
 import type { Player } from "../domains/players/repository";
 import type { RequestTiming } from "../http/request-timing";
 
+export type LiveMatchExecutionObservation = Readonly<{
+	view: "HEAD" | "DESK" | "FULL";
+	state: "FRESH" | "STALE" | "DEGRADED" | "FINAL" | "PENDING" | "UNAVAILABLE";
+	servedFrom: string;
+	/** The earliest non-final stale boundary from the owner response, in epoch milliseconds. */
+	shareUntilMs: number | null;
+}>;
+
 export type GraphQLContext = {
 	data: ReadModelClient;
 	database: QueryExecutor;

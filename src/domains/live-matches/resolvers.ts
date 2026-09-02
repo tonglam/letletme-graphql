@@ -1,6 +1,6 @@
 import { Kind, type GraphQLResolveInfo, type SelectionSetNode, type ValueNode } from "graphql";
 
-import type { GraphQLContext } from "../../graphql/context";
+import type { GraphQLContext, LiveMatchExecutionObservation } from "../../graphql/context";
 import { metrics } from "../../infra/metrics";
 import {
 	readLiveMatchday,
@@ -176,6 +176,30 @@ const toTimes = (read: LiveMatchdayRead) => {
 		servedAt: new Date().toISOString(),
 		nextRefreshAt: nextTime(desk?.expectedNextCheckAt ?? null, detail?.expectedNextCheckAt ?? null),
 	};
+};
+
+const liveMatchShareUntilMs = (response: ReturnType<typeof toResult>): number | null => {
+	if (!response.snapshot || response.delivery.state === "FINAL") return null;
+	const staleAt = [response.snapshot.times.deskStaleAt, response.snapshot.times.detailStaleAt]
+		.map((value) => (value === null ? Number.NaN : Date.parse(value)))
+		.filter((value) => Number.isFinite(value));
+	return staleAt.length > 0 ? Math.min(...staleAt) : null;
+};
+
+const liveMatchDeliveryStateForObservation = (
+	state: string
+): LiveMatchExecutionObservation["state"] => {
+	switch (state) {
+		case "FRESH":
+		case "STALE":
+		case "DEGRADED":
+		case "FINAL":
+		case "PENDING":
+		case "UNAVAILABLE":
+			return state;
+		default:
+			return "UNAVAILABLE";
+	}
 };
 
 const toPlayer = (player: MatchDetailCandidate["fixtures"][number]["players"][number]) => ({
@@ -422,6 +446,18 @@ export const liveMatchesResolvers = {
 			const read = await readLiveMatchday(context, args.eventId ?? undefined, mode);
 			const response = toResult(read);
 			observeLiveMatchRead(mode, read, response, performance.now() - startedAt);
+			if (response.availability === "READY" && context.requestScope) {
+				(
+					context.requestScope as {
+						liveMatchExecutionObservation?: LiveMatchExecutionObservation;
+					}
+				).liveMatchExecutionObservation = {
+					view: mode,
+					state: liveMatchDeliveryStateForObservation(response.delivery.state),
+					servedFrom: response.delivery.servedFrom ?? "UNAVAILABLE",
+					shareUntilMs: liveMatchShareUntilMs(response),
+				};
+			}
 			return response;
 		},
 	},
