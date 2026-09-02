@@ -3985,7 +3985,8 @@ type GameweekCacheHead = {
 
 function gameweekCache(
 	value: unknown,
-	expectedHead?: GameweekCacheHead
+	expectedHead?: GameweekCacheHead,
+	expectedState?: MyTournamentReviewState
 ): value is MyTournamentGameweekReview {
 	if (!isRecord(value)) return false;
 	const state = value.state;
@@ -3999,6 +4000,7 @@ function gameweekCache(
 	) {
 		return false;
 	}
+	if (expectedState !== undefined && state !== expectedState) return false;
 	// A READY response is only valid when this request observed the exact
 	// publication head that produced it. Negative-state cache keys deliberately
 	// have no head expectation and may never be promoted by a corrupt Redis
@@ -4018,7 +4020,11 @@ function gameweekCache(
 			scope.revision !== expectedHead.revision ||
 			scope.format !== expectedHead.format ||
 			scope.contentSha256 !== expectedHead.contentSha256 ||
-			(scope.correctedAt ?? null) !== expectedHead.correctedAt)
+			(scope.correctedAt ?? null) !== expectedHead.correctedAt ||
+			scope.rowCount !== expectedHead.rowCount ||
+			scope.expectedSubjectCount !== expectedHead.expectedSubjectCount ||
+			scope.readySubjectCount !== expectedHead.readySubjectCount ||
+			scope.notApplicableSubjectCount !== expectedHead.notApplicableSubjectCount)
 	) {
 		return false;
 	}
@@ -6219,7 +6225,8 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 								readySubjectCount: Number(head.ready_subject_count),
 								notApplicableSubjectCount: Number(head.not_applicable_subject_count),
 							}
-						: undefined
+						: undefined,
+					unavailableState
 				)
 			)
 		);
