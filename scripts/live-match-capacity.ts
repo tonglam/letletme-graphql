@@ -97,7 +97,10 @@ const positiveInteger = (name: string, fallback: number): number => {
 
 const option = (name: string): string | undefined => {
 	const index = Bun.argv.indexOf(name);
-	return index >= 0 ? Bun.argv[index + 1]?.trim() : undefined;
+	if (index >= 0) return Bun.argv[index + 1]?.trim();
+	const prefix = `${name}=`;
+	const inline = Bun.argv.find((value) => value.startsWith(prefix));
+	return inline?.slice(prefix.length).trim();
 };
 
 const parseMode = (value: string | undefined): ReadMode => {
@@ -120,6 +123,9 @@ const isLoopbackHostname = (hostname: string): boolean => {
 	const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
 	return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 };
+
+const normalizedHostname = (hostname: string): string =>
+	hostname.toLowerCase().replace(/^\[|\]$/g, "");
 
 export const validateCapacityEndpoint = (url: URL, transport: Transport): void => {
 	if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -189,6 +195,7 @@ const validateCapacityHealthBinding = (
 	const loopbackAlias =
 		isLoopbackHostname(loadEndpoint.hostname) &&
 		isLoopbackHostname(healthEndpoint.hostname) &&
+		normalizedHostname(loadEndpoint.hostname) === normalizedHostname(healthEndpoint.hostname) &&
 		effectivePort(loadEndpoint) === effectivePort(healthEndpoint);
 	const apiAlias = isApiAliasHostname(loadEndpoint.hostname, healthEndpoint.hostname);
 	if (!loopbackAlias && !apiAlias) {
@@ -1608,7 +1615,7 @@ const verifyRuntimeReadiness = async (phase: string): Promise<boolean> => {
 			ok,
 		});
 		if (!ok) {
-			runtimeReadinessFailure = `${phase}: /health/ready did not report healthy checks and the expected deploy SHA`;
+			runtimeReadinessFailure = `${phase}: ${readyHealthEndpoint.origin}${readyHealthEndpoint.pathname} did not report healthy checks and the expected deploy SHA`;
 			return false;
 		}
 		return true;
@@ -1621,7 +1628,7 @@ const verifyRuntimeReadiness = async (phase: string): Promise<boolean> => {
 			checks: null,
 			ok: false,
 		});
-		runtimeReadinessFailure = `${phase}: /health/ready readiness check failed (${error instanceof Error ? error.message : String(error)})`;
+		runtimeReadinessFailure = `${phase}: ${readyHealthEndpoint.origin}${readyHealthEndpoint.pathname} readiness check failed (${error instanceof Error ? error.message : String(error)})`;
 		return false;
 	}
 };

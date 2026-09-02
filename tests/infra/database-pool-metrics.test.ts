@@ -65,6 +65,7 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL");
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_READY_HEALTH_URL");
 		expect(capacitySource).toContain('"/health/ready"');
+		expect(capacitySource).toContain("readyHealthEndpoint.origin");
 		expect(capacitySource).toContain("must not include credentials");
 		expect(capacitySource).toContain("must not include a fragment");
 		expect(capacitySource).toContain("must not include a query string");
@@ -175,5 +176,31 @@ describe("PostgreSQL pool observability", () => {
 		expect(exitCode).not.toBe(0);
 		expect(stderr).toContain("capacity health URLs must use http or https");
 		expect(stderr).not.toContain("capacity health URLs must be bound to the load route");
+	});
+
+	it("does not treat different loopback hostnames as the same health target", async () => {
+		const child = Bun.spawn(
+			["bun", "scripts/live-match-capacity.ts", "--mode=HEAD", "--transport=cold"],
+			{
+				cwd: process.cwd(),
+				env: {
+					...Bun.env,
+					LIVE_MATCH_LOAD_URL: "http://127.0.0.1:4000/api/graphql",
+					LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+					LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+					LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL: "http://localhost:4000/api/graphql/health/deploy",
+					LIVE_MATCH_LOAD_READY_HEALTH_URL: "",
+					LIVE_MATCH_LOAD_STAGES: "1",
+				},
+				stderr: "pipe",
+				stdout: "pipe",
+			}
+		);
+		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+
+		expect(exitCode).not.toBe(0);
+		expect(stderr).toContain(
+			"cross-origin capacity health URLs must use the load target or its api alias"
+		);
 	});
 });
