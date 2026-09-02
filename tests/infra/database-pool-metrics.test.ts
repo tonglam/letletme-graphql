@@ -100,24 +100,36 @@ describe("PostgreSQL pool observability", () => {
 	});
 
 	it("fails closed when health overrides target an unrelated deployment", async () => {
-		const child = Bun.spawn(["bun", "scripts/live-match-capacity.ts", "--mode=HEAD"], {
-			cwd: process.cwd(),
-			env: {
-				...Bun.env,
-				LIVE_MATCH_LOAD_URL: "https://letletme.top/api/graphql",
-				LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
-				LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
-				LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL: "https://unrelated.example/health/deploy",
-				LIVE_MATCH_LOAD_STAGES: "1",
-			},
-			stderr: "pipe",
-			stdout: "pipe",
-		});
-		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+		for (const [healthUrl, expectedError] of [
+			[
+				"https://unrelated.example/health/deploy",
+				"cross-origin capacity health URLs must use the load target or its api alias",
+			],
+			[
+				"https://api.letletme.top/api/graphql/health/deploy?",
+				"capacity health URLs must not include a query string",
+			],
+		] as const) {
+			const child = Bun.spawn(["bun", "scripts/live-match-capacity.ts", "--mode=HEAD"], {
+				cwd: process.cwd(),
+				env: {
+					...Bun.env,
+					LIVE_MATCH_LOAD_URL: "https://letletme.top/api/graphql",
+					LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+					LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+					LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL: healthUrl,
+					LIVE_MATCH_LOAD_STAGES: "1",
+				},
+				stderr: "pipe",
+				stdout: "pipe",
+			});
+			const [exitCode, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stderr).text(),
+			]);
 
-		expect(exitCode).not.toBe(0);
-		expect(stderr).toContain(
-			"cross-origin capacity health URLs must use the load target or its api alias"
-		);
+			expect(exitCode).not.toBe(0);
+			expect(stderr).toContain(expectedError);
+		}
 	});
 });

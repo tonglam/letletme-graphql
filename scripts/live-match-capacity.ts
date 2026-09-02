@@ -227,6 +227,9 @@ if (!/^[0-9a-f]{40}$/.test(expectedDeploySha)) {
 
 const configuredHealthEndpoint = (name: string, defaultPath: string): URL => {
 	const configured = process.env[name]?.trim();
+	if (configured?.includes("?")) {
+		throw new Error("capacity health URLs must not include a query string");
+	}
 	const url = configured ? new URL(configured) : new URL(defaultPath, endpoint.origin);
 	validateCapacityHealthBinding(endpoint, url);
 	return url;
