@@ -30,42 +30,177 @@ export const MY_FPL_EVENT_LIFECYCLE_SQL = `
 `;
 
 export const MY_FPL_ACTIVE_PUBLICATIONS_SQL = `
-	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-		published_at, kind, expected_entry_count, ready_entry_count,
-		empty_entry_count, not_applicable_entry_count, expected_tournament_count,
-		ready_tournament_count, content_sha256, score_source,
-		live_publication_id, live_revision, algorithm_version,
-		source_min_checked_at, source_max_checked_at
-	FROM competition.my_fpl_snapshot_publications
-	WHERE season_id = $1 AND active
-	ORDER BY event_id
+	SELECT publication.season_id, publication.event_id, publication.revision,
+		publication.snapshot_date, publication.source_checked_at,
+		publication.published_at, publication.kind, publication.expected_entry_count,
+		publication.ready_entry_count, publication.empty_entry_count,
+		publication.not_applicable_entry_count, publication.expected_tournament_count,
+		publication.ready_tournament_count, publication.content_sha256,
+		publication.entry_scope_sha256, publication.tournament_scope_sha256,
+		publication.score_source, publication.live_publication_id,
+		publication.live_revision, publication.algorithm_version,
+		publication.source_min_checked_at, publication.source_max_checked_at,
+		status.finished AS lifecycle_finished,
+		status.data_checked AS lifecycle_data_checked,
+		status.finalization_started_at AS finalization_started_at,
+		status.finalization_due_at AS finalization_due_at,
+		status.expected_entry_count AS status_expected_entry_count,
+		status.observed_entry_count AS observed_entry_count,
+		status.pending_correction_entry_count AS pending_correction_entry_count,
+		status.expected_tournament_count AS status_expected_tournament_count,
+		status.observed_tournament_count AS observed_tournament_count,
+		status.coverage_state AS coverage_state,
+		status.expected_entry_scope_sha256 AS expected_entry_scope_sha256,
+		status.observed_entry_scope_sha256 AS observed_entry_scope_sha256,
+		status.expected_tournament_scope_sha256 AS expected_tournament_scope_sha256,
+		status.observed_tournament_scope_sha256 AS observed_tournament_scope_sha256
+	FROM competition.my_fpl_snapshot_publications publication
+	JOIN reporting.my_fpl_active_snapshot_status status
+		ON status.season_id = publication.season_id
+		AND status.event_id = publication.event_id
+		AND status.revision = publication.revision
+	LEFT JOIN fpl.events lifecycle
+		ON lifecycle.season_id = publication.season_id
+		AND lifecycle.event_id = publication.event_id
+	WHERE publication.season_id = $1 AND publication.active
+	ORDER BY publication.event_id
 `;
 
 export const MY_FPL_PUBLICATION_BY_EVENT_REVISION_SQL = `
-	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-		published_at, kind, expected_entry_count, ready_entry_count,
-		empty_entry_count, not_applicable_entry_count, expected_tournament_count,
-		ready_tournament_count, content_sha256, score_source,
-		live_publication_id, live_revision, algorithm_version,
-		source_min_checked_at, source_max_checked_at
-	FROM competition.my_fpl_snapshot_publications
-	WHERE season_id = $1
-		AND event_id = $2
-		AND revision = $3::bigint
+	SELECT publication.season_id, publication.event_id, publication.revision,
+		publication.snapshot_date, publication.source_checked_at,
+		publication.published_at, publication.kind, publication.expected_entry_count,
+		publication.ready_entry_count, publication.empty_entry_count,
+		publication.not_applicable_entry_count, publication.expected_tournament_count,
+		publication.ready_tournament_count, publication.content_sha256,
+		publication.entry_scope_sha256, publication.tournament_scope_sha256,
+		publication.score_source, publication.live_publication_id,
+		publication.live_revision, publication.algorithm_version,
+		publication.source_min_checked_at, publication.source_max_checked_at,
+		CASE WHEN publication.active THEN status.finished
+			ELSE COALESCE(status.finished, lifecycle.finished, false) END AS lifecycle_finished,
+		CASE WHEN publication.active THEN status.data_checked
+			ELSE COALESCE(status.data_checked, lifecycle.data_checked, false) END AS lifecycle_data_checked,
+		CASE WHEN publication.active THEN status.finalization_started_at
+			ELSE COALESCE(status.finalization_started_at, lifecycle.data_checked_at) END AS finalization_started_at,
+		CASE WHEN publication.active THEN status.finalization_due_at
+			ELSE COALESCE(
+				status.finalization_due_at,
+				CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
+					ELSE lifecycle.data_checked_at + interval '4500 seconds' END
+			) END AS finalization_due_at,
+		CASE WHEN publication.active THEN status.expected_entry_count
+			ELSE COALESCE(status.expected_entry_count, publication.expected_entry_count) END AS status_expected_entry_count,
+		CASE WHEN publication.active THEN status.observed_entry_count
+			ELSE COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
+			END AS observed_entry_count,
+		CASE WHEN publication.active THEN status.pending_correction_entry_count
+			ELSE COALESCE(
+				status.pending_correction_entry_count,
+				GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
+			) END AS pending_correction_entry_count,
+		CASE WHEN publication.active THEN status.expected_tournament_count
+			ELSE COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
+			END AS status_expected_tournament_count,
+		CASE WHEN publication.active THEN status.observed_tournament_count
+			ELSE COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
+			END AS observed_tournament_count,
+		CASE WHEN publication.active THEN status.coverage_state
+			ELSE COALESCE(
+				status.coverage_state,
+				CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
+					AND publication.ready_tournament_count = publication.expected_tournament_count
+					THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
+			) END AS coverage_state,
+		CASE WHEN publication.active THEN status.expected_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS expected_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS observed_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.expected_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS expected_tournament_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS observed_tournament_scope_sha256
+	FROM competition.my_fpl_snapshot_publications publication
+	LEFT JOIN reporting.my_fpl_active_snapshot_status status
+		ON status.season_id = publication.season_id
+		AND status.event_id = publication.event_id
+		AND status.revision = publication.revision
+	LEFT JOIN fpl.events lifecycle
+		ON lifecycle.season_id = publication.season_id
+		AND lifecycle.event_id = publication.event_id
+	WHERE publication.season_id = $1
+		AND publication.event_id = $2
+		AND publication.revision = $3::bigint
+		AND (NOT publication.active OR status.revision IS NOT NULL)
 	LIMIT 1
 `;
 
 export const MY_FPL_PUBLICATION_BY_REVISION_SQL = `
-	SELECT season_id, event_id, revision, snapshot_date, source_checked_at,
-		published_at, kind, expected_entry_count, ready_entry_count,
-		empty_entry_count, not_applicable_entry_count, expected_tournament_count,
-		ready_tournament_count, content_sha256, score_source,
-		live_publication_id, live_revision, algorithm_version,
-		source_min_checked_at, source_max_checked_at
-	FROM competition.my_fpl_snapshot_publications
-	WHERE season_id = $1
-		AND revision = $2::bigint
-	ORDER BY event_id
+	SELECT publication.season_id, publication.event_id, publication.revision,
+		publication.snapshot_date, publication.source_checked_at,
+		publication.published_at, publication.kind, publication.expected_entry_count,
+		publication.ready_entry_count, publication.empty_entry_count,
+		publication.not_applicable_entry_count, publication.expected_tournament_count,
+		publication.ready_tournament_count, publication.content_sha256,
+		publication.entry_scope_sha256, publication.tournament_scope_sha256,
+		publication.score_source, publication.live_publication_id,
+		publication.live_revision, publication.algorithm_version,
+		publication.source_min_checked_at, publication.source_max_checked_at,
+		CASE WHEN publication.active THEN status.finished
+			ELSE COALESCE(status.finished, lifecycle.finished, false) END AS lifecycle_finished,
+		CASE WHEN publication.active THEN status.data_checked
+			ELSE COALESCE(status.data_checked, lifecycle.data_checked, false) END AS lifecycle_data_checked,
+		CASE WHEN publication.active THEN status.finalization_started_at
+			ELSE COALESCE(status.finalization_started_at, lifecycle.data_checked_at) END AS finalization_started_at,
+		CASE WHEN publication.active THEN status.finalization_due_at
+			ELSE COALESCE(
+				status.finalization_due_at,
+				CASE WHEN lifecycle.data_checked_at IS NULL THEN NULL
+					ELSE lifecycle.data_checked_at + interval '4500 seconds' END
+			) END AS finalization_due_at,
+		CASE WHEN publication.active THEN status.expected_entry_count
+			ELSE COALESCE(status.expected_entry_count, publication.expected_entry_count) END AS status_expected_entry_count,
+		CASE WHEN publication.active THEN status.observed_entry_count
+			ELSE COALESCE(status.observed_entry_count, publication.ready_entry_count + publication.empty_entry_count)
+			END AS observed_entry_count,
+		CASE WHEN publication.active THEN status.pending_correction_entry_count
+			ELSE COALESCE(
+				status.pending_correction_entry_count,
+				GREATEST(publication.expected_entry_count - publication.ready_entry_count - publication.empty_entry_count, 0)
+			) END AS pending_correction_entry_count,
+		CASE WHEN publication.active THEN status.expected_tournament_count
+			ELSE COALESCE(status.expected_tournament_count, publication.expected_tournament_count)
+			END AS status_expected_tournament_count,
+		CASE WHEN publication.active THEN status.observed_tournament_count
+			ELSE COALESCE(status.observed_tournament_count, publication.ready_tournament_count)
+			END AS observed_tournament_count,
+		CASE WHEN publication.active THEN status.coverage_state
+			ELSE COALESCE(
+				status.coverage_state,
+				CASE WHEN publication.ready_entry_count + publication.empty_entry_count = publication.expected_entry_count
+					AND publication.ready_tournament_count = publication.expected_tournament_count
+					THEN 'COMPLETE' ELSE 'CORRECTION_PENDING' END
+			) END AS coverage_state,
+		CASE WHEN publication.active THEN status.expected_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS expected_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_entry_scope_sha256
+			ELSE publication.entry_scope_sha256 END AS observed_entry_scope_sha256,
+		CASE WHEN publication.active THEN status.expected_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS expected_tournament_scope_sha256,
+		CASE WHEN publication.active THEN status.observed_tournament_scope_sha256
+			ELSE publication.tournament_scope_sha256 END AS observed_tournament_scope_sha256
+	FROM competition.my_fpl_snapshot_publications publication
+	LEFT JOIN reporting.my_fpl_active_snapshot_status status
+		ON status.season_id = publication.season_id
+		AND status.event_id = publication.event_id
+		AND status.revision = publication.revision
+	LEFT JOIN fpl.events lifecycle
+		ON lifecycle.season_id = publication.season_id
+		AND lifecycle.event_id = publication.event_id
+	WHERE publication.season_id = $1
+		AND publication.revision = $2::bigint
+		AND (NOT publication.active OR status.revision IS NOT NULL)
+	ORDER BY publication.event_id
 	LIMIT 1
 `;
 
@@ -330,6 +465,18 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 			},
 			{
 				relation: "competition.my_fpl_snapshot_publications",
+				column: "entry_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
+				column: "tournament_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "competition.my_fpl_snapshot_publications",
 				column: "score_source",
 				pgType: "text",
 				acceptedPgTypes: ["character varying"],
@@ -360,6 +507,81 @@ export const MY_FPL_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 				relation: "competition.my_fpl_snapshot_publications",
 				column: "source_max_checked_at",
 				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "finished",
+				pgType: "boolean",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "data_checked",
+				pgType: "boolean",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "finalization_started_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "finalization_due_at",
+				pgType: "timestamp with time zone",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "expected_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "observed_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "pending_correction_entry_count",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "expected_tournament_count",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "observed_tournament_count",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "coverage_state",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "expected_entry_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "observed_entry_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "expected_tournament_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
+			},
+			{
+				relation: "reporting.my_fpl_active_snapshot_status",
+				column: "observed_tournament_scope_sha256",
+				pgType: "text",
+				acceptedPgTypes: ["character varying"],
 			},
 		],
 	},
@@ -504,7 +726,10 @@ export type MyFplReviewContext = {
 };
 
 export type MyFplSnapshotKind = "PROVISIONAL" | "FINAL";
-export type MyFplSnapshotFreshness = "CURRENT" | "GENERATING" | "STALE";
+export type MyFplTimelineStatus = MyFplSnapshotKind;
+export type MyFplSettlementState = "PROVISIONAL" | "FINALIZING" | "FINAL" | "DELAYED";
+export type MyFplCoverageState = "COMPLETE" | "CORRECTION_PENDING";
+export type MyFplTimelinessState = "CURRENT" | "STALE";
 export type MyFplScoreSource = "FPL_EVENT_LIVE" | "FPL_FINAL_RESULT";
 export type MyFplSnapshotMeta = {
 	revision: string;
@@ -512,8 +737,13 @@ export type MyFplSnapshotMeta = {
 	snapshotDate: string;
 	sourceCheckedAt: string;
 	publishedAt: string;
-	kind: MyFplSnapshotKind;
-	freshness: MyFplSnapshotFreshness;
+	settlementState: MyFplSettlementState;
+	coverageState: MyFplCoverageState;
+	timelinessState: MyFplTimelinessState;
+	expectedEntryCount: number;
+	observedEntryCount: number;
+	finalizationStartedAt: string | null;
+	finalizationDueAt: string | null;
 	scoreSource: MyFplScoreSource;
 	livePublicationId: string | null;
 	liveRevision: string | null;
@@ -573,6 +803,14 @@ type LoadedReviewContext = {
 };
 
 export type MyFplSnapshotPublication = MyFplSnapshotMeta & {
+	/** Internal producer kind. It is intentionally not exposed by GraphQL. */
+	kind: MyFplSnapshotKind;
+	/** Counts captured by this immutable revision, distinct from today's canonical scope. */
+	capturedExpectedEntryCount: number;
+	capturedExpectedTournamentCount: number;
+	/** Internal canonical/observed scope evidence used by cache validation. */
+	expectedEntryScopeSha256: string;
+	expectedTournamentScopeSha256: string;
 	expectedEntryCount: number;
 	readyEntryCount: number;
 	emptyEntryCount: number;
@@ -580,6 +818,8 @@ export type MyFplSnapshotPublication = MyFplSnapshotMeta & {
 	expectedTournamentCount: number;
 	readyTournamentCount: number;
 	contentSha256: string;
+	entryScopeSha256: string;
+	tournamentScopeSha256: string;
 };
 
 export type MyFplEntryIdentity = {
@@ -644,7 +884,7 @@ export type MyFplManagerGameweekReview = {
 
 export type MyFplManagerTimelineRow = {
 	eventId: number;
-	status: MyFplSnapshotKind;
+	status: MyFplTimelineStatus;
 	eventPoints: number;
 	eventRank: number | null;
 	overallPoints: number;
@@ -743,7 +983,7 @@ export type MyFplManagerFormationCount = {
 export type MyFplManagerChipReview = {
 	chip: string;
 	eventId: number;
-	status: MyFplSnapshotKind;
+	status: MyFplTimelineStatus;
 	eventNetPoints: number;
 	otherGameweeksAverageNetPoints: number | null;
 	differenceFromOtherGameweeks: number | null;
@@ -1026,12 +1266,28 @@ type DbSnapshotPublicationRow = QueryResultRow & {
 	expected_tournament_count: number;
 	ready_tournament_count: number;
 	content_sha256: string;
+	entry_scope_sha256: string | null;
+	tournament_scope_sha256: string | null;
 	score_source: MyFplScoreSource | null;
 	live_publication_id: string | null;
 	live_revision: string | null;
 	algorithm_version: string | null;
 	source_min_checked_at: Date | string | null;
 	source_max_checked_at: Date | string | null;
+	lifecycle_finished: boolean;
+	lifecycle_data_checked: boolean;
+	finalization_started_at: Date | string | null;
+	finalization_due_at: Date | string | null;
+	status_expected_entry_count: number;
+	observed_entry_count: number;
+	pending_correction_entry_count: number;
+	status_expected_tournament_count: number;
+	observed_tournament_count: number;
+	coverage_state: string;
+	expected_entry_scope_sha256: string | null;
+	observed_entry_scope_sha256: string | null;
+	expected_tournament_scope_sha256: string | null;
+	observed_tournament_scope_sha256: string | null;
 };
 
 type DbBoardJsonRow = {
@@ -1070,7 +1326,9 @@ type DbSetupStatusRow = QueryResultRow & {
 };
 
 // Snapshot revision is part of every snapshot-backed key below.
-const PROJECTION_VERSION = "v11";
+// The snapshot metadata contract is a hard cut: old cache envelopes contain
+// `kind`/`freshness` and must never be read as the new settlement contract.
+const PROJECTION_VERSION = "v12";
 const NULLABLE_STATE_CACHE_TTL_SECONDS = 30;
 // Keep OFFSET bounded for the fixed-cost board root. Page 100 is the maximum
 // 10,000-row window at the maximum page size.
@@ -1096,6 +1354,12 @@ const asInteger = (value: unknown): number | null => {
 
 const isSafeInteger = (value: unknown): value is number =>
 	typeof value === "number" && Number.isSafeInteger(value);
+
+const isNonNegativeSafeInteger = (value: unknown): value is number =>
+	isSafeInteger(value) && value >= 0;
+
+const isPositiveSafeInteger = (value: unknown): value is number =>
+	isSafeInteger(value) && value > 0;
 
 const isoString = (value: Date | string | null): string | null => {
 	if (value === null) return null;
@@ -1197,23 +1461,53 @@ const isReviewContext = (value: unknown): value is MyFplReviewContext =>
 		value.latestPublishedEventId,
 	].every((item) => item === null || isSafeInteger(item));
 
-const isSnapshotMeta = (value: unknown): value is MyFplSnapshotMeta =>
-	isTypedRecord(value, {
-		revision: (candidate) => typeof candidate === "string",
-		eventId: isSafeInteger,
-		snapshotDate: isCalendarDate,
-		sourceCheckedAt: isIsoDateTime,
-		publishedAt: isIsoDateTime,
-		kind: (candidate) => candidate === "PROVISIONAL" || candidate === "FINAL",
-		freshness: (candidate) =>
-			candidate === "CURRENT" || candidate === "GENERATING" || candidate === "STALE",
-		scoreSource: (candidate) => candidate === "FPL_EVENT_LIVE" || candidate === "FPL_FINAL_RESULT",
-		livePublicationId: isNullableString,
-		liveRevision: isNullableString,
-		algorithmVersion: isNullableString,
-		sourceMinCheckedAt: isIsoDateTime,
-		sourceMaxCheckedAt: isIsoDateTime,
-	});
+const isSnapshotMeta = (value: unknown): value is MyFplSnapshotMeta => {
+	if (
+		!isTypedRecord(value, {
+			revision: (candidate) => typeof candidate === "string",
+			eventId: isSafeInteger,
+			snapshotDate: isCalendarDate,
+			sourceCheckedAt: isIsoDateTime,
+			publishedAt: isIsoDateTime,
+			settlementState: (candidate) =>
+				candidate === "PROVISIONAL" ||
+				candidate === "FINALIZING" ||
+				candidate === "FINAL" ||
+				candidate === "DELAYED",
+			coverageState: (candidate) => candidate === "COMPLETE" || candidate === "CORRECTION_PENDING",
+			timelinessState: (candidate) => candidate === "CURRENT" || candidate === "STALE",
+			expectedEntryCount: (candidate) => isSafeInteger(candidate) && candidate >= 0,
+			observedEntryCount: (candidate) => isSafeInteger(candidate) && candidate >= 0,
+			finalizationStartedAt: (candidate) => candidate === null || isIsoDateTime(candidate),
+			finalizationDueAt: (candidate) => candidate === null || isIsoDateTime(candidate),
+			scoreSource: (candidate) =>
+				candidate === "FPL_EVENT_LIVE" || candidate === "FPL_FINAL_RESULT",
+			livePublicationId: isNullableString,
+			liveRevision: isNullableString,
+			algorithmVersion: isNullableString,
+			sourceMinCheckedAt: isIsoDateTime,
+			sourceMaxCheckedAt: isIsoDateTime,
+		})
+	) {
+		return false;
+	}
+	const candidate = value as MyFplSnapshotMeta;
+	if (candidate.observedEntryCount > candidate.expectedEntryCount) return false;
+	const startedAt = candidate.finalizationStartedAt;
+	const dueAt = candidate.finalizationDueAt;
+	if ((startedAt === null) !== (dueAt === null)) return false;
+	if (
+		startedAt !== null &&
+		dueAt !== null &&
+		Date.parse(dueAt) !== Date.parse(startedAt) + 4_500_000
+	) {
+		return false;
+	}
+	if (candidate.settlementState === "FINAL" && candidate.coverageState !== "COMPLETE") {
+		return false;
+	}
+	return true;
+};
 
 const isNullableSafeInteger = (value: unknown): value is number | null =>
 	value === null || isSafeInteger(value);
@@ -1738,14 +2032,15 @@ const currentUtc8Minutes = (now = new Date()): number => {
 	return hour * 60 + minute;
 };
 
-const snapshotFreshness = (
+const snapshotTimeliness = (
 	snapshotDate: string,
 	kind: MyFplSnapshotKind,
 	now = new Date()
-): MyFplSnapshotFreshness => {
-	// FINAL is immutable by normal automation. It never becomes stale merely
-	// because the calendar moved on; only a still-provisional event participates
-	// in the next daily obligation window.
+): MyFplTimelinessState => {
+	// A final revision is immutable and therefore remains current even when a
+	// later calendar day starts. A provisional revision is current for the
+	// capture day and through the daily 12:00 UTC+8 completion boundary on the
+	// following day; after that boundary consumers must call it stale.
 	if (kind === "FINAL" || snapshotDate === currentUtc8DateKey(now)) return "CURRENT";
 	const snapshotOrdinal = utcDateOrdinal(snapshotDate);
 	const currentOrdinal = utcDateOrdinal(currentUtc8DateKey(now));
@@ -1756,11 +2051,26 @@ const snapshotFreshness = (
 	) {
 		return "STALE";
 	}
-	const minute = currentUtc8Minutes(now);
-	if (minute < 10 * 60 + 45) return "CURRENT";
-	return kind === "PROVISIONAL" && minute >= 10 * 60 + 45 && minute < 13 * 60 + 45
-		? "GENERATING"
-		: "STALE";
+	return currentUtc8Minutes(now) < 12 * 60 ? "CURRENT" : "STALE";
+};
+
+const settlementStateFromRow = (row: DbSnapshotPublicationRow): MyFplSettlementState => {
+	if (!row.lifecycle_data_checked) return "PROVISIONAL";
+	const expected = row.status_expected_entry_count;
+	const observed = row.observed_entry_count;
+	const complete =
+		row.kind === "FINAL" &&
+		row.coverage_state === "COMPLETE" &&
+		Number.isSafeInteger(expected) &&
+		Number.isSafeInteger(observed) &&
+		expected === observed &&
+		row.status_expected_tournament_count === row.observed_tournament_count &&
+		row.expected_entry_scope_sha256 === row.observed_entry_scope_sha256 &&
+		row.expected_tournament_scope_sha256 === row.observed_tournament_scope_sha256;
+	if (complete) return "FINAL";
+	const dueAt = isoString(row.finalization_due_at);
+	if (dueAt && Date.now() >= Date.parse(dueAt)) return "DELAYED";
+	return "FINALIZING";
 };
 
 const SNAPSHOT_PUBLICATION_UUID_RE =
@@ -1774,6 +2084,8 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 	const sourceCheckedAt = isoString(row.source_checked_at);
 	const sourceMinCheckedAt = isoString(row.source_min_checked_at);
 	const sourceMaxCheckedAt = isoString(row.source_max_checked_at);
+	const finalizationStartedAt = isoString(row.finalization_started_at);
+	const finalizationDueAt = isoString(row.finalization_due_at);
 	if (
 		!Number.isSafeInteger(row.expected_entry_count) ||
 		row.expected_entry_count < 0 ||
@@ -1784,16 +2096,79 @@ const isValidSnapshotPublicationRow = (row: DbSnapshotPublicationRow): boolean =
 		!Number.isSafeInteger(row.not_applicable_entry_count) ||
 		row.not_applicable_entry_count < 0 ||
 		row.ready_entry_count + row.empty_entry_count !== row.expected_entry_count ||
+		row.observed_entry_count !== row.expected_entry_count ||
 		!Number.isSafeInteger(row.expected_tournament_count) ||
 		row.expected_tournament_count < 0 ||
 		!Number.isSafeInteger(row.ready_tournament_count) ||
 		row.ready_tournament_count !== row.expected_tournament_count ||
+		row.observed_tournament_count !== row.ready_tournament_count ||
+		!Number.isSafeInteger(row.status_expected_entry_count) ||
+		row.status_expected_entry_count < 0 ||
+		row.status_expected_entry_count < row.expected_entry_count ||
+		!Number.isSafeInteger(row.observed_entry_count) ||
+		row.observed_entry_count < 0 ||
+		row.observed_entry_count > row.status_expected_entry_count ||
+		!Number.isSafeInteger(row.pending_correction_entry_count) ||
+		row.pending_correction_entry_count !==
+			row.status_expected_entry_count - row.observed_entry_count ||
+		!Number.isSafeInteger(row.status_expected_tournament_count) ||
+		row.status_expected_tournament_count < 0 ||
+		row.status_expected_tournament_count < row.expected_tournament_count ||
+		!Number.isSafeInteger(row.observed_tournament_count) ||
+		row.observed_tournament_count < 0 ||
+		row.observed_tournament_count > row.status_expected_tournament_count ||
+		(row.status_expected_entry_count !== row.observed_entry_count &&
+			row.expected_entry_scope_sha256 === row.observed_entry_scope_sha256) ||
+		(row.status_expected_tournament_count !== row.observed_tournament_count &&
+			row.expected_tournament_scope_sha256 === row.observed_tournament_scope_sha256) ||
+		(row.coverage_state === "COMPLETE" &&
+			(row.pending_correction_entry_count !== 0 ||
+				row.status_expected_entry_count !== row.observed_entry_count ||
+				row.status_expected_tournament_count !== row.observed_tournament_count ||
+				row.expected_entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+				row.expected_tournament_scope_sha256 !== row.observed_tournament_scope_sha256)) ||
+		typeof row.lifecycle_finished !== "boolean" ||
+		typeof row.lifecycle_data_checked !== "boolean" ||
+		(row.lifecycle_data_checked
+			? !finalizationStartedAt ||
+				!finalizationDueAt ||
+				Date.parse(finalizationDueAt) !== Date.parse(finalizationStartedAt) + 4_500_000
+			: finalizationStartedAt !== null || finalizationDueAt !== null) ||
+		(row.lifecycle_data_checked && !row.lifecycle_finished) ||
+		typeof row.entry_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.entry_scope_sha256) ||
+		typeof row.tournament_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.tournament_scope_sha256) ||
+		typeof row.expected_entry_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.expected_entry_scope_sha256) ||
+		typeof row.observed_entry_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.observed_entry_scope_sha256) ||
+		typeof row.expected_tournament_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.expected_tournament_scope_sha256) ||
+		typeof row.observed_tournament_scope_sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(row.observed_tournament_scope_sha256) ||
 		!/^[0-9a-f]{64}$/.test(row.content_sha256) ||
 		!sourceCheckedAt ||
 		!sourceMinCheckedAt ||
 		!sourceMaxCheckedAt ||
+		(row.coverage_state !== "COMPLETE" && row.coverage_state !== "CORRECTION_PENDING") ||
+		row.entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+		row.tournament_scope_sha256 !== row.observed_tournament_scope_sha256 ||
 		Date.parse(sourceCheckedAt) !== Date.parse(sourceMinCheckedAt) ||
 		Date.parse(sourceMinCheckedAt) > Date.parse(sourceMaxCheckedAt)
+	) {
+		return false;
+	}
+	if (
+		row.kind === "FINAL" &&
+		(!row.lifecycle_finished ||
+			!row.lifecycle_data_checked ||
+			row.coverage_state !== "COMPLETE" ||
+			row.status_expected_entry_count !== row.observed_entry_count ||
+			row.status_expected_tournament_count !== row.observed_tournament_count ||
+			row.pending_correction_entry_count !== 0 ||
+			row.expected_entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+			row.expected_tournament_scope_sha256 !== row.observed_tournament_scope_sha256)
 	) {
 		return false;
 	}
@@ -1824,20 +2199,39 @@ const publicationFromRow = (row: DbSnapshotPublicationRow): MyFplSnapshotPublica
 	sourceCheckedAt: isoString(row.source_checked_at) ?? new Date(0).toISOString(),
 	publishedAt: isoString(row.published_at) ?? new Date(0).toISOString(),
 	kind: row.kind,
-	freshness: snapshotFreshness(snapshotDateKey(row.snapshot_date), row.kind),
+	settlementState: settlementStateFromRow(row),
+	coverageState:
+		row.pending_correction_entry_count > 0 ||
+		row.status_expected_entry_count !== row.observed_entry_count ||
+		row.status_expected_tournament_count !== row.observed_tournament_count ||
+		row.expected_entry_scope_sha256 !== row.observed_entry_scope_sha256 ||
+		row.expected_tournament_scope_sha256 !== row.observed_tournament_scope_sha256 ||
+		row.coverage_state === "CORRECTION_PENDING"
+			? "CORRECTION_PENDING"
+			: "COMPLETE",
+	timelinessState: snapshotTimeliness(snapshotDateKey(row.snapshot_date), row.kind),
+	expectedEntryCount: row.status_expected_entry_count,
+	observedEntryCount: row.observed_entry_count,
+	finalizationStartedAt: isoString(row.finalization_started_at),
+	finalizationDueAt: isoString(row.finalization_due_at),
 	scoreSource: row.score_source!,
 	livePublicationId: row.live_publication_id,
 	liveRevision: row.live_revision,
 	algorithmVersion: row.algorithm_version,
 	sourceMinCheckedAt: isoString(row.source_min_checked_at)!,
 	sourceMaxCheckedAt: isoString(row.source_max_checked_at)!,
-	expectedEntryCount: row.expected_entry_count,
 	readyEntryCount: row.ready_entry_count,
 	emptyEntryCount: row.empty_entry_count,
 	notApplicableEntryCount: row.not_applicable_entry_count,
-	expectedTournamentCount: row.expected_tournament_count,
+	expectedTournamentCount: row.status_expected_tournament_count,
 	readyTournamentCount: row.ready_tournament_count,
+	capturedExpectedEntryCount: row.expected_entry_count,
+	capturedExpectedTournamentCount: row.expected_tournament_count,
 	contentSha256: row.content_sha256,
+	entryScopeSha256: row.entry_scope_sha256!,
+	tournamentScopeSha256: row.tournament_scope_sha256!,
+	expectedEntryScopeSha256: row.expected_entry_scope_sha256!,
+	expectedTournamentScopeSha256: row.expected_tournament_scope_sha256!,
 });
 
 /**
@@ -1856,6 +2250,7 @@ export const parseSnapshotPublicationRow = (row: unknown): MyFplSnapshotPublicat
 const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPublication => {
 	if (!isRecord(value) || !isSnapshotMeta(value)) return false;
 	const candidate = value as MyFplSnapshotPublication;
+	if (!isSnapshotKind(candidate.kind)) return false;
 	const sourceShapeValid =
 		candidate.kind === "PROVISIONAL"
 			? candidate.scoreSource === "FPL_EVENT_LIVE" &&
@@ -1875,17 +2270,49 @@ const isSnapshotPublicationCache = (value: unknown): value is MyFplSnapshotPubli
 		Date.parse(candidate.sourceMinCheckedAt) <= Date.parse(candidate.sourceMaxCheckedAt) &&
 		isSafeInteger(candidate.expectedEntryCount) &&
 		candidate.expectedEntryCount >= 0 &&
+		isSafeInteger(candidate.capturedExpectedEntryCount) &&
+		candidate.capturedExpectedEntryCount >= 0 &&
 		isSafeInteger(candidate.readyEntryCount) &&
 		candidate.readyEntryCount >= 0 &&
 		isSafeInteger(candidate.emptyEntryCount) &&
 		candidate.emptyEntryCount >= 0 &&
 		isSafeInteger(candidate.notApplicableEntryCount) &&
 		candidate.notApplicableEntryCount >= 0 &&
-		candidate.readyEntryCount + candidate.emptyEntryCount === candidate.expectedEntryCount &&
+		candidate.readyEntryCount + candidate.emptyEntryCount ===
+			candidate.capturedExpectedEntryCount &&
 		isSafeInteger(candidate.expectedTournamentCount) &&
 		candidate.expectedTournamentCount >= 0 &&
+		isSafeInteger(candidate.capturedExpectedTournamentCount) &&
+		candidate.capturedExpectedTournamentCount >= 0 &&
 		isSafeInteger(candidate.readyTournamentCount) &&
-		candidate.readyTournamentCount === candidate.expectedTournamentCount &&
+		candidate.readyTournamentCount >= 0 &&
+		candidate.readyTournamentCount === candidate.capturedExpectedTournamentCount &&
+		isSafeInteger(candidate.observedEntryCount) &&
+		candidate.observedEntryCount >= 0 &&
+		candidate.observedEntryCount <= candidate.expectedEntryCount &&
+		candidate.observedEntryCount === candidate.capturedExpectedEntryCount &&
+		(candidate.expectedEntryCount === candidate.observedEntryCount ||
+			candidate.expectedEntryScopeSha256 !== candidate.entryScopeSha256) &&
+		candidate.readyTournamentCount <= candidate.expectedTournamentCount &&
+		(candidate.expectedTournamentCount === candidate.readyTournamentCount ||
+			candidate.expectedTournamentScopeSha256 !== candidate.tournamentScopeSha256) &&
+		(candidate.coverageState === "CORRECTION_PENDING"
+			? candidate.kind === "PROVISIONAL"
+			: candidate.coverageState ===
+				(candidate.observedEntryCount === candidate.expectedEntryCount &&
+				candidate.readyTournamentCount === candidate.expectedTournamentCount &&
+				candidate.expectedEntryScopeSha256 === candidate.entryScopeSha256 &&
+				candidate.expectedTournamentScopeSha256 === candidate.tournamentScopeSha256
+					? "COMPLETE"
+					: "CORRECTION_PENDING")) &&
+		typeof candidate.expectedEntryScopeSha256 === "string" &&
+		/^[0-9a-f]{64}$/.test(candidate.expectedEntryScopeSha256) &&
+		typeof candidate.expectedTournamentScopeSha256 === "string" &&
+		/^[0-9a-f]{64}$/.test(candidate.expectedTournamentScopeSha256) &&
+		typeof candidate.entryScopeSha256 === "string" &&
+		/^[0-9a-f]{64}$/.test(candidate.entryScopeSha256) &&
+		typeof candidate.tournamentScopeSha256 === "string" &&
+		/^[0-9a-f]{64}$/.test(candidate.tournamentScopeSha256) &&
 		typeof candidate.contentSha256 === "string" &&
 		/^[0-9a-f]{64}$/.test(candidate.contentSha256)
 	);
@@ -2079,6 +2506,96 @@ export const parseSnapshotEntryPayload = (value: unknown): SnapshotEntryPayload 
 	};
 };
 
+const isAuthoritativeFinalUnrankedFirstEvent = (payload: SnapshotEntryPayload): boolean => {
+	const result = payload.gameweek.result;
+	const firstScoringEvent = Math.max(1, payload.entry.startedEvent ?? 1);
+	return (
+		result !== null &&
+		result.eventId === firstScoringEvent &&
+		payload.entry.overallPoints === 0 &&
+		result.overallPoints === 0 &&
+		payload.entry.overallRank === 0 &&
+		!payload.review.timeline.some((row) => row.eventId < result.eventId) &&
+		payload.review.timeline.every((row) => row.overallPoints === 0)
+	);
+};
+
+const isFinalManagerGameweekCacheValid = (
+	value: MyFplManagerGameweek,
+	settlementState: MyFplSettlementState,
+	eventId: number,
+	authoritativePayload: SnapshotEntryPayload
+): boolean => {
+	// This cache is reached only after the pinned snapshot has proved that the
+	// gameweek is READY and non-empty. Any other cached state is contradictory
+	// and must fall through to the authoritative PostgreSQL snapshot.
+	const authoritativeResult = authoritativePayload.gameweek.result;
+	if (
+		value.state !== "READY" ||
+		!value.entry ||
+		!value.result ||
+		!value.review ||
+		authoritativePayload.gameweek.state !== "READY" ||
+		!authoritativeResult ||
+		!authoritativePayload.review.timeline.some((row) => row.eventId === eventId)
+	) {
+		return false;
+	}
+	if (settlementState !== "FINAL") return true;
+	// Never infer the first-event unranked exception from cache-controlled
+	// fields. The exception belongs to the already validated pinned snapshot.
+	const allowUnrankedFirstEvent = isAuthoritativeFinalUnrankedFirstEvent(authoritativePayload);
+	const rankIsValid = (rank: unknown): boolean =>
+		allowUnrankedFirstEvent ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
+	return (
+		value.entry.id === authoritativePayload.entry.id &&
+		value.entry.overallPoints === authoritativePayload.entry.overallPoints &&
+		value.entry.overallRank === authoritativePayload.entry.overallRank &&
+		value.result.eventId === authoritativeResult.eventId &&
+		value.result.overallPoints === authoritativeResult.overallPoints &&
+		value.result.eventRank === authoritativeResult.eventRank &&
+		value.result.overallRank === authoritativeResult.overallRank &&
+		rankIsValid(value.entry.overallRank) &&
+		rankIsValid(value.result.eventRank) &&
+		rankIsValid(value.result.overallRank)
+	);
+};
+
+const isFinalSnapshotEntryPayloadValid = (
+	payload: SnapshotEntryPayload,
+	settlementState: MyFplSettlementState
+): boolean => {
+	if (settlementState !== "FINAL" || payload.gameweek.state === "EMPTY") return true;
+	const allowUnrankedFirstEvent = isAuthoritativeFinalUnrankedFirstEvent(payload);
+	const gameweekResult = payload.gameweek.result;
+	const rankIsValid = (rank: unknown, allowZero: boolean): boolean =>
+		allowZero ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
+	return (
+		payload.entry.overallRank !== null &&
+		rankIsValid(payload.entry.overallRank, allowUnrankedFirstEvent) &&
+		rankIsValid(
+			gameweekResult?.eventRank ?? null,
+			allowUnrankedFirstEvent && gameweekResult?.eventId === payload.gameweek.eventId
+		) &&
+		rankIsValid(
+			gameweekResult?.overallRank ?? null,
+			allowUnrankedFirstEvent && gameweekResult?.eventId === payload.gameweek.eventId
+		) &&
+		payload.review.timeline.every(
+			(row) =>
+				row.status === "FINAL" &&
+				rankIsValid(
+					row.eventRank,
+					allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
+				) &&
+				rankIsValid(
+					row.overallRank,
+					allowUnrankedFirstEvent && row.eventId === payload.gameweek.eventId
+				)
+		)
+	);
+};
+
 export type SnapshotEntryContractRow = Readonly<{
 	payload: SnapshotEntryPayload;
 	isEmpty: boolean;
@@ -2096,7 +2613,12 @@ export const parseSnapshotEntryContractRow = (
 	value: unknown,
 	publication: Pick<
 		MyFplSnapshotPublication,
-		"expectedEntryCount" | "notApplicableEntryCount" | "expectedTournamentCount"
+		| "expectedEntryCount"
+		| "notApplicableEntryCount"
+		| "expectedTournamentCount"
+		| "capturedExpectedEntryCount"
+		| "capturedExpectedTournamentCount"
+		| "settlementState"
 	>,
 	entryId: number,
 	eventId: number
@@ -2121,8 +2643,10 @@ export const parseSnapshotEntryContractRow = (
 		isEmpty !== (payload.gameweek.state === "EMPTY") ||
 		(isEmpty && picksCount !== 0) ||
 		(!isEmpty && (payload.gameweek.state !== "READY" || picksCount !== 15)) ||
-		entryRowCount !== publication.expectedEntryCount + publication.notApplicableEntryCount ||
-		aggregateRowCount !== publication.expectedTournamentCount
+		entryRowCount !==
+			publication.capturedExpectedEntryCount + publication.notApplicableEntryCount ||
+		aggregateRowCount !== publication.capturedExpectedTournamentCount ||
+		!isFinalSnapshotEntryPayloadValid(payload, publication.settlementState)
 	) {
 		return null;
 	}
@@ -2146,10 +2670,14 @@ type LoadedSnapshotEntry = {
 	isEmpty: boolean;
 };
 
-const parseLoadedSnapshotEntryCache = (value: unknown): LoadedSnapshotEntry | null => {
+const parseLoadedSnapshotEntryCache = (
+	value: unknown,
+	authoritativeSettlementState: MyFplSettlementState
+): LoadedSnapshotEntry | null => {
 	if (!isRecord(value) || !isSnapshotPublicationCache(value.publication)) return null;
 	const payload = parseSnapshotEntryPayload(value.payload);
 	if (!payload || typeof value.isEmpty !== "boolean") return null;
+	if (!isFinalSnapshotEntryPayloadValid(payload, authoritativeSettlementState)) return null;
 	if (
 		value.isEmpty !== (payload.gameweek.state === "EMPTY") ||
 		payload.gameweek.eventId !== payload.review.throughEventId ||
@@ -2183,7 +2711,7 @@ const loadSnapshotEntry = async (
 		`my-fpl:${PROJECTION_VERSION}:snapshot-entry:${eventId}:${pinned}:${requireViewerEntryId(context)}`
 	);
 	const cached = await readMyFplCache(context, cacheKey, (value): value is LoadedSnapshotEntry => {
-		const parsed = parseLoadedSnapshotEntryCache(value);
+		const parsed = parseLoadedSnapshotEntryCache(value, publication.settlementState);
 		return Boolean(
 			parsed &&
 			parsed.publication.revision === publication.revision &&
@@ -2302,7 +2830,14 @@ const loadManagerGameweekPrepared = async (
 		context,
 		cacheKey,
 		(value): value is MyFplManagerGameweek =>
-			isManagerGameweekCache(value) && value.eventId === eventId
+			isManagerGameweekCache(value) &&
+			value.eventId === eventId &&
+			isFinalManagerGameweekCacheValid(
+				value,
+				snapshot.publication.settlementState,
+				eventId,
+				snapshot.payload
+			)
 	);
 	if (cached) {
 		return {
@@ -3157,6 +3692,7 @@ export const myFplTestables = {
 	positionName,
 	mapBoardJsonRow,
 	snapshotDateKey,
-	snapshotFreshness,
+	snapshotTimeliness,
+	settlementStateFromRow,
 	compareSnapshotRevisions,
 };
