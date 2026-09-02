@@ -877,6 +877,8 @@ describe("My Tournament Review V2 repository", () => {
 								format: "POINTS",
 								content_sha256: observed.content_sha256,
 								event_data_checked_at: observed.event_data_checked_at,
+								source_min_checked_at: observed.source_min_checked_at,
+								source_max_checked_at: observed.source_max_checked_at,
 								published_at: observed.published_at,
 								row_count: observed.row_count,
 								expected_subject_count: observed.expected_subject_count,
@@ -3889,5 +3891,35 @@ describe("My Tournament Review V2 repository", () => {
 
 		const result = await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
 		expect(result.scope).toMatchObject({ tournamentId: 6953, eventId: 4, revision: "8" });
+	});
+
+	it("rejects cached Gameweek freshness that differs from the observed head", async () => {
+		const redis = new TestRedis();
+		const publication = publicationRow();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [publication] }),
+		});
+		const repository = createMyTournamentReviewRepository();
+		await repository.loadGameweekReview(context, { tournamentId: 6953, eventId: 4 });
+		const cacheKey = [...redis.values.keys()][0];
+		expect(cacheKey).toBeDefined();
+		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
+			scope: { freshness: { eventDataCheckedAt: string; publishedAt: string } };
+		};
+		cached.scope.freshness = {
+			...cached.scope.freshness,
+			eventDataCheckedAt: "2026-08-20T00:00:00.500Z",
+			publishedAt: "2026-08-20T00:00:04.000Z",
+		};
+		redis.values.set(cacheKey!, JSON.stringify(cached));
+
+		const result = await repository.loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.scope?.freshness).toMatchObject({
+			eventDataCheckedAt: "2026-08-20T00:00:00.000Z",
+			publishedAt: "2026-08-20T00:00:03.000Z",
+		});
 	});
 });

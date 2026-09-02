@@ -1356,6 +1356,8 @@ type ReviewHeadRow = {
 	content_sha256: string | null;
 	correction_change_id?: string | null;
 	event_data_checked_at: Date | string | null;
+	source_min_checked_at?: Date | string | null;
+	source_max_checked_at?: Date | string | null;
 	published_at: Date | string | null;
 	obligation_state?: string | null;
 	active_revision?: number | string | null;
@@ -1416,9 +1418,11 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 		       head.revision,
 		       publication.format,
 		       head.content_sha256,
-		       publication.correction_change_id,
-		       publication.event_data_checked_at,
-		       publication.published_at,
+			publication.correction_change_id,
+			publication.event_data_checked_at,
+			publication.source_min_checked_at,
+			publication.source_max_checked_at,
+			publication.published_at,
 		       publication.row_count,
 		       publication.expected_subject_count,
 		       publication.ready_subject_count,
@@ -1452,9 +1456,11 @@ export const MY_TOURNAMENT_REVIEW_HEAD_SQL = `
 	       selected.revision,
 	       selected.format,
 	       selected.content_sha256,
-	       selected.correction_change_id,
-	       selected.event_data_checked_at,
-	       selected.published_at,
+		selected.correction_change_id,
+		selected.event_data_checked_at,
+		selected.source_min_checked_at,
+		selected.source_max_checked_at,
+		selected.published_at,
 	       selected.row_count,
 	       selected.expected_subject_count,
 	       selected.ready_subject_count,
@@ -3976,6 +3982,10 @@ type GameweekCacheHead = {
 	revision: string;
 	format: MyTournamentReviewFormat;
 	contentSha256: string;
+	eventDataCheckedAt: string;
+	sourceMinCheckedAt: string;
+	sourceMaxCheckedAt: string;
+	publishedAt: string;
 	correctedAt: string | null;
 	rowCount: number;
 	expectedSubjectCount: number;
@@ -4013,6 +4023,8 @@ function gameweekCache(
 	}
 	if (!scopeMetaCache(value.scope)) return false;
 	const scope = value.scope;
+	const freshness = scope.freshness;
+	if (!freshness) return false;
 	if (
 		expectedHead !== undefined &&
 		(scope.tournamentId !== expectedHead.tournamentId ||
@@ -4020,6 +4032,10 @@ function gameweekCache(
 			scope.revision !== expectedHead.revision ||
 			scope.format !== expectedHead.format ||
 			scope.contentSha256 !== expectedHead.contentSha256 ||
+			freshness.eventDataCheckedAt !== expectedHead.eventDataCheckedAt ||
+			freshness.sourceMinCheckedAt !== expectedHead.sourceMinCheckedAt ||
+			freshness.sourceMaxCheckedAt !== expectedHead.sourceMaxCheckedAt ||
+			freshness.publishedAt !== expectedHead.publishedAt ||
 			(scope.correctedAt ?? null) !== expectedHead.correctedAt ||
 			scope.rowCount !== expectedHead.rowCount ||
 			scope.expectedSubjectCount !== expectedHead.expectedSubjectCount ||
@@ -6163,6 +6179,22 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 		]);
 		const metadata = headResult.rows[0] ?? null;
 		const head = metadata ? optionalReviewHeadRow(metadata) : null;
+		const headEventDataCheckedAt = head ? iso(metadata?.event_data_checked_at) : null;
+		const headSourceMinCheckedAt = head ? iso(metadata?.source_min_checked_at) : null;
+		const headSourceMaxCheckedAt = head ? iso(metadata?.source_max_checked_at) : null;
+		const headPublishedAt = head ? iso(metadata?.published_at) : null;
+		if (
+			head &&
+			(!headEventDataCheckedAt ||
+				!headSourceMinCheckedAt ||
+				!headSourceMaxCheckedAt ||
+				!headPublishedAt ||
+				Date.parse(headEventDataCheckedAt) > Date.parse(headSourceMinCheckedAt) ||
+				Date.parse(headSourceMinCheckedAt) > Date.parse(headSourceMaxCheckedAt) ||
+				Date.parse(headSourceMaxCheckedAt) > Date.parse(headPublishedAt))
+		) {
+			throw integrityError("Review head freshness metadata is invalid");
+		}
 		const activeRevision =
 			metadata?.active_revision === null || metadata?.active_revision === undefined
 				? null
@@ -6219,6 +6251,10 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 								revision: String(head.revision),
 								format: reviewFormat(head.format)!,
 								contentSha256: head.content_sha256,
+								eventDataCheckedAt: headEventDataCheckedAt!,
+								sourceMinCheckedAt: headSourceMinCheckedAt!,
+								sourceMaxCheckedAt: headSourceMaxCheckedAt!,
+								publishedAt: headPublishedAt!,
 								correctedAt: head.correction_change_id ? iso(head.published_at) : null,
 								rowCount: Number(head.row_count),
 								expectedSubjectCount: Number(head.expected_subject_count),
