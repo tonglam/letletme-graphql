@@ -973,7 +973,7 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 	) previous_ready ON true
 	LEFT JOIN LATERAL (
 		SELECT state AS latest_state, format, next_attempt_at, execution_attempts,
-		       source_rechecks, degraded_at, ready_revision, published_at
+		       source_rechecks, degraded_at, ready_revision, review_obligation.published_at
 		FROM competition.tournament_review_obligations review_obligation
 		WHERE review_obligation.season_id = tournament.season_id
 		  AND review_obligation.tournament_id = tournament.tournament_id
@@ -983,7 +983,7 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 	) obligation ON true
 	LEFT JOIN LATERAL (
 		SELECT state, format, next_attempt_at, execution_attempts,
-		       source_rechecks, degraded_at, ready_revision, published_at
+		       source_rechecks, degraded_at, ready_revision, review_obligation.published_at
 		FROM competition.tournament_review_obligations review_obligation
 		WHERE review_obligation.season_id = tournament.season_id
 		  AND review_obligation.tournament_id = tournament.tournament_id
