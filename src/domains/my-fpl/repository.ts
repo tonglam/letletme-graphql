@@ -2523,18 +2523,38 @@ const isAuthoritativeFinalUnrankedFirstEvent = (payload: SnapshotEntryPayload): 
 const isFinalManagerGameweekCacheValid = (
 	value: MyFplManagerGameweek,
 	settlementState: MyFplSettlementState,
-	eventId: number
+	eventId: number,
+	authoritativePayload: SnapshotEntryPayload
 ): boolean => {
-	if (settlementState !== "FINAL" || value.state === "EMPTY") return true;
-	if (value.state !== "READY" || !value.entry || !value.result) return false;
-	const allowUnrankedFirstEvent =
-		eventId === Math.max(1, value.entry.startedEvent ?? 1) &&
-		value.entry.overallPoints === 0 &&
-		value.entry.overallRank === 0 &&
-		value.result.overallPoints === 0;
+	// This cache is reached only after the pinned snapshot has proved that the
+	// gameweek is READY and non-empty. Any other cached state is contradictory
+	// and must fall through to the authoritative PostgreSQL snapshot.
+	const authoritativeResult = authoritativePayload.gameweek.result;
+	if (
+		value.state !== "READY" ||
+		!value.entry ||
+		!value.result ||
+		!value.review ||
+		authoritativePayload.gameweek.state !== "READY" ||
+		!authoritativeResult ||
+		!authoritativePayload.review.timeline.some((row) => row.eventId === eventId)
+	) {
+		return false;
+	}
+	if (settlementState !== "FINAL") return true;
+	// Never infer the first-event unranked exception from cache-controlled
+	// fields. The exception belongs to the already validated pinned snapshot.
+	const allowUnrankedFirstEvent = isAuthoritativeFinalUnrankedFirstEvent(authoritativePayload);
 	const rankIsValid = (rank: unknown): boolean =>
 		allowUnrankedFirstEvent ? isNonNegativeSafeInteger(rank) : isPositiveSafeInteger(rank);
 	return (
+		value.entry.id === authoritativePayload.entry.id &&
+		value.entry.overallPoints === authoritativePayload.entry.overallPoints &&
+		value.entry.overallRank === authoritativePayload.entry.overallRank &&
+		value.result.eventId === authoritativeResult.eventId &&
+		value.result.overallPoints === authoritativeResult.overallPoints &&
+		value.result.eventRank === authoritativeResult.eventRank &&
+		value.result.overallRank === authoritativeResult.overallRank &&
 		rankIsValid(value.entry.overallRank) &&
 		rankIsValid(value.result.eventRank) &&
 		rankIsValid(value.result.overallRank)
@@ -2812,7 +2832,12 @@ const loadManagerGameweekPrepared = async (
 		(value): value is MyFplManagerGameweek =>
 			isManagerGameweekCache(value) &&
 			value.eventId === eventId &&
-			isFinalManagerGameweekCacheValid(value, snapshot.publication.settlementState, eventId)
+			isFinalManagerGameweekCacheValid(
+				value,
+				snapshot.publication.settlementState,
+				eventId,
+				snapshot.payload
+			)
 	);
 	if (cached) {
 		return {
