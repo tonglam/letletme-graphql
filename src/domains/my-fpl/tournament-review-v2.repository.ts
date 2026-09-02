@@ -4428,6 +4428,11 @@ function seasonSectionCache(
 				: typedH2H.standings
 			: typedKnockout!.matches;
 	const pageLength = pageRows.length;
+	// A cache hit must represent the canonical slice for this cursor, not a
+	// self-consistent empty/truncated page that repeats the same continuation
+	// cursor forever.  The producer's bounded page reader always returns the
+	// exact min(first, remaining rows), including the zero-row terminal page.
+	const expectedPageLength = Math.min(expected.first, expectedRowCount - pageOffset);
 	const publicPageOffset = typedPoints
 		? typedPoints.aggregateWitness.pageOffset
 		: typedH2H
@@ -4438,7 +4443,8 @@ function seasonSectionCache(
 		pageLength > expected.first ||
 		pageOffset < selectedStart ||
 		pageOffset + pageLength > selectedStart + selectedLength ||
-		pageOffset + pageLength > expectedRowCount
+		pageOffset + pageLength > expectedRowCount ||
+		pageLength !== expectedPageLength
 	) {
 		return false;
 	}
@@ -6732,16 +6738,27 @@ export const createMyTournamentReviewRepository = (): MyTournamentReviewReposito
 				endCursor: sectionValue.nextCursor,
 			},
 		};
-		pageResult.__sectionWitness = {
-			pageOffset: sectionPage.pageOffset,
-			sourceRows: sectionPage.chunkRows.flatMap((chunk) =>
-				Array.isArray(chunk.items) ? (chunk.items as unknown[]) : []
-			),
-			chunkIndexes: sectionPage.chunkIndexes,
-			chunkHashes: sectionPage.chunkHashes,
-			chunkItemCounts: sectionPage.chunkItemCounts,
-		};
-		await writeJsonQueryCache(context, key, pageResult, REVIEW_CACHE_TTL_SECONDS);
+		const witnessRows = sectionPage.chunkRows.flatMap((chunk) =>
+			Array.isArray(chunk.items) ? (chunk.items as unknown[]) : []
+		);
+		// A page that cuts through a producer chunk would otherwise retain the
+		// entire surrounding chunk (including unrequested entry/player identities)
+		// only to authenticate a future Redis hit.  Keep the witness bounded to
+		// pages that cover their selected chunks exactly; smaller/intersecting
+		// pages remain correct PostgreSQL reads and are deliberately not cached.
+		const cacheableChunkWitness =
+			sectionPage.pageOffset === sectionPage.selectedStart &&
+			sectionPage.pageLength === witnessRows.length;
+		if (cacheableChunkWitness) {
+			pageResult.__sectionWitness = {
+				pageOffset: sectionPage.pageOffset,
+				sourceRows: witnessRows,
+				chunkIndexes: sectionPage.chunkIndexes,
+				chunkHashes: sectionPage.chunkHashes,
+				chunkItemCounts: sectionPage.chunkItemCounts,
+			};
+			await writeJsonQueryCache(context, key, pageResult, REVIEW_CACHE_TTL_SECONDS);
+		}
 		return pageResult;
 	},
 
