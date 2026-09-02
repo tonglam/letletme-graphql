@@ -2096,6 +2096,37 @@ describe("Live Matches V3 read path", () => {
 		expect(result.detail).toBeNull();
 	});
 
+	it("uses compatible previous detail metadata when the active manifest is incompatible", async () => {
+		for (const mode of ["HEAD", "DESK"] as const) {
+			resetLiveMatchProcessStateForTests();
+			const redis = new TestRedis();
+			const activeBundle = structuredClone(
+				buildBundle({ deskGeneration: 2, detailGeneration: 12 }).bundle
+			);
+			const previousBundle = structuredClone(
+				buildBundle({ deskGeneration: 1, detailGeneration: 11 }).bundle
+			);
+			if (!activeBundle.detail.active.publication)
+				throw new Error("missing active detail publication");
+			const activePublication = JSON.parse(activeBundle.detail.active.publication) as {
+				fixtureIdentityRevision: string;
+			};
+			activePublication.fixtureIdentityRevision = "f".repeat(64);
+			activeBundle.detail.active.publication = JSON.stringify(activePublication);
+			activeBundle.detail.active.manifest = activeBundle.detail.active.publication;
+			(redis as unknown as { eval: (...args: unknown[]) => Promise<string> }).eval = async (
+				...args
+			) => JSON.stringify(args.at(-2) === "previous" ? previousBundle : activeBundle);
+
+			const result = await readLiveMatchday(buildSnapshotContext(redis), 1, mode);
+
+			expect(result.desk?.servedFrom).toBe("REDIS_CURRENT");
+			expect(result.detailObservation?.servedFrom).toBe("REDIS_PREVIOUS");
+			expect(result.detailObservation?.publication.generation).toBe(11);
+			expect(result.redisRoundtrips).toBe(2);
+		}
+	});
+
 	it("keeps process LKG ahead of PostgreSQL on a Redis outage", async () => {
 		const redis = new TestRedis();
 		const control = attachBundle(

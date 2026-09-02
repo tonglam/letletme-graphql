@@ -186,12 +186,12 @@ const query =
 			liveMatchday(eventId: $eventId) {
 				availability
 				delivery { state servedFrom reasonCodes }
-				snapshot {
-					season eventId state
-					revisions { deskPublicationId deskGeneration lifecycle fixtureIdentity scoreState detailPublicationId detailGeneration playerDetail }
-					times { deskSourceCheckedAt deskContentUpdatedAt deskPublishedAt deskStaleAt detailSourceCheckedAt detailContentUpdatedAt detailPublishedAt detailStaleAt servedAt nextRefreshAt }
-					detailDelivery { state servedFrom reasonCodes }
-				}
+					snapshot {
+						season eventId state
+						revisions { deskPublicationId deskGeneration lifecycle fixtureIdentity scoreState detailObservation detailPublicationId detailGeneration playerDetail }
+						times { deskSourceCheckedAt deskContentUpdatedAt deskPublishedAt deskStaleAt detailSourceCheckedAt detailContentUpdatedAt detailPublishedAt detailStaleAt servedAt nextRefreshAt }
+						detailDelivery { state servedFrom reasonCodes }
+					}
 			}
 		}`
 		: mode === "DESK"
@@ -1030,6 +1030,8 @@ function semanticError(body: unknown): string | null {
 	const snapshot = isRecord(root.snapshot) ? root.snapshot : null;
 	if (!snapshot) return "ready_without_snapshot";
 	const detailDelivery = isRecord(snapshot.detailDelivery) ? snapshot.detailDelivery : null;
+	const revisions = isRecord(snapshot.revisions) ? snapshot.revisions : null;
+	const detailObservation = revisions?.detailObservation;
 	const rootReasonCodes = Array.isArray(delivery?.reasonCodes)
 		? delivery.reasonCodes.filter((value): value is string => typeof value === "string")
 		: [];
@@ -1042,6 +1044,8 @@ function semanticError(body: unknown): string | null {
 	// infrastructure failures cannot be hidden by the capacity harness.
 	const metadataOnlyHead =
 		mode === "HEAD" &&
+		typeof detailObservation === "string" &&
+		/^[0-9a-f]{64}$/.test(detailObservation) &&
 		deliveryState === "DEGRADED" &&
 		delivery?.servedFrom === "REDIS_CURRENT" &&
 		rootReasonCodes.includes("REDIS_CURRENT") &&
