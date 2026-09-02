@@ -153,17 +153,35 @@ export const validateCapacityHealthEndpoint = (url: URL): void => {
 
 const normalizedRoutePath = (url: URL): string => url.pathname.replace(/\/+$/, "") || "/";
 
-const isApiAliasHostname = (left: string, right: string): boolean =>
-	left === `api.${right}` || right === `api.${left}`;
+const isApiAliasHostname = (left: string, right: string): boolean => {
+	const leftIsApi = left.startsWith("api.");
+	const rightIsApi = right.startsWith("api.");
+	if (leftIsApi === rightIsApi) return false;
+	const leftBase = leftIsApi ? left.slice("api.".length) : left;
+	const rightBase = rightIsApi ? right.slice("api.".length) : right;
+	return leftBase === rightBase;
+};
 
 const effectivePort = (url: URL): string => url.port || (url.protocol === "https:" ? "443" : "80");
 
-const validateCapacityHealthBinding = (loadEndpoint: URL, healthEndpoint: URL): void => {
+const validateCapacityHealthBinding = (
+	loadEndpoint: URL,
+	healthEndpoint: URL,
+	explicitOverride: boolean
+): void => {
 	validateCapacityHealthEndpoint(healthEndpoint);
 	if (loadEndpoint.protocol !== healthEndpoint.protocol) {
 		throw new Error("capacity health URLs must use the load endpoint protocol");
 	}
-	if (loadEndpoint.origin === healthEndpoint.origin) return;
+	const loadPath = normalizedRoutePath(loadEndpoint);
+	const healthPath = normalizedRoutePath(healthEndpoint);
+	const routeBound = loadPath !== "/" && healthPath.startsWith(`${loadPath}/health/`);
+	if (loadEndpoint.origin === healthEndpoint.origin) {
+		if (explicitOverride && !routeBound) {
+			throw new Error("capacity health URLs must be bound to the load route");
+		}
+		return;
+	}
 
 	const loopbackAlias =
 		isLoopbackHostname(loadEndpoint.hostname) &&
@@ -177,11 +195,9 @@ const validateCapacityHealthBinding = (loadEndpoint: URL, healthEndpoint: URL): 
 		if (effectivePort(loadEndpoint) !== effectivePort(healthEndpoint)) {
 			throw new Error("cross-origin capacity health URLs must preserve the load endpoint port");
 		}
-		const loadPath = normalizedRoutePath(loadEndpoint);
-		const healthPath = normalizedRoutePath(healthEndpoint);
-		if (loadPath === "/" || !healthPath.startsWith(`${loadPath}/health/`)) {
-			throw new Error("cross-origin capacity health URLs must be bound to the load route");
-		}
+	}
+	if (explicitOverride && !routeBound) {
+		throw new Error("cross-origin capacity health URLs must be bound to the load route");
 	}
 };
 
@@ -239,7 +255,7 @@ const configuredHealthEndpoint = (name: string, defaultPath: string): URL => {
 		throw new Error("capacity health URLs must not include a fragment");
 	}
 	const url = configured ? new URL(configured) : new URL(defaultPath, endpoint.origin);
-	validateCapacityHealthBinding(endpoint, url);
+	validateCapacityHealthBinding(endpoint, url, Boolean(configured));
 	return url;
 };
 

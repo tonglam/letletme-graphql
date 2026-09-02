@@ -145,7 +145,9 @@ origin. Health overrides accept HTTPS, or HTTP only for loopback diagnostics;
 they cannot contain credentials or URL fragments. For example, a public
 GraphQL endpoint at `https://letletme.top/api/graphql` can use the GraphQL
 readiness URL exposed by the API ingress for both identity and readiness
-checks.
+checks. Explicit health overrides must remain on the load route's
+`/health/*` path (and preserve the effective port for an `api.` alias); query
+strings, credentials, fragments, and redirects are rejected.
 
 Required environment names are `LOAD_WEB_ORIGIN`, `LOAD_GRAPHQL_ORIGIN`,
 `BACKEND_PROXY_SECRET`, `GRAPHQL_SERVICE_TOKEN`, `LOAD_METRICS_TOKEN`,

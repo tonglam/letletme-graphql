@@ -106,6 +106,18 @@ describe("PostgreSQL pool observability", () => {
 				"cross-origin capacity health URLs must use the load target or its api alias",
 			],
 			[
+				"https://letletme.top/other/health/deploy",
+				"capacity health URLs must be bound to the load route",
+			],
+			[
+				"https://api.letletme.top/api/other/health/deploy",
+				"cross-origin capacity health URLs must be bound to the load route",
+			],
+			[
+				"https://api.api.letletme.top/api/graphql/health/deploy",
+				"cross-origin capacity health URLs must use the load target or its api alias",
+			],
+			[
 				"https://api.letletme.top/api/graphql/health/deploy?",
 				"capacity health URLs must not include a query string",
 			],
@@ -126,6 +138,7 @@ describe("PostgreSQL pool observability", () => {
 					LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
 					LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
 					LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL: healthUrl,
+					LIVE_MATCH_LOAD_READY_HEALTH_URL: "",
 					LIVE_MATCH_LOAD_STAGES: "1",
 				},
 				stderr: "pipe",
