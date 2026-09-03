@@ -66,6 +66,10 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_READY_HEALTH_URL");
 		expect(capacitySource).toContain("LetLetMe-LiveMatch-Capacity/");
 		expect(capacitySource).toContain('"x-metrics-token": metricsToken');
+		expect(capacitySource).toContain("LIVE_MATCH_LOAD_TRANSPORT must be cold, warm, or http1");
+		expect(capacitySource).toContain('transport === "http1" ? http1KeepAliveAgent');
+		expect(capacitySource).toContain("keepAlive: true");
+		expect(capacitySource).toContain("http1 uses HTTP/1 keep-alive");
 		expect(capacitySource).toContain('"/health/ready"');
 		expect(capacitySource).toContain("readyHealthEndpoint.origin");
 		expect(capacitySource).toContain("must not include credentials");
@@ -204,5 +208,75 @@ describe("PostgreSQL pool observability", () => {
 		expect(stderr).toContain(
 			"cross-origin capacity health URLs must use the load target or its api alias"
 		);
+	});
+
+	it("accepts http1 keep-alive on loopback HTTP and rejects plaintext non-loopback", async () => {
+		const invalid = Bun.spawn(
+			["bun", "scripts/live-match-capacity.ts", "--mode=HEAD", "--transport=not-a-transport"],
+			{
+				cwd: process.cwd(),
+				env: {
+					...Bun.env,
+					LIVE_MATCH_LOAD_URL: "http://127.0.0.1:4000/graphql",
+					LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+					LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+					LIVE_MATCH_LOAD_STAGES: "1",
+				},
+				stderr: "pipe",
+				stdout: "pipe",
+			}
+		);
+		const [invalidExit, invalidStderr] = await Promise.all([
+			invalid.exited,
+			new Response(invalid.stderr).text(),
+		]);
+		expect(invalidExit).not.toBe(0);
+		expect(invalidStderr).toContain("LIVE_MATCH_LOAD_TRANSPORT must be cold, warm, or http1");
+
+		const remotePlaintext = Bun.spawn(
+			["bun", "scripts/live-match-capacity.ts", "--mode=HEAD", "--transport=http1"],
+			{
+				cwd: process.cwd(),
+				env: {
+					...Bun.env,
+					LIVE_MATCH_LOAD_URL: "http://example.com/graphql",
+					LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+					LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+					LIVE_MATCH_LOAD_STAGES: "1",
+				},
+				stderr: "pipe",
+				stdout: "pipe",
+			}
+		);
+		const [plainExit, plainStderr] = await Promise.all([
+			remotePlaintext.exited,
+			new Response(remotePlaintext.stderr).text(),
+		]);
+		expect(plainExit).not.toBe(0);
+		expect(plainStderr).toContain("plaintext capacity runs require a loopback endpoint");
+
+		const acceptedHttp1 = Bun.spawn(
+			["bun", "scripts/live-match-capacity.ts", "--mode=HEAD", "--transport=http1"],
+			{
+				cwd: process.cwd(),
+				env: {
+					...Bun.env,
+					LIVE_MATCH_LOAD_URL: "http://127.0.0.1:4000/graphql",
+					LIVE_MATCH_GRAPHQL_SERVICE_TOKEN: "test-token",
+					LIVE_MATCH_LOAD_DEPLOY_SHA: "a".repeat(40),
+					LIVE_MATCH_LOAD_READY_HEALTH_URL: "ftp://127.0.0.1:4000/health/ready",
+					LIVE_MATCH_LOAD_STAGES: "1",
+				},
+				stderr: "pipe",
+				stdout: "pipe",
+			}
+		);
+		const [http1Exit, http1Stderr] = await Promise.all([
+			acceptedHttp1.exited,
+			new Response(acceptedHttp1.stderr).text(),
+		]);
+		expect(http1Exit).not.toBe(0);
+		expect(http1Stderr).toContain("capacity health URLs must use http or https");
+		expect(http1Stderr).not.toContain("LIVE_MATCH_LOAD_TRANSPORT must be cold, warm, or http1");
 	});
 });
