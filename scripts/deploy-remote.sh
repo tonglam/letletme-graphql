@@ -374,8 +374,28 @@ if [ -n "$old_active_container" ]; then
   old_slot_deploy_sha=$(docker inspect \
     --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
     "$old_active_container" || true)
+  case "$old_slot_deploy_sha" in
+    ""|"<no value>"|"unknown") old_slot_deploy_sha="" ;;
+  esac
+  if [ -z "$old_slot_deploy_sha" ] || [[ ! "$old_slot_deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    # Local/unlabeled images still expose a 40-char SHA on /health/ready.
+    # Use that identity so cutover can compare rollback traffic without
+    # treating "unknown" as a poison label.
+    old_slot_deploy_sha=$(docker exec "$old_active_container" bun -e '
+      const response = await fetch("http://127.0.0.1:4000/health/ready");
+      if (!response.ok) process.exit(1);
+      const body = await response.json();
+      const sha = typeof body.deploySha === "string" ? body.deploySha : "";
+      if (!/^[0-9a-f]{40}$/.test(sha)) process.exit(1);
+      process.stdout.write(sha);
+    ' < /dev/null || true)
+  fi
 fi
 if [ -n "$old_slot_deploy_sha" ] && [[ ! "$old_slot_deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "active GraphQL slot has an invalid deployment revision label" >&2
+  exit 1
+fi
+if [ -n "$old_active_container" ] && [ -z "$old_slot_deploy_sha" ]; then
   echo "active GraphQL slot has an invalid deployment revision label" >&2
   exit 1
 fi

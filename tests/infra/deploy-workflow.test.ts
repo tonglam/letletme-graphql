@@ -135,6 +135,9 @@ describe("production deployment workflow", () => {
 		expect(deployScript).toContain('old_slot_deploy_sha=""');
 		expect(deployScript).toContain("old_slot_deploy_sha");
 		expect(deployScript).toContain("active GraphQL slot has an invalid deployment revision label");
+		expect(deployScript).toContain('""|"<no value>"|"unknown") old_slot_deploy_sha=""');
+		expect(deployScript).toContain('fetch("http://127.0.0.1:4000/health/ready")');
+		expect(deployScript).toContain('typeof body.deploySha === "string" ? body.deploySha : ""');
 		expect(deployScript).toContain('for attempt in $(seq 1 "$PUBLIC_HEALTH_ATTEMPTS")');
 		expect(deployScript).toContain('sleep "$PUBLIC_HEALTH_DELAY_SECONDS"');
 		expect(deployScript).toContain(
