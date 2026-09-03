@@ -213,6 +213,7 @@ const validateCapacityHealthBinding = (
 
 const endpoint = new URL(required("LIVE_MATCH_LOAD_URL"));
 const serviceToken = required("LIVE_MATCH_GRAPHQL_SERVICE_TOKEN");
+const metricsToken = process.env.LIVE_MATCH_LOAD_METRICS_TOKEN?.trim();
 const contractHeader = "live-matches-v3";
 const eventIdValue = process.env.LIVE_MATCH_LOAD_EVENT_ID?.trim();
 const eventId = eventIdValue ? Number(eventIdValue) : undefined;
@@ -816,6 +817,7 @@ function requestOnceHttp1(stage: number): Promise<RawResponse> {
 						"x-letletme-contract": contractHeader,
 						"x-request-id": `lm-${runId}-${randomUUID().slice(0, 8)}`.slice(0, 64),
 						"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
+						...(metricsToken ? { "x-metrics-token": metricsToken } : {}),
 						...(transport === "cold" ? { connection: "close" } : {}),
 					},
 					agent,
@@ -1018,6 +1020,7 @@ function requestOnceHttp2(stage: number): Promise<RawResponse> {
 					"x-letletme-contract": contractHeader,
 					"x-request-id": `lm-${runId}-${randomUUID().slice(0, 8)}`.slice(0, 64),
 					"user-agent": `LetLetMe-LiveMatch-Capacity/${runId}`,
+					...(metricsToken ? { "x-metrics-token": metricsToken } : {}),
 				});
 			} catch (error) {
 				releaseHttp2Stream(session);
