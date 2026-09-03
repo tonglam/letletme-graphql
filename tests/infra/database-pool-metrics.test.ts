@@ -64,6 +64,8 @@ describe("PostgreSQL pool observability", () => {
 		expect(capacitySource).toContain("isApiAliasHostname");
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_DEPLOY_HEALTH_URL");
 		expect(capacitySource).toContain("LIVE_MATCH_LOAD_READY_HEALTH_URL");
+		expect(capacitySource).toContain("LetLetMe-LiveMatch-Capacity/");
+		expect(capacitySource).toContain('"x-metrics-token": metricsToken');
 		expect(capacitySource).toContain('"/health/ready"');
 		expect(capacitySource).toContain("readyHealthEndpoint.origin");
 		expect(capacitySource).toContain("must not include credentials");

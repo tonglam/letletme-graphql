@@ -54,6 +54,7 @@ import {
 	requiresLiveMatchesV3Contract,
 	isLiveMatchesHotPathOperation,
 } from "./http/live-matches-contract";
+import { isLiveMatchCapacityAdmission } from "./http/live-match-capacity-admission";
 import { GraphQLAdmissionOrder } from "./http/graphql-admission-order";
 import {
 	mergeShadowRateLimitDecision,
@@ -206,6 +207,7 @@ export const startServer = async (): Promise<void> => {
 				let fullCoreLoaded = false;
 				let graphQLContext: GraphQLContext | undefined;
 				let trustedIngress: GraphQLIngress | null = null;
+				let capacityAdmission = false;
 				let v3AdmissionEvaluated = false;
 				let terminalPreAuthV3Denial: TokenBucketStageResultV3 | null = null;
 				let v3AggregateRecorded = false;
@@ -277,6 +279,7 @@ export const startServer = async (): Promise<void> => {
 					const ingressForFailure = trustedIngress;
 					if (
 						ingressForFailure &&
+						!capacityAdmission &&
 						!v3AdmissionEvaluated &&
 						(isGraphQLRateLimitEnforceMode || isGraphQLRateLimitShadowMode)
 					) {
@@ -347,11 +350,12 @@ export const startServer = async (): Promise<void> => {
 						);
 					}
 					trustedIngress = ingress;
+					capacityAdmission = isLiveMatchCapacityAdmission(request.headers, ingress);
 
 					admissionOrder.enter("pre-auth");
 					const preAuthAdmission = await requestTiming.measure("preAuthAdmission", () =>
 						runGraphQLRateLimitStage({
-							v3Checks: graphQLVersionedPreAuthRateLimitChecks(ingress),
+							v3Checks: capacityAdmission ? [] : graphQLVersionedPreAuthRateLimitChecks(ingress),
 							corsHeaders,
 							rateLimitWorkload: ingress.workload,
 						})
@@ -496,7 +500,7 @@ export const startServer = async (): Promise<void> => {
 					rateLimitAudience = v3PrincipalAdmission.audience;
 					const principalAdmissionResult = await requestTiming.measure("principalAdmission", () =>
 						runGraphQLRateLimitStage({
-							v3Checks: v3PrincipalAdmission.checks,
+							v3Checks: capacityAdmission ? [] : v3PrincipalAdmission.checks,
 							corsHeaders,
 							rateLimitWorkload: ingress.workload,
 						})
