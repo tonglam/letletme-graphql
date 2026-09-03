@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
-import { request as httpRequest, type ClientRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
+import { Agent as HttpAgent, request as httpRequest, type ClientRequest } from "node:http";
+import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import type { TLSSocket } from "node:tls";
 import {
 	connect as http2Connect,
@@ -13,7 +13,7 @@ import { brotliDecompress, gunzip, inflate } from "node:zlib";
 import { writeFile } from "node:fs/promises";
 
 type ReadMode = "HEAD" | "DESK" | "FULL";
-type Transport = "cold" | "warm";
+type Transport = "cold" | "warm" | "http1";
 
 // A peak is not sustained evidence: the stage must keep the requested number
 // of actual network bodies/streams active for almost all of the observed
@@ -113,8 +113,8 @@ const parseMode = (value: string | undefined): ReadMode => {
 
 const parseTransport = (value: string | undefined): Transport => {
 	const transport = (value ?? process.env.LIVE_MATCH_LOAD_TRANSPORT ?? "warm").toLowerCase();
-	if (transport !== "cold" && transport !== "warm") {
-		throw new Error("LIVE_MATCH_LOAD_TRANSPORT must be cold or warm");
+	if (transport !== "cold" && transport !== "warm" && transport !== "http1") {
+		throw new Error("LIVE_MATCH_LOAD_TRANSPORT must be cold, warm, or http1");
 	}
 	return transport;
 };
@@ -424,7 +424,16 @@ type RawResponse = {
 	rateLimitScope: string | null;
 };
 
-const agent = false;
+const http1KeepAliveAgent =
+	endpoint.protocol === "https:"
+		? new HttpsAgent({
+				keepAlive: true,
+				maxSockets: 400,
+				maxFreeSockets: 400,
+				rejectUnauthorized: true,
+			})
+		: new HttpAgent({ keepAlive: true, maxSockets: 400, maxFreeSockets: 400 });
+const agent = transport === "http1" ? http1KeepAliveAgent : false;
 
 const MAX_HTTP2_SESSIONS = 16;
 
@@ -1935,7 +1944,7 @@ const report = {
 	capacityGate,
 	metricObservations,
 	notes: [
-		"Cold uses a new node http/https request with agent:false and Connection: close; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
+		"Cold uses a new node http/https request with agent:false and Connection: close; http1 uses HTTP/1 keep-alive with a bounded Agent so a remote client can sustain the requested in-flight bodies when the peer does not offer HTTP/2; warm uses enough HTTPS HTTP/2 sessions to cover the peer-advertised stream capacity with multiplexed keep-alive streams.",
 		"Warm HTTP/2 evidence records each peer maxConcurrentStreams and the summed effective capacity; the run fails before load if it cannot cover the requested stage concurrency.",
 		`Each stage keeps ${NETWORK_SPARE_WORKER_RATIO * 100}% spare processing workers in addition to the requested network target (${NETWORK_SPARE_WORKER_RATIO * 100}% rounded up, at least one); this keeps network streams replenished while decompression, parsing, and semantic validation run after body completion.`,
 		`Sustained-concurrency evidence is time-weighted coverage of the requested number of active HTTP/1 bodies or HTTP/2 streams, measured from request/stream creation through network body completion; at least ${NETWORK_CONCURRENCY_COVERAGE_REQUIREMENT * 100}% of the observed stage must meet the target. Parsing and decompression are reported separately and cannot satisfy the network-concurrency gate.`,

@@ -131,7 +131,10 @@ bun run rate-limit:load --output load-test/run-123.json
 ```
 
 For Live Matches V3, run `bun run live-match:capacity` separately for each
-`HEAD` and `FULL` mode. The harness requires `LIVE_MATCH_LOAD_DEPLOY_SHA` to
+`HEAD` and `FULL` mode. Set `LIVE_MATCH_LOAD_TRANSPORT` to `cold` for
+connection-close HTTP/1, `http1` for HTTP/1 keep-alive when the peer does not
+offer HTTP/2, or `warm` for HTTPS HTTP/2. The harness requires
+`LIVE_MATCH_LOAD_DEPLOY_SHA` to
 be the exact deployed Git SHA and verifies the configured deployment-health
 URL before and after every stage; a missing or changing identity fails the
 run. Short stage overrides remain smoke diagnostics and are not capacity
