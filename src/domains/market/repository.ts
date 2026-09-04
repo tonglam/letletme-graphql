@@ -769,22 +769,14 @@ const runMarketPulseFlight = (
 
 export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRepository => ({
 	async getMarketPulse(context: GraphQLContext, requestedDays: number): Promise<MarketPulse> {
-		let snapshotContext: Awaited<ReturnType<typeof getMarketSnapshotContext>> | null = null;
-		try {
-			snapshotContext = await getMarketSnapshotContext(context);
-		} catch (error) {
-			context.logger.warn(
-				{ err: error },
-				"Market snapshot context unavailable; using request fallback"
-			);
-		}
-		let cacheKey = snapshotContext
-			? gqlCacheKey(
-					context,
-					`market-pulse:v4:${requestedDays}`,
-					`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
-				)
-			: gqlCacheKey(context, `market-pulse:v4:${requestedDays}`);
+		const resolvedSnapshotContext = await getMarketSnapshotContext(context);
+		if (!resolvedSnapshotContext) throw new Error("Market snapshot context is unavailable");
+		let snapshotContext: MarketSnapshotContext = resolvedSnapshotContext;
+		let cacheKey = gqlCacheKey(
+			context,
+			`market-pulse:v4:${requestedDays}`,
+			`${context.dataRevision ?? "core-postgres"}.${snapshotContext.revision}`
+		);
 		return runMarketPulseFlight(context, cacheKey, async () => {
 			try {
 				const cached = await context.redis.get(cacheKey);
@@ -802,14 +794,14 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 			}
 
 			const readRows = async (
-				pin: Awaited<ReturnType<typeof getMarketSnapshotContext>> | null
+				pin: MarketSnapshotContext
 			): Promise<{ rows: MarketSnapshotRow[]; hasPinnedSnapshot: boolean }> => {
 				const queryStartedAt = performance.now();
 				const result = await (queryExecutor ?? context.database).query(MARKET_QUERY, [
 					context.currentSeason.seasonId,
 					requestedDays,
-					pin?.snapshotDate ?? null,
-					pin?.capturedAt ?? null,
+					pin.snapshotDate,
+					pin.capturedAt,
 				]);
 				const compact = result.rows[0] as { market_rows?: unknown } | undefined;
 				rows = Array.isArray(compact?.market_rows)
@@ -824,23 +816,22 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 					},
 					"Market compact query completed"
 				);
-				const hasPinnedSnapshot =
-					!pin ||
-					rows.some(
-						(row) =>
-							toCalendarDate(row.snapshot_date, "snapshot_date") === pin.snapshotDate &&
-							toIsoTimestamp(row.captured_at, "captured_at") === pin.capturedAt
-					);
+				const hasPinnedSnapshot = rows.some(
+					(row) =>
+						toCalendarDate(row.snapshot_date, "snapshot_date") === pin.snapshotDate &&
+						toIsoTimestamp(row.captured_at, "captured_at") === pin.capturedAt
+				);
 				return { rows, hasPinnedSnapshot };
 			};
 			let rows: MarketSnapshotRow[];
 			try {
 				let read = await readRows(snapshotContext);
 				rows = read.rows;
-				if (snapshotContext && !read.hasPinnedSnapshot) {
-					snapshotContext = await refreshMarketSnapshotContext(context);
-					if (!snapshotContext)
+				if (!read.hasPinnedSnapshot) {
+					const refreshedSnapshotContext = await refreshMarketSnapshotContext(context);
+					if (!refreshedSnapshotContext)
 						throw createMarketPinFailure(context, "Market snapshot pin unavailable after retry");
+					snapshotContext = refreshedSnapshotContext;
 					cacheKey = gqlCacheKey(
 						context,
 						`market-pulse:v4:${requestedDays}`,
@@ -861,7 +852,7 @@ export const createMarketRepository = (queryExecutor?: QueryExecutor): MarketRep
 				context,
 				cacheKey,
 				JSON.stringify(pulse),
-				snapshotContext?.cacheTtlSeconds ?? QUERY_CACHE_TTL_SECONDS.MARKET
+				snapshotContext.cacheTtlSeconds
 			);
 			return pulse;
 		});
