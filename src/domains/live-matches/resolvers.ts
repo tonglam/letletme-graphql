@@ -344,6 +344,23 @@ const liveMatchRedisRoundtripOutcome = (read: LiveMatchdayRead): "none" | "singl
 	return read.redisRoundtrips === 1 ? "single" : "fallback";
 };
 
+/**
+ * Keep FULL payload measurement close to the one-percent cost target without
+ * making the required metric series depend on process randomness. HEAD/DESK
+ * callers are always measured and deliberately do not advance this counter.
+ */
+export const createLiveMatchPayloadSampler = (): ((mode: LiveMatchReadMode) => boolean) => {
+	let fullRequestCount = 0;
+	return (mode: LiveMatchReadMode): boolean => {
+		if (mode !== "FULL") return true;
+		const shouldSample = fullRequestCount % 100 === 0;
+		fullRequestCount += 1;
+		return shouldSample;
+	};
+};
+
+const shouldSampleLiveMatchPayload = createLiveMatchPayloadSampler();
+
 const observeLiveMatchRead = (
 	mode: LiveMatchReadMode,
 	read: LiveMatchdayRead,
@@ -366,7 +383,7 @@ const observeLiveMatchRead = (
 	// GraphQL serializes the response after the resolver returns. Avoid a second
 	// full allocation on the hot FULL path; small metadata reads are measured
 	// exactly, while full payloads are sampled for an operational estimate.
-	if (mode !== "FULL" || Math.random() < 0.01) {
+	if (shouldSampleLiveMatchPayload(mode)) {
 		const encodedResponse = JSON.stringify(response);
 		metrics.liveMatchPayloadBytes
 			.labels(mode, "resolver")
