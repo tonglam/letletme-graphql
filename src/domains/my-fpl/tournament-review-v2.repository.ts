@@ -639,6 +639,10 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
 			)
 		)
 	`;
+	// Knockout goal fields are per-entry FPL tie-break metrics (aggregated from
+	// the entry's selected players), not opposing real-world match scores. They
+	// are therefore validated for shape/range below but must not be mirror
+	// images of the other side's values.
 	const knockoutMatchInvalid = () => `
 		jsonb_typeof(knockout_item) IS DISTINCT FROM 'object'
 		OR jsonb_typeof(knockout_item->'matchId') IS DISTINCT FROM 'number'
@@ -689,8 +693,6 @@ function reviewPublicationCoherenceSql(publicationAlias: string, eventAlias: str
 						OR jsonb_typeof(knockout_item->'home'->'goalsConceded') IS DISTINCT FROM 'number'
 						OR jsonb_typeof(knockout_item->'away'->'goalsConceded') IS DISTINCT FROM 'number'
 						OR jsonb_typeof(knockout_item->'winnerEntryId') IS DISTINCT FROM 'number'
-						OR knockout_item->'home'->>'goalsScored' <> knockout_item->'away'->>'goalsConceded'
-						OR knockout_item->'away'->>'goalsScored' <> knockout_item->'home'->>'goalsConceded'
 						OR CASE
 							WHEN knockout_item->'home'->>'netPoints' ~ '^-?[0-9]+$'
 							 AND knockout_item->'away'->>'netPoints' ~ '^-?[0-9]+$'
@@ -4445,13 +4447,7 @@ function knockoutSettledScoresValid(home: unknown, away: unknown, winnerEntryId:
 	if (scoreMetrics.every((value) => value === null)) return winnerEntryId === null;
 	if (winnerEntryId === null) return false;
 	const settled = scoreMetrics.every((value) => value !== null);
-	if (
-		!settled ||
-		home.goalsScored !== away.goalsConceded ||
-		away.goalsScored !== home.goalsConceded ||
-		typeof homeNetPoints !== "number" ||
-		typeof awayNetPoints !== "number"
-	) {
+	if (!settled || typeof homeNetPoints !== "number" || typeof awayNetPoints !== "number") {
 		return false;
 	}
 	if (homeNetPoints === awayNetPoints) return true;
