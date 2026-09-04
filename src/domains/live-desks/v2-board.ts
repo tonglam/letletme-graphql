@@ -367,7 +367,12 @@ const reasonCodesForSource = (
 	reasonCodes: readonly string[],
 	servedFrom: DeliverySource
 ): string[] => {
-	const retained = reasonCodes.filter((reason) => reason !== "LEAGUE_PUBLICATION_FALLBACK");
+	const recoveredCurrent = servedFrom === "REDIS_CURRENT" || servedFrom === "FINAL_RESULT";
+	const retained = reasonCodes.filter(
+		(reason) =>
+			reason !== "LEAGUE_PUBLICATION_FALLBACK" &&
+			(!recoveredCurrent || reason !== "FALLBACK_SERVED")
+	);
 	return servedFrom === "REDIS_CURRENT" || servedFrom === "FINAL_RESULT"
 		? retained
 		: [...new Set([...retained, "LEAGUE_PUBLICATION_FALLBACK"])];
@@ -457,7 +462,7 @@ const withBoardRowDelivery = (
 	return { ...row, score: { ...row.score, times, delivery } };
 };
 
-const withBoardReadDelivery = (
+export const withBoardReadDelivery = (
 	board: EntryLiveCompetitionBoardV2,
 	servedFrom: LeagueLivePublicationReadV2["servedFrom"],
 	freshnessPublication?: Pick<
@@ -465,7 +470,13 @@ const withBoardReadDelivery = (
 		"sourceCheckedAt" | "expectedNextCheckAt"
 	>
 ): EntryLiveCompetitionBoardV2 => {
-	const effectiveServedFrom = worstServedFrom(board.servedFrom, servedFrom);
+	// The cache key pins the immutable league publication. Its recorded source
+	// is only the provenance of the request that built the projection, not an
+	// everlasting health verdict. Rebind it to the source validated by this
+	// request so a transient PROCESS_LKG read can recover without waiting for a
+	// new generation. Row-level provenance is still preserved below when it was
+	// independently worse than the cached board source.
+	const effectiveServedFrom = servedFrom;
 	return {
 		...board,
 		servedFrom: effectiveServedFrom,
