@@ -3,11 +3,14 @@ import {
 	MY_TOURNAMENT_REVIEW_CATALOG_SQL,
 	MY_TOURNAMENT_REVIEW_HEAD_SQL,
 	MY_TOURNAMENT_REVIEW_PUBLICATION_SQL,
+	MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL,
 	MY_TOURNAMENT_REVIEW_SEASON_SQL,
 	MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL,
 	MY_TOURNAMENT_REVIEW_STATUS_SQL,
 	createMyTournamentReviewRepository,
+	postgresJsonbContentHash as postgresJsonbChunkHash,
 	tournamentReviewPublicationHash as postgresJsonbContentHash,
+	tournamentReviewPublicationHash,
 } from "../../../src/domains/my-fpl/tournament-review-v2.repository";
 import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
 
@@ -2875,6 +2878,108 @@ describe("My Tournament Review V2 repository", () => {
 		expect(result.format).toBe("KNOCKOUT");
 		expect(result.knockout).toBeNull();
 		expect(result.phases?.[0]?.format).toBe("KNOCKOUT");
+	});
+
+	it("maps Season Knockout section chunks into bracket matches", async () => {
+		const match = {
+			round: 1,
+			name: "Round 1",
+			matchId: 101,
+			playAgainstId: 102,
+			home: {
+				entryId: 6953,
+				entryName: "Example XI",
+				grossPoints: null,
+				transferCost: null,
+				netPoints: null,
+				goalsScored: null,
+				goalsConceded: null,
+			},
+			away: {
+				entryId: 6954,
+				entryName: "Second XI",
+				grossPoints: null,
+				transferCost: null,
+				netPoints: null,
+				goalsScored: null,
+				goalsConceded: null,
+			},
+			winnerEntryId: null,
+		};
+		const chunkHash = postgresJsonbChunkHash([match]);
+		const payload = {
+			schemaVersion: "my-tournament-review-v2.1",
+			metricVersion: "settled-review-v2",
+			format: "KNOCKOUT",
+			knockout: {},
+			manifest: {
+				sectionCount: 1,
+				chunkCount: 1,
+				sections: [
+					{
+						sectionKey: "KNOCKOUT_BRACKET",
+						itemCount: 1,
+						chunkCount: 1,
+						chunkHashes: [chunkHash],
+						chunkItemCounts: [1],
+					},
+				],
+			},
+		};
+		const contentSha = tournamentReviewPublicationHash(payload);
+		const publication = knockoutPublicationRow({
+			event_id: 4,
+			revision: 8,
+			row_count: 1,
+			expected_subject_count: 2,
+			ready_subject_count: 2,
+			content_sha256: contentSha,
+			payload,
+		});
+		const metadata = {
+			...seasonMetadataRow(publication, [4]),
+			manifest: payload.manifest,
+		};
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async (query: unknown) => {
+				const sql = String(query);
+				if (sql === MY_TOURNAMENT_REVIEW_SEASON_HEAD_SQL) return { rows: [metadata] };
+				if (sql === MY_TOURNAMENT_REVIEW_PUBLICATION_SQL) return { rows: [publication] };
+				if (sql === MY_TOURNAMENT_REVIEW_SECTION_CHUNKS_SQL) {
+					return {
+						rows: [
+							{
+								section_key: "KNOCKOUT_BRACKET",
+								chunk_index: 0,
+								item_count: 1,
+								chunk_sha256: chunkHash,
+								items: [match],
+							},
+						],
+					};
+				}
+				throw new Error(`unexpected query: ${sql}`);
+			},
+		});
+		const repository = createMyTournamentReviewRepository();
+		const args = {
+			tournamentId: 6953,
+			throughEventId: 4,
+			phaseId: "knockout",
+			section: "KNOCKOUT_BRACKET" as const,
+			first: 50,
+			after: null,
+			revision: "8",
+			semanticSha256: contentSha,
+		};
+
+		const result = await repository.loadSeasonReviewSection!(context, args);
+		expect(result.state).toBe("READY");
+		expect(result.knockout?.matches).toHaveLength(1);
+		expect(result.knockout?.matches[0]).toMatchObject({ matchId: 101, playAgainstId: 102 });
+
+		const cached = await repository.loadSeasonReviewSection!(context, args);
+		expect(cached.knockout?.matches).toHaveLength(1);
 	});
 
 	it("pins the Season index to the observed metadata head", async () => {
