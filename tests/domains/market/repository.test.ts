@@ -50,6 +50,8 @@ const baseRow = (
 });
 
 const buildContext = (cacheSeed?: string) => {
+	const snapshotDate = "2026-08-03";
+	const capturedAt = `${snapshotDate}T01:40:00.000Z`;
 	const strings = new Map<string, string>();
 	const writes: Array<{ key: string; value: string; ttl: number }> = [];
 	const deletes: string[] = [];
@@ -69,11 +71,26 @@ const buildContext = (cacheSeed?: string) => {
 				return 1;
 			},
 		},
+		database: {
+			query: async () => ({
+				rows: [
+					{
+						snapshot_date: snapshotDate,
+						captured_at: capturedAt,
+						row_count: 1,
+						capture_count: 1,
+					},
+				],
+			}),
+		},
 		logger: { warn: () => undefined, error: () => undefined },
 		data: {},
 	} as never;
 	if (cacheSeed !== undefined) {
-		strings.set(gqlCacheKey(context, "market-pulse:v4:7"), cacheSeed);
+		strings.set(
+			gqlCacheKey(context, "market-pulse:v4:7", `core-test.pg-${Date.parse(capturedAt)}`),
+			cacheSeed
+		);
 	}
 	return {
 		strings,
@@ -319,6 +336,42 @@ describe("buildMarketPulse", () => {
 });
 
 describe("market repository caching", () => {
+	it("reports the missing snapshot authority on a lightweight request context", async () => {
+		const context = buildSnapshotContext(new TestRedis(), {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		context.dataRevision = undefined;
+		const repository = createMarketRepository({
+			query: async () => {
+				throw new Error("Unexpected unpinned market query");
+			},
+		});
+
+		await expect(repository.getMarketPulse(context, 7)).rejects.toThrow(
+			"Market snapshot context is unavailable"
+		);
+	});
+
+	it("fails closed before querying without an authoritative market snapshot", async () => {
+		const redis = new TestRedis();
+		const context = buildSnapshotContext(redis, {
+			databaseQuery: async () => ({ rows: [] }),
+		});
+		let marketQueries = 0;
+		const repository = createMarketRepository({
+			query: async () => {
+				marketQueries += 1;
+				return { rows: [] };
+			},
+		});
+
+		await expect(repository.getMarketPulse(context, 7)).rejects.toThrow(
+			"Market snapshot context is unavailable"
+		);
+		expect(marketQueries).toBe(0);
+		expect(redis.setCalls).toHaveLength(0);
+	});
+
 	it("caches a successful pulse for the five-minute market policy", async () => {
 		const context = buildContext();
 		const repository = createMarketRepository({
@@ -330,13 +383,21 @@ describe("market repository caching", () => {
 		expect(context.writes[0]?.ttl).toBe(300);
 	});
 
-	it("caches a no-data pulse for five minutes", async () => {
+	it("rejects an empty result that contradicts the authoritative snapshot pin", async () => {
 		const context = buildContext();
-		const repository = createMarketRepository({ query: async () => ({ rows: [] }) });
+		let queries = 0;
+		const repository = createMarketRepository({
+			query: async () => {
+				queries += 1;
+				return { rows: [] };
+			},
+		});
 
-		const result = await repository.getMarketPulse(context.context, 14);
-		expect(result.coverage.observedDays).toBe(0);
-		expect(context.writes[0]?.ttl).toBe(300);
+		await expect(repository.getMarketPulse(context.context, 14)).rejects.toThrow(
+			"Failed to query market snapshots"
+		);
+		expect(queries).toBe(2);
+		expect(context.writes).toHaveLength(0);
 	});
 
 	it("coalesces concurrent cache misses into one database query", async () => {
