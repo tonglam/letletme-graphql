@@ -6552,7 +6552,7 @@ function seasonSectionPageFromChunks(
 			knockout: null,
 		};
 	}
-	const matches = mapKnockout(page.pageRows);
+	const matches = mapKnockout({ matches: page.pageRows });
 	return {
 		points: null,
 		h2h: null,
