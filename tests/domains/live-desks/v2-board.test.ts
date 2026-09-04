@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	queryEntryLiveCompetitionBoardV2,
+	withBoardReadDelivery,
 	type EntryLiveCompetitionBoardRequest,
 	type EntryLiveCompetitionBoardV2,
 } from "../../../src/domains/live-desks/v2-board";
@@ -211,5 +212,93 @@ describe("live competition board sorting", () => {
 		});
 
 		expect(result.rows.map((item) => item.entry)).toEqual([2, 1]);
+	});
+});
+
+describe("live competition board cached delivery provenance", () => {
+	const freshnessPublication = {
+		sourceCheckedAt: "2099-08-30T00:00:00.000Z",
+		expectedNextCheckAt: "2099-08-30T00:00:30.000Z",
+	};
+
+	it("recovers an exact cached projection after Redis current becomes readable again", () => {
+		const cachedRow = row(1, 10, 10);
+		cachedRow.score = {
+			...cachedRow.score!,
+			delivery: {
+				state: "DEGRADED",
+				servedFrom: "PROCESS_LKG",
+				reasonCodes: ["FALLBACK_SERVED", "LEAGUE_PUBLICATION_FALLBACK"],
+			},
+		};
+		const cached: EntryLiveCompetitionBoardV2 = {
+			publication: manifest,
+			servedFrom: "PROCESS_LKG",
+			boardRevision: "board",
+			scoreCoreRevision: "score-core",
+			rows: [cachedRow],
+			totalEntries: 1,
+			highestEventPoints: 10,
+			averageEventPoints: 10,
+		};
+
+		const recovered = withBoardReadDelivery(cached, "REDIS_CURRENT", freshnessPublication);
+
+		expect(recovered.servedFrom).toBe("REDIS_CURRENT");
+		expect(recovered.rows[0]?.score?.delivery).toEqual({
+			state: "FRESH",
+			servedFrom: "REDIS_CURRENT",
+			reasonCodes: [],
+		});
+	});
+
+	it("keeps independently worse row provenance while the board source recovers", () => {
+		const cachedRow = row(1, 10, 10);
+		cachedRow.score = {
+			...cachedRow.score!,
+			delivery: {
+				state: "DEGRADED",
+				servedFrom: "POSTGRES_CHECKPOINT",
+				reasonCodes: ["FALLBACK_SERVED", "LEAGUE_PUBLICATION_FALLBACK"],
+			},
+		};
+		const cached: EntryLiveCompetitionBoardV2 = {
+			publication: manifest,
+			servedFrom: "PROCESS_LKG",
+			boardRevision: "board",
+			scoreCoreRevision: "score-core",
+			rows: [cachedRow],
+			totalEntries: 1,
+			highestEventPoints: 10,
+			averageEventPoints: 10,
+		};
+
+		const recovered = withBoardReadDelivery(cached, "REDIS_CURRENT", freshnessPublication);
+
+		expect(recovered.servedFrom).toBe("REDIS_CURRENT");
+		expect(recovered.rows[0]?.score?.delivery.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(recovered.rows[0]?.score?.delivery.state).toBe("DEGRADED");
+	});
+
+	it("downgrades a cached current projection when this request uses fallback", () => {
+		const cached: EntryLiveCompetitionBoardV2 = {
+			publication: manifest,
+			servedFrom: "REDIS_CURRENT",
+			boardRevision: "board",
+			scoreCoreRevision: "score-core",
+			rows: [row(1, 10, 10)],
+			totalEntries: 1,
+			highestEventPoints: 10,
+			averageEventPoints: 10,
+		};
+
+		const degraded = withBoardReadDelivery(cached, "PROCESS_LKG");
+
+		expect(degraded.servedFrom).toBe("PROCESS_LKG");
+		expect(degraded.rows[0]?.score?.delivery).toMatchObject({
+			state: "DEGRADED",
+			servedFrom: "PROCESS_LKG",
+		});
+		expect(degraded.rows[0]?.score?.delivery.reasonCodes).toContain("LEAGUE_PUBLICATION_FALLBACK");
 	});
 });
