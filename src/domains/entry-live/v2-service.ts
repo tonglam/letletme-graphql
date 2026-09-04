@@ -490,10 +490,6 @@ const LIVE_LKG_MAX_ENTRIES = 256;
 const LIVE_LKG_RETENTION_MS = 24 * 60 * 60 * 1000;
 const requestRedisGlobalMemo = new WeakMap<object, Map<string, Promise<GlobalRead | null>>>();
 const requestDatabaseGlobalMemo = new WeakMap<object, Map<string, Promise<GlobalRead | null>>>();
-const requestEventRosterMemo = new WeakMap<
-	object,
-	Map<number, Promise<ReadonlySet<number> | null>>
->();
 const requestEventPlayerMemo = new WeakMap<
 	object,
 	Map<number, Promise<ReadonlyMap<number, CorePlayerData>>>
@@ -1004,31 +1000,6 @@ const hasCompleteFixtureCoverage = (
 };
 
 /**
- * Historical event-live rows must be checked against the player set that
- * existed at that event, not today's mutable core roster.  The Data producer
- * publishes this event-scoped snapshot only after its complete-set header is
- * verified; this direct read is a request-local expectation lookup and never
- * gates the hot Redis path on PostgreSQL availability.
- */
-export const EVENT_ROSTER_SQL = `
-	SELECT
-		snapshot.event_id,
-		snapshot.element_id,
-		publication.row_count AS publication_row_count,
-		publication.expected_row_count AS publication_expected_row_count
-	FROM fpl.player_event_snapshot_publications publication
-	JOIN fpl.player_event_snapshots snapshot
-	  ON snapshot.season_id = publication.season_id
-	 AND snapshot.event_id = publication.event_id
-	WHERE publication.season_id = $1
-	  AND publication.event_id = ANY($2::integer[])
-	  AND publication.row_count = publication.expected_row_count
-	  AND publication.row_count > 0
-	  AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)
-	ORDER BY snapshot.event_id, snapshot.element_id
-`;
-
-/**
  * Event-time player identity is only used when the mutable Core identity slice
  * no longer contains a historical pick.  The complete publication header and
  * event-scoped snapshot are the authority; current player metadata supplies
@@ -1294,25 +1265,6 @@ export const ENTRY_CHECKPOINT_SQL = `
 
 /** Exact SQL/result-shape probes for the V2 PostgreSQL fallback reader. */
 export const LIVE_POINTS_V2_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
-	{
-		name: "live-points-v2.event-roster",
-		sql: EVENT_ROSTER_SQL,
-		values: [2026, [1]],
-		resultTypes: [
-			{ relation: "fpl.player_event_snapshots", column: "event_id", pgType: "integer" },
-			{ relation: "fpl.player_event_snapshots", column: "element_id", pgType: "integer" },
-			{
-				relation: "fpl.player_event_snapshot_publications",
-				column: "row_count",
-				pgType: "integer",
-			},
-			{
-				relation: "fpl.player_event_snapshot_publications",
-				column: "expected_row_count",
-				pgType: "integer",
-			},
-		],
-	},
 	{
 		name: "live-points-v2.event-player-identity",
 		sql: EVENT_PLAYER_IDENTITY_SQL,
@@ -2217,10 +2169,10 @@ export const readLivePublicationByRefV2 = async (
 ): Promise<LivePublicationReadV2 | null> => readGlobal(context, eventId, undefined, ref);
 
 /**
- * Read several historical publications with one event-roster SQL query and
- * batched Redis pointer/item reads.  The payloads still undergo the complete
- * per-publication checksum validation; batching only removes avoidable
- * request-round-trip and pool contention from season-sized transfer history.
+ * Read several publications with batched Redis pointer/item reads. The
+ * payloads still undergo complete per-publication checksum validation;
+ * batching only removes avoidable request-round-trip and pool contention from
+ * season-sized transfer history.
  */
 export const readLivePublicationsV2 = async (
 	context: GraphQLContext,
@@ -2421,80 +2373,6 @@ const expectedFixtureIdsForEvent = async (
 ): Promise<ReadonlySet<number> | null> =>
 	(await expectedFixtureIdsForEvents(context, [eventId])).get(eventId) ?? null;
 
-type EventRosterRow = Row & {
-	event_id: unknown;
-	element_id: unknown;
-	publication_row_count: unknown;
-	publication_expected_row_count: unknown;
-};
-
-const eventRosterFromRows = (rows: readonly EventRosterRow[]): ReadonlySet<number> | null => {
-	if (rows.length === 0) return null;
-	const first = rows[0]!;
-	const rowCount = integer(first.publication_row_count);
-	const expectedRowCount = integer(first.publication_expected_row_count);
-	const playerIds = rows.map((row) => integer(row.element_id));
-	if (
-		rowCount === null ||
-		expectedRowCount === null ||
-		rowCount <= 0 ||
-		rowCount !== expectedRowCount ||
-		rows.length !== expectedRowCount ||
-		playerIds.some((playerId) => playerId === null || playerId <= 0) ||
-		new Set(playerIds).size !== playerIds.length
-	)
-		return null;
-	return new Set(playerIds as number[]);
-};
-
-const readEventScopedRosters = async (
-	context: GraphQLContext,
-	eventIds: readonly number[]
-): Promise<Map<number, ReadonlySet<number> | undefined>> => {
-	const uniqueEventIds = [...new Set(eventIds)].filter(
-		(eventId) => Number.isSafeInteger(eventId) && eventId > 0
-	);
-	const result = new Map<number, ReadonlySet<number> | undefined>();
-	if (uniqueEventIds.length === 0) return result;
-	const scope = requestScope(context);
-	let memo = requestEventRosterMemo.get(scope);
-	if (!memo) {
-		memo = new Map();
-		requestEventRosterMemo.set(scope, memo);
-	}
-	const missingEventIds = uniqueEventIds.filter((eventId) => !memo!.has(eventId));
-	if (missingEventIds.length > 0) {
-		try {
-			const query = await context.database.query<EventRosterRow>(EVENT_ROSTER_SQL, [
-				context.currentSeason.seasonId,
-				missingEventIds,
-			]);
-			const rowsByEvent = new Map<number, EventRosterRow[]>();
-			for (const row of query.rows) {
-				const eventId = integer(row.event_id);
-				if (eventId === null || !missingEventIds.includes(eventId)) continue;
-				const rows = rowsByEvent.get(eventId) ?? [];
-				rows.push(row);
-				rowsByEvent.set(eventId, rows);
-			}
-			for (const eventId of missingEventIds) {
-				memo.set(eventId, Promise.resolve(eventRosterFromRows(rowsByEvent.get(eventId) ?? [])));
-			}
-		} catch (error) {
-			for (const eventId of missingEventIds) memo.set(eventId, Promise.resolve(null));
-			context.logger.warn(
-				{ err: error, eventIds: missingEventIds },
-				"Historical Live Points V2 event rosters unavailable"
-			);
-		}
-	}
-	for (const eventId of uniqueEventIds) {
-		const roster = await memo.get(eventId)!;
-		result.set(eventId, roster ?? undefined);
-	}
-	return result;
-};
-
 type EventPlayerIdentityRow = Row & {
 	event_id: unknown;
 	element_id: unknown;
@@ -2628,17 +2506,18 @@ const expectedPlayerIdsForEvents = async (
 		for (const eventId of uniqueEventIds) result.set(eventId, corePlayerIds);
 		return result;
 	}
-	const historicalEventIds: number[] = [];
 	for (const eventId of uniqueEventIds) {
 		const event = eventSnapshot.events.find((candidate) => candidate.id === eventId);
 		const historical =
 			event?.finished === true ||
 			(eventSnapshot.currentEventId !== null && eventId < eventSnapshot.currentEventId);
-		if (historical) historicalEventIds.push(eventId);
-		else result.set(eventId, corePlayerIds);
+		// Data validates the complete event-live player set before atomically
+		// promoting every publication. Once an event is historical, that immutable
+		// producer proof is the roster authority. player_event_snapshots is a daily
+		// current-Core stats snapshot tagged with an event ID; its roster can grow
+		// after the event and must never invalidate an older complete publication.
+		result.set(eventId, historical ? undefined : corePlayerIds);
 	}
-	const historicalRosters = await readEventScopedRosters(context, historicalEventIds);
-	for (const eventId of historicalEventIds) result.set(eventId, historicalRosters.get(eventId));
 	return result;
 };
 
@@ -2647,10 +2526,8 @@ const expectedPlayerIdsForEvent = async (
 	eventId: number,
 	core: CoreLiveIdentitySnapshot
 ): Promise<ReadonlySet<number> | undefined> => {
-	// A missing historical roster must not be replaced with today's core set:
-	// that would reject a valid old publication when players have since joined.
-	// The producer's complete publication proof remains the availability-first
-	// fallback until the event-scoped snapshot can be read again.
+	// Historical publications use the producer's immutable completeness proof;
+	// only the active/non-historical event is checked against today's Core set.
 	return (await expectedPlayerIdsForEvents(context, [eventId], core)).get(eventId);
 };
 
