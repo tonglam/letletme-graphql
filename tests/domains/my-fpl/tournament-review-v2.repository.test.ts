@@ -1788,7 +1788,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(4);
 	});
 
-	it("fails closed when completed knockout goals disagree between sides", async () => {
+	it("allows independent completed knockout goal metrics for each side", async () => {
 		const base = knockoutPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
 		const match = (
@@ -1809,12 +1809,14 @@ describe("My Tournament Review V2 repository", () => {
 		const context = buildSnapshotContext(new TestRedis(), {
 			databaseQuery: async () => ({ rows: [row] }),
 		});
-		await expect(
-			createMyTournamentReviewRepository().loadGameweekReview(context, {
-				tournamentId: 6953,
-				eventId: 4,
-			})
-		).rejects.toMatchObject({ extensions: { code: "DATA_INTEGRITY_ERROR" } });
+		const result = await createMyTournamentReviewRepository().loadGameweekReview(context, {
+			tournamentId: 6953,
+			eventId: 4,
+		});
+		expect(result.knockout?.matches[0]?.home?.goalsScored).toBe(2);
+		expect(result.knockout?.matches[0]?.home?.goalsConceded).toBe(0);
+		expect(result.knockout?.matches[0]?.away?.goalsScored).toBe(1);
+		expect(result.knockout?.matches[0]?.away?.goalsConceded).toBe(2);
 	});
 
 	it("fails closed when a completed knockout winner has fewer net points", async () => {
@@ -1997,7 +1999,7 @@ describe("My Tournament Review V2 repository", () => {
 		expect(databaseReads).toBe(4);
 	});
 
-	it("rejects a cached completed knockout match with inconsistent goals", async () => {
+	it("rejects a cached completed knockout match with a non-integer goal metric", async () => {
 		const base = knockoutPublicationRow();
 		const payload = structuredClone(base.payload) as Record<string, unknown>;
 		const match = (
@@ -2030,7 +2032,7 @@ describe("My Tournament Review V2 repository", () => {
 		const cached = JSON.parse(redis.values.get(cacheKey!)!) as {
 			knockout: { matches: Array<{ away: { goalsScored: number | null } }> };
 		};
-		cached.knockout.matches[0]!.away.goalsScored = 3;
+		cached.knockout.matches[0]!.away.goalsScored = 3.5;
 		redis.values.set(cacheKey!, JSON.stringify(cached));
 
 		const result = await repository.loadGameweekReview(context, {
