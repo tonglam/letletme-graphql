@@ -7,7 +7,6 @@ import {
 	calcLivePointsByEntryV2,
 	clearLivePointsV2Lkg,
 	EVENT_PLAYER_IDENTITY_SQL,
-	EVENT_ROSTER_SQL,
 	loadLiveSnapshotMetaV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
@@ -215,13 +214,13 @@ const buildV2Redis = (
 };
 
 describe("Live Points V2 projection", () => {
-	it("requires the GW1 baseline only for the GW1 publication", () => {
-		for (const query of [EVENT_ROSTER_SQL, EVENT_PLAYER_IDENTITY_SQL]) {
-			expect(query).toContain(
-				"AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)"
-			);
-			expect(query).not.toMatch(/\n\s+AND publication\.baseline_verified_at IS NOT NULL/);
-		}
+	it("requires the GW1 baseline only for the GW1 identity publication", () => {
+		expect(EVENT_PLAYER_IDENTITY_SQL).toContain(
+			"AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)"
+		);
+		expect(EVENT_PLAYER_IDENTITY_SQL).not.toMatch(
+			/\n\s+AND publication\.baseline_verified_at IS NOT NULL/
+		);
 	});
 
 	beforeEach(() => clearLivePointsV2Lkg());
@@ -345,6 +344,44 @@ describe("Live Points V2 projection", () => {
 		expect(result.availability).toBe("UNAVAILABLE");
 		expect(result.delivery.state).toBe("UNAVAILABLE");
 		expect(result.pickList).toHaveLength(0);
+	});
+
+	it("keeps a producer-validated historical roster after the current Core roster grows", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const baseCore = buildTestCoreData(2);
+		const currentCore = {
+			...baseCore,
+			players: [
+				...baseCore.players,
+				{
+					...baseCore.players[0]!,
+					id: 999,
+					code: 10_999,
+					firstName: "New",
+					secondName: "Signing",
+					webName: "New Signing",
+				},
+			],
+		};
+		for (const [key, value] of buildCorePublication("2627", 8, currentCore).store) {
+			redis.values.set(key, value);
+		}
+		let databaseCalls = 0;
+		const result = await calcLivePointsByEntryV2(
+			buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseCalls += 1;
+					throw new Error("Historical live roster must not query mutable snapshot scope");
+				},
+			}),
+			1,
+			6953
+		);
+
+		expect(result.availability).toBe("READY");
+		expect(result.pickList).toHaveLength(15);
+		expect(databaseCalls).toBe(0);
 	});
 
 	it("keeps the exact same-event projection in process LKG while Redis and PostgreSQL are down", async () => {
