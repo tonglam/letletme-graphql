@@ -6,6 +6,8 @@ import {
 	calcLivePointsForEntriesV2,
 	calcLivePointsByEntryV2,
 	clearLivePointsV2Lkg,
+	EVENT_PLAYER_IDENTITY_SQL,
+	EVENT_ROSTER_SQL,
 	loadLiveSnapshotMetaV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
@@ -213,6 +215,15 @@ const buildV2Redis = (
 };
 
 describe("Live Points V2 projection", () => {
+	it("requires the GW1 baseline only for the GW1 publication", () => {
+		for (const query of [EVENT_ROSTER_SQL, EVENT_PLAYER_IDENTITY_SQL]) {
+			expect(query).toContain(
+				"AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)"
+			);
+			expect(query).not.toMatch(/\n\s+AND publication\.baseline_verified_at IS NOT NULL/);
+		}
+	});
+
 	beforeEach(() => clearLivePointsV2Lkg());
 
 	it("returns one complete same-event 15-pick projection without a Data/FPL request", async () => {

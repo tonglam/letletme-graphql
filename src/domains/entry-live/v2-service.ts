@@ -1024,7 +1024,7 @@ export const EVENT_ROSTER_SQL = `
 	  AND publication.event_id = ANY($2::integer[])
 	  AND publication.row_count = publication.expected_row_count
 	  AND publication.row_count > 0
-	  AND publication.baseline_verified_at IS NOT NULL
+	  AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)
 	ORDER BY snapshot.event_id, snapshot.element_id
 `;
 
@@ -1071,7 +1071,7 @@ export const EVENT_PLAYER_IDENTITY_SQL = `
 	  AND publication.event_id = $2
 	  AND publication.row_count = publication.expected_row_count
 	  AND publication.row_count > 0
-	  AND publication.baseline_verified_at IS NOT NULL
+	  AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)
 	ORDER BY snapshot.element_id
 `;
 
