@@ -9,6 +9,7 @@ import {
 } from "graphql";
 
 import {
+	createLiveMatchPayloadSampler,
 	deskHasStartedActivity,
 	liveMatchReadModeFromInfo,
 } from "../../../src/domains/live-matches/resolvers";
@@ -141,5 +142,34 @@ describe("deskHasStartedActivity", () => {
 				publication: { state: "LIVE_ACTIVE" },
 			} as never)
 		).toBe(false);
+	});
+});
+
+describe("deterministic Live Matches payload sampling", () => {
+	it("samples the first FULL request", () => {
+		const sampler = createLiveMatchPayloadSampler();
+
+		expect(sampler("FULL")).toBe(true);
+		expect(sampler("FULL")).toBe(false);
+	});
+
+	it("samples once per 100 FULL requests and then every 100th request", () => {
+		const sampler = createLiveMatchPayloadSampler();
+		const firstHundred = Array.from({ length: 100 }, () => sampler("FULL"));
+
+		expect(firstHundred.filter(Boolean)).toHaveLength(1);
+		expect(sampler("FULL")).toBe(true);
+	});
+
+	it("does not let HEAD or DESK requests advance the FULL counter", () => {
+		const sampler = createLiveMatchPayloadSampler();
+
+		expect(sampler("HEAD")).toBe(true);
+		expect(sampler("DESK")).toBe(true);
+		expect(sampler("FULL")).toBe(true);
+		for (let index = 0; index < 99; index += 1) {
+			expect(sampler("FULL")).toBe(false);
+		}
+		expect(sampler("FULL")).toBe(true);
 	});
 });
