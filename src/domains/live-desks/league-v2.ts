@@ -124,18 +124,27 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const iso = (value: unknown): value is string =>
 	typeof value === "string" && Number.isFinite(Date.parse(value));
 
-const canonicalJson = (input: unknown): string => {
-	if (Array.isArray(input)) return `[${input.map(canonicalJson).join(",")}]`;
+const canonicalize = (input: unknown): unknown => {
+	if (Array.isArray(input)) return input.map(canonicalize);
 	if (isRecord(input))
-		return `{${Object.keys(input)
-			.sort()
-			.map((key) => `${JSON.stringify(key)}:${canonicalJson(input[key])}`)
-			.join(",")}}`;
-	return JSON.stringify(input) ?? "null";
+		return Object.fromEntries(
+			Object.keys(input)
+				.sort()
+				.map((key) => [key, canonicalize(input[key])])
+		);
+	return input;
 };
 
-const hash = (value: unknown): string =>
-	createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+const canonicalJson = (input: unknown): string => {
+	const serialized = JSON.stringify(canonicalize(input));
+	if (serialized === undefined) throw new TypeError("Value is not JSON serializable");
+	return serialized;
+};
+
+const hashSerialized = (value: string): string =>
+	createHash("sha256").update(value, "utf8").digest("hex");
+
+const hash = (value: unknown): string => hashSerialized(canonicalJson(value));
 
 const parseJson = (value: unknown): unknown => {
 	if (typeof value !== "string") return value;
@@ -446,8 +455,8 @@ const readRedisPointer = async (
 			`${publication.items.payload.count}|${publication.items.payload.bytes}|${publication.items.payload.sha256}` ||
 		Buffer.byteLength(indexRaw, "utf8") !== publication.items.index.bytes ||
 		Buffer.byteLength(payloadRaw, "utf8") !== publication.items.payload.bytes ||
-		hash(parseJson(indexRaw)) !== publication.items.index.sha256 ||
-		hash(parseJson(payloadRaw)) !== publication.items.payload.sha256
+		hashSerialized(indexRaw) !== publication.items.index.sha256 ||
+		hashSerialized(payloadRaw) !== publication.items.payload.sha256
 	)
 		return null;
 	const index = parseJson(indexRaw);
@@ -488,8 +497,8 @@ const readRedisLightPointer = async (
 			`${publication.items.payload.count}|${publication.items.payload.bytes}|${publication.items.payload.sha256}` ||
 		Buffer.byteLength(indexRaw, "utf8") !== publication.items.index.bytes ||
 		Buffer.byteLength(payloadRaw, "utf8") !== publication.items.payload.bytes ||
-		hash(parseJson(indexRaw)) !== publication.items.index.sha256 ||
-		hash(parseJson(payloadRaw)) !== publication.items.payload.sha256
+		hashSerialized(indexRaw) !== publication.items.index.sha256 ||
+		hashSerialized(payloadRaw) !== publication.items.payload.sha256
 	)
 		return null;
 	const index = parseJson(indexRaw);
