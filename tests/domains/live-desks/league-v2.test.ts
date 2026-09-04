@@ -8,16 +8,20 @@ import {
 } from "../../../src/domains/live-desks/league-v2";
 import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
 
-const canonical = (value: unknown): string => {
-	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+const canonicalize = (value: unknown): unknown => {
+	if (Array.isArray(value)) return value.map(canonicalize);
 	if (value && typeof value === "object") {
-		return `{${Object.keys(value as Record<string, unknown>)
-			.sort()
-			.map((key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`)
-			.join(",")}}`;
+		const record = value as Record<string, unknown>;
+		return Object.fromEntries(
+			Object.keys(record)
+				.sort()
+				.map((key) => [key, canonicalize(record[key])])
+		);
 	}
-	return JSON.stringify(value) ?? "null";
+	return value;
 };
+
+const canonical = (value: unknown): string => JSON.stringify(canonicalize(value));
 
 const hash = (value: unknown): string =>
 	createHash("sha256").update(canonical(value), "utf8").digest("hex");
@@ -25,7 +29,8 @@ const hash = (value: unknown): string =>
 const buildRedis = (
 	tournamentId: number,
 	state: "LIVE_ACTIVE" | "FINALIZED",
-	finalized: boolean
+	finalized: boolean,
+	entryIds: readonly number[] = [101]
 ) => {
 	const season = "2627";
 	const eventId = 1;
@@ -42,11 +47,11 @@ const buildRedis = (
 		isCaptain: index === 0,
 		isViceCaptain: index === 1,
 	}));
-	const input = {
+	const inputs = entryIds.map((entryId) => ({
 		contractVersion: "live-points-v2" as const,
 		season,
 		eventId,
-		entryId: 101,
+		entryId,
 		picksBase: {
 			revision: "1".repeat(64),
 			contentUpdatedAt: sourceCheckedAt,
@@ -64,34 +69,32 @@ const buildRedis = (
 					automaticSubs: [],
 				}
 			: null,
-	};
-	const index = [
-		{
-			entryId: input.entryId,
-			availability: "READY" as const,
-			entryName: "Entry 101",
-			playerName: "Manager",
-			region: null,
-			startedEvent: null,
-			overallPoints: 100,
-			overallRank: 10,
-			bank: 0,
-			teamValue: 1000,
-			totalTransfers: 0,
-			lastEventId: null,
-			lastOverallPoints: null,
-			lastOverallRank: null,
-			lastTeamValue: null,
-			lastBank: null,
-			inputPublicationId: publicationId,
-			inputGeneration: generation,
-			inputRevision: hash(input),
-			inputContentUpdatedAt: sourceCheckedAt,
-		},
-	];
-	const payload = { "101": input };
-	const indexRaw = JSON.stringify(index);
-	const payloadRaw = JSON.stringify(payload);
+	}));
+	const index = inputs.map((input) => ({
+		entryId: input.entryId,
+		availability: "READY" as const,
+		entryName: `Entry ${input.entryId}`,
+		playerName: "Manager",
+		region: null,
+		startedEvent: null,
+		overallPoints: 100,
+		overallRank: 10,
+		bank: 0,
+		teamValue: 1000,
+		totalTransfers: 0,
+		lastEventId: null,
+		lastOverallPoints: null,
+		lastOverallRank: null,
+		lastTeamValue: null,
+		lastBank: null,
+		inputPublicationId: publicationId,
+		inputGeneration: generation,
+		inputRevision: hash(input),
+		inputContentUpdatedAt: sourceCheckedAt,
+	}));
+	const payload = Object.fromEntries(inputs.map((input) => [String(input.entryId), input]));
+	const indexRaw = canonical(index);
+	const payloadRaw = canonical(payload);
 	const revisions = {
 		roster: "a".repeat(64),
 		scoreCore: "b".repeat(64),
@@ -123,13 +126,18 @@ const buildRedis = (
 			checkpointedAt: finalized ? sourceCheckedAt : null,
 			expectedNextCheckAt: sourceCheckedAt,
 		},
-		counts: { expected: 1, published: 1, ready: 1, noPicks: 0 },
+		counts: {
+			expected: inputs.length,
+			published: inputs.length,
+			ready: inputs.length,
+			noPicks: 0,
+		},
 		items: {
 			index: {
 				name: "index",
 				key: indexKey,
 				type: "string",
-				count: 1,
+				count: inputs.length,
 				bytes: Buffer.byteLength(indexRaw, "utf8"),
 				sha256: hash(index),
 			},
@@ -137,7 +145,7 @@ const buildRedis = (
 				name: "payload",
 				key: payloadKey,
 				type: "string",
-				count: 1,
+				count: inputs.length,
 				bytes: Buffer.byteLength(payloadRaw, "utf8"),
 				sha256: hash(payload),
 			},
@@ -147,10 +155,13 @@ const buildRedis = (
 	redis.values.set(`${base}:active`, JSON.stringify(manifest));
 	redis.values.set(indexKey, indexRaw);
 	redis.values.set(payloadKey, payloadRaw);
-	redis.values.set(`${indexKey}:meta`, `1|${Buffer.byteLength(indexRaw, "utf8")}|${hash(index)}`);
+	redis.values.set(
+		`${indexKey}:meta`,
+		`${inputs.length}|${Buffer.byteLength(indexRaw, "utf8")}|${hash(index)}`
+	);
 	redis.values.set(
 		`${payloadKey}:meta`,
-		`1|${Buffer.byteLength(payloadRaw, "utf8")}|${hash(payload)}`
+		`${inputs.length}|${Buffer.byteLength(payloadRaw, "utf8")}|${hash(payload)}`
 	);
 	return { redis, season, eventId, tournamentId };
 };
@@ -234,6 +245,19 @@ describe("Classic live league publication lifecycle fence", () => {
 		});
 
 		expect(head).toBeNull();
+	});
+
+	it("accepts Data canonical hashes for payloads with numeric entry keys", async () => {
+		const fixture = buildRedis(37, "FINALIZED", true, [2, 10]);
+		const read = await readLeagueLivePublicationV2(buildSnapshotContext(fixture.redis), {
+			season: fixture.season,
+			eventId: fixture.eventId,
+			tournamentId: fixture.tournamentId,
+			mode: "CLASSIC",
+		});
+
+		expect(read?.index.map((row) => row.entryId)).toEqual([2, 10]);
+		expect(read?.servedFrom).toBe("REDIS_CURRENT");
 	});
 });
 
