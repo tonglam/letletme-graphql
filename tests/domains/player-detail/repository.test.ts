@@ -425,6 +425,77 @@ describe("playerDetailRepository", () => {
 		).toHaveLength(1);
 	});
 
+	it("fails closed when a checkpoint event is missing from the player rows", async () => {
+		const checkpointSourceCheckedAt = new Date().toISOString();
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						element_id: 9,
+						event_id: 1,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+					{
+						element_id: 9,
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"competition.live_points_publication_checkpoints": [
+					{
+						event_id: 1,
+						publication_id: "00000000-0000-4000-8000-000000000001",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: checkpointSourceCheckedAt,
+					},
+					{
+						event_id: 2,
+						publication_id: "00000000-0000-4000-8000-000000000002",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: checkpointSourceCheckedAt,
+					},
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000003",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: checkpointSourceCheckedAt,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_player_rows_incomplete",
+		});
+	});
+
 	it("gates season production during preseason but keeps current market and fixtures", async () => {
 		const fromCalls: string[] = [];
 		const context = createContext({

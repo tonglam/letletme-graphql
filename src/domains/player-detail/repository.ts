@@ -430,6 +430,37 @@ const projectedRecentGameweekMatchesCheckpoint = (
 	);
 };
 
+const recentGameweekRowsCoverAuthority = (
+	rows: readonly RecentGameweekRow[],
+	headers: readonly RecentGameweekCheckpointRow[],
+	playerId: number
+): boolean => {
+	const expectedEventIds = headers
+		.filter(
+			(header) =>
+				Array.isArray(header.event_live) &&
+				(header.event_live as EventLiveRow[]).some(
+					(eventLive) => parsedInteger(eventLive.elementId) === playerId
+				)
+		)
+		.map((header) => parsedInteger(header.event_id));
+	const expectedEventIdSet = new Set(expectedEventIds);
+	if (
+		expectedEventIds.length === 0 ||
+		expectedEventIds.some((eventId) => eventId === null) ||
+		expectedEventIdSet.size !== expectedEventIds.length ||
+		rows.length !== expectedEventIdSet.size
+	)
+		return false;
+
+	const actualEventIds = rows.map((row) => parsedInteger(row.event_id));
+	return (
+		actualEventIds.every(
+			(eventId): eventId is number => eventId !== null && expectedEventIdSet.has(eventId)
+		) && new Set(actualEventIds).size === expectedEventIdSet.size
+	);
+};
+
 const recentGameweekRevision = (headers: readonly RecentGameweekCheckpointRow[]): string => {
 	const identity = headers
 		.slice()
@@ -1028,11 +1059,14 @@ async function loadRecentGameweeks(
 			return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 		}
 		const rows = (data ?? []) as RecentGameweekRow[];
-		if (rows.length === 0 || !rows.some((row) => row.event_id === statsContext.asOfEventId)) {
+		if (
+			!recentGameweekRowsCoverAuthority(rows, authority.headers, playerId) ||
+			!rows.some((row) => parsedInteger(row.event_id) === statsContext.asOfEventId)
+		) {
 			return section(
 				[],
 				"FALLBACK",
-				"recent_gameweeks_player_row_missing",
+				"recent_gameweeks_player_rows_incomplete",
 				authority.revision,
 				authority.sourceCheckedAt
 			);
