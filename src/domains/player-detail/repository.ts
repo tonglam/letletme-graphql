@@ -5,6 +5,7 @@ import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
 import { isDataPublicationId } from "../../infra/data-publication";
 import {
+	getCoreDataSnapshot,
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
 	type CoreFixtureData,
@@ -13,7 +14,11 @@ import { getCurrentEvent, type CurrentEventCache } from "../../infra/event";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { metrics } from "../../infra/metrics";
 import { playersRepository } from "../players/repository";
-import { isValidEventLiveCheckpointPayload } from "../entry-live/v2-service";
+import {
+	hasCompleteEventLiveRoster,
+	isValidEventLiveCheckpointPayload,
+	type EventLiveRow,
+} from "../entry-live/v2-service";
 import {
 	getPlayerSeasonStatsLoadForContext,
 	resolvePlayerStatsContext,
@@ -213,6 +218,33 @@ type RecentGameweekAuthority = Readonly<{
 	headers: RecentGameweekCheckpointRow[];
 }>;
 
+const recentGameweekAuthorityMemo = new WeakMap<
+	object,
+	Map<string, Promise<RecentGameweekAuthority>>
+>();
+
+const requestRecentGameweekAuthorityMemo = (
+	context: GraphQLContext
+): Map<string, Promise<RecentGameweekAuthority>> => {
+	const scope = context.requestScope ?? context;
+	let memo = recentGameweekAuthorityMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		recentGameweekAuthorityMemo.set(scope, memo);
+	}
+	return memo;
+};
+
+const recentGameweekAuthorityKey = (statsContext: PlayerStatsContext): string =>
+	[
+		statsContext.scope,
+		statsContext.season,
+		statsContext.asOfEventId ?? "null",
+		statsContext.status,
+		statsContext.revision ?? "null",
+		statsContext.sourceCheckedAt ?? "null",
+	].join("|");
+
 type ResolvedEventState = {
 	id: number;
 	finished: boolean;
@@ -349,6 +381,55 @@ const checkpointIsValid = (row: RecentGameweekCheckpointRow): boolean =>
 		row.event_live_bytes
 	);
 
+const parsedInteger = (value: unknown): number | null | undefined => {
+	if (value === null) return null;
+	const numeric =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && value.trim() !== ""
+				? Number(value)
+				: Number.NaN;
+	return Number.isSafeInteger(numeric) ? numeric : undefined;
+};
+
+const parsedBoolean = (value: unknown): boolean | null | undefined =>
+	value === null ? null : typeof value === "boolean" ? value : undefined;
+
+const projectedRecentGameweekMatchesCheckpoint = (
+	row: RecentGameweekRow,
+	header: RecentGameweekCheckpointRow,
+	playerId: number
+): boolean => {
+	const eventLive = Array.isArray(header.event_live)
+		? (header.event_live as EventLiveRow[]).find(
+				(candidate) => parsedInteger(candidate.elementId) === playerId
+			)
+		: undefined;
+	if (!eventLive) return false;
+	const integerFields: ReadonlyArray<readonly [keyof RecentGameweekRow, keyof EventLiveRow]> = [
+		["total_points", "totalPoints"],
+		["minutes", "minutes"],
+		["goals_scored", "goalsScored"],
+		["assists", "assists"],
+		["clean_sheets", "cleanSheets"],
+		["saves", "saves"],
+		["bonus", "bonus"],
+		["bps", "bps"],
+	];
+	if (
+		!integerFields.every(
+			([rowField, payloadField]) =>
+				parsedInteger(row[rowField]) !== undefined &&
+				parsedInteger(row[rowField]) === parsedInteger(eventLive[payloadField])
+		)
+	)
+		return false;
+	return (
+		parsedBoolean(row.starts) !== undefined &&
+		parsedBoolean(row.starts) === parsedBoolean(eventLive.starts)
+	);
+};
+
 const recentGameweekRevision = (headers: readonly RecentGameweekCheckpointRow[]): string => {
 	const identity = headers
 		.slice()
@@ -365,7 +446,7 @@ const recentGameweekRevision = (headers: readonly RecentGameweekCheckpointRow[])
 	return `recent-v1:${createHash("sha256").update(identity, "utf8").digest("hex")}`;
 };
 
-const readRecentGameweekAuthority = async (
+const loadRecentGameweekAuthority = async (
 	context: GraphQLContext,
 	statsContext: PlayerStatsContext
 ): Promise<RecentGameweekAuthority> => {
@@ -377,6 +458,10 @@ const readRecentGameweekAuthority = async (
 		return { status: "READY", revision: null, sourceCheckedAt: null, headers: [] };
 	}
 	try {
+		const core = await getCoreDataSnapshot(context);
+		const expectedPlayerIds = new Set(core.players.map((player) => player.id));
+		if (expectedPlayerIds.size === 0)
+			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
 		const { data, error } = await context.data
 			.read("competition.live_points_publication_checkpoints")
 			.select(
@@ -391,7 +476,13 @@ const readRecentGameweekAuthority = async (
 			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
 		if (!rawHeaders.some((row) => row.event_id === statsContext.asOfEventId))
 			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
-		if (rawHeaders.some((row) => !checkpointIsValid(row)))
+		if (
+			rawHeaders.some(
+				(row) =>
+					!checkpointIsValid(row) ||
+					!hasCompleteEventLiveRoster(row.event_live as EventLiveRow[], expectedPlayerIds)
+			)
+		)
 			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
 		const sourceCheckedAt =
 			rawHeaders
@@ -409,6 +500,19 @@ const readRecentGameweekAuthority = async (
 		context.logger.warn({ err: error }, "Failed to read recent player gameweek authority");
 		return { status: "FAILED", revision: null, sourceCheckedAt: null, headers: [] };
 	}
+};
+
+const readRecentGameweekAuthority = (
+	context: GraphQLContext,
+	statsContext: PlayerStatsContext
+): Promise<RecentGameweekAuthority> => {
+	const memo = requestRecentGameweekAuthorityMemo(context);
+	const key = recentGameweekAuthorityKey(statsContext);
+	const existing = memo.get(key);
+	if (existing) return existing;
+	const load = loadRecentGameweekAuthority(context, statsContext);
+	memo.set(key, load);
+	return load;
 };
 
 const hasSameRecentGameweekAuthority = async (
@@ -940,7 +1044,8 @@ async function loadRecentGameweeks(
 				row.publication_id !== header.publication_id ||
 				parsePositiveInteger(row.publication_generation) !==
 					parsePositiveInteger(header.generation) ||
-				row.publication_event_live_sha256 !== header.event_live_sha256
+				row.publication_event_live_sha256 !== header.event_live_sha256 ||
+				!projectedRecentGameweekMatchesCheckpoint(row, header, playerId)
 			);
 		});
 		if (bindingMismatch) {

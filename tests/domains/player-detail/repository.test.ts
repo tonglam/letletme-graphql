@@ -226,7 +226,30 @@ function createContext(args: {
 			}))) as Array<Record<string, unknown>>;
 		const normalizedCheckpointRows: Array<Record<string, unknown>> = checkpointRows.map((row) => {
 			const eventId = Number(row.event_id);
-			const evidence = checkpointPayloadEvidence(buildTestEventLives(core, eventId));
+			const eventLives = buildTestEventLives(core, eventId).map((eventLive) => {
+				const recent = recentRows.find((candidate) => {
+					const source = candidate as Record<string, unknown>;
+					return (
+						Number(source.event_id) === eventId &&
+						Number(source.element_id ?? 9) === eventLive.elementId
+					);
+				});
+				if (!recent) return eventLive;
+				const source = recent as Record<string, unknown>;
+				return {
+					...eventLive,
+					totalPoints: source.total_points ?? eventLive.totalPoints,
+					minutes: source.minutes ?? eventLive.minutes,
+					starts: source.starts ?? eventLive.starts,
+					goalsScored: source.goals_scored ?? eventLive.goalsScored,
+					assists: source.assists ?? eventLive.assists,
+					cleanSheets: source.clean_sheets ?? eventLive.cleanSheets,
+					saves: source.saves ?? eventLive.saves,
+					bonus: source.bonus ?? eventLive.bonus,
+					bps: source.bps ?? eventLive.bps,
+				};
+			});
+			const evidence = checkpointPayloadEvidence(eventLives);
 			return {
 				...row,
 				checkpointed_at: row.checkpointed_at ?? checkpointSourceCheckedAt,
@@ -348,6 +371,58 @@ describe("playerDetailRepository", () => {
 		expect(details.get(10)?.id).toBe(10);
 		expect(detailMgetCalls).toBe(1);
 		expect(detailGetCalls).toBe(0);
+	});
+
+	it("memoizes recent checkpoint authority across a player batch", async () => {
+		const fromCalls: string[] = [];
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			fromCalls,
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [
+					{ element_id: 9, event_id: 3, total_points: 55 },
+					{ element_id: 10, event_id: 3, total_points: 44 },
+				],
+				"fpl.player_gameweek_stats": [
+					{
+						element_id: 9,
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+					{
+						element_id: 10,
+						event_id: 3,
+						total_points: 8,
+						minutes: 90,
+						starts: true,
+						goals_scored: 0,
+						assists: 1,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 1,
+						bps: 24,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const details = await playerDetailRepository.getPlayerDetails(context, [9, 10], 3);
+
+		expect(details.get(9)?.dataAvailability.recentGameweeks.state).toBe("READY");
+		expect(details.get(10)?.dataAvailability.recentGameweeks.state).toBe("READY");
+		expect(
+			fromCalls.filter((table) => table === "competition.live_points_publication_checkpoints")
+		).toHaveLength(1);
 	});
 
 	it("gates season production during preseason but keeps current market and fixtures", async () => {
@@ -743,6 +818,99 @@ describe("playerDetailRepository", () => {
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
 			state: "FALLBACK",
 			reasonCode: "recent_gameweeks_publication_invalid",
+		});
+	});
+
+	it("fails closed when a checksum-valid checkpoint omits core players", async () => {
+		const core = buildTestCoreData(3);
+		const eventLives = buildTestEventLives(core, 3).slice(0, -1);
+		const evidence = checkpointPayloadEvidence(eventLives);
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						element_id: 9,
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"competition.live_points_publication_checkpoints": [
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000003",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: new Date().toISOString(),
+						...evidence,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_publication_invalid",
+		});
+	});
+
+	it("fails closed when projected stats diverge from checkpoint event-live", async () => {
+		const core = buildTestCoreData(3);
+		const evidence = checkpointPayloadEvidence(buildTestEventLives(core, 3));
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						element_id: 9,
+						event_id: 3,
+						total_points: 99,
+						minutes: 0,
+						starts: false,
+						goals_scored: 0,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 0,
+					},
+				],
+				"competition.live_points_publication_checkpoints": [
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000003",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: new Date().toISOString(),
+						...evidence,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_publication_mismatch",
 		});
 	});
 

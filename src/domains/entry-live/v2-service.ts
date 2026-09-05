@@ -89,7 +89,7 @@ type LivePublication = {
 	};
 };
 
-type EventLiveRow = {
+export type EventLiveRow = {
 	eventId: number;
 	elementId: number;
 	minutes: number | null;
@@ -1001,7 +1001,7 @@ export const isPublishedEntryLiveInputV2 = (
 	entryId: number
 ): boolean => validInput(value, season, eventId, entryId);
 
-const hasCompleteEventLiveRoster = (
+export const hasCompleteEventLiveRoster = (
 	eventLives: readonly EventLiveRow[],
 	expectedPlayerIds: ReadonlySet<number>
 ): boolean => {
