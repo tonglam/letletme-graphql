@@ -511,15 +511,23 @@ describe("Live Points V2 projection", () => {
 			event_live_count: active.items.eventLive.count,
 			fixtures_count: active.items.fixtures.count,
 		};
+		const newerCheckpoint = {
+			...checkpoint,
+			publication_id: publicationId("999"),
+			generation: active.generation + 1,
+		};
 		for (const key of [...redis.values.keys()]) {
 			if (key.startsWith("llm:data:v2:fpl:live:2627:1:")) redis.values.delete(key);
 		}
-		let databaseCalls = 0;
+		const databaseCalls: Array<{ sql: string; values: unknown[] }> = [];
 		const result = await readLivePublicationByRefV2(
 			buildSnapshotContext(redis, {
-				databaseQuery: async () => {
-					databaseCalls += 1;
-					return { rows: [checkpoint] };
+				databaseQuery: async (sql, values) => {
+					const call = { sql: String(sql), values: values as unknown[] };
+					databaseCalls.push(call);
+					const exactQuery = call.sql.includes("publication_id = $3");
+					const exactValues = call.values[2] === active.publicationId;
+					return { rows: [exactQuery && exactValues ? checkpoint : newerCheckpoint] };
 				},
 			}),
 			1,
@@ -527,7 +535,9 @@ describe("Live Points V2 projection", () => {
 		);
 
 		expect(result?.servedFrom).toBe("POSTGRES_CHECKPOINT");
-		expect(databaseCalls).toBe(1);
+		expect(databaseCalls).toHaveLength(1);
+		expect(databaseCalls[0]?.sql).toContain("publication_id = $3");
+		expect(databaseCalls[0]?.values).toEqual([2026, 1, active.publicationId, active.generation]);
 	});
 
 	it("rejects an exact Redis publication with an incomplete expected roster", async () => {

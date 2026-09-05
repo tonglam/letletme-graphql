@@ -1240,6 +1240,34 @@ export const GLOBAL_CHECKPOINT_SQL = `
 	LIMIT 1
 `;
 
+/** Exact retained references must bypass a newer checkpoint head. */
+export const GLOBAL_CHECKPOINT_EXACT_SQL = `
+	SELECT
+		publication_id,
+		generation,
+		state,
+		source_checked_at,
+		published_at,
+		checkpointed_at,
+		expected_next_check_at,
+		revisions,
+		event_live,
+		fixtures,
+		event_live_bytes,
+		fixtures_bytes,
+		event_live_sha256,
+		fixtures_sha256,
+		event_live_count,
+		fixtures_count
+	FROM competition.live_points_publication_checkpoints
+	WHERE season_id = $1
+		AND event_id = $2
+		AND checkpointed_at IS NOT NULL
+		AND publication_id = $3
+		AND generation = $4
+	LIMIT 1
+`;
+
 export const ENTRY_CHECKPOINT_SQL = `
 	WITH head AS (
 		SELECT entry_id, publication_id, generation, picks_base_revision, content_sha256, row_count,
@@ -1571,13 +1599,21 @@ const readDatabaseGlobal = async (
 	context: GraphQLContext,
 	season: string,
 	eventId: number,
-	expectedFixtureIds: ReadonlySet<number> | null
+	expectedFixtureIds: ReadonlySet<number> | null,
+	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
 	try {
-		const result = await context.database.query<Row>(GLOBAL_CHECKPOINT_SQL, [
-			context.currentSeason.seasonId,
-			eventId,
-		]);
+		const result = await context.database.query<Row>(
+			expectedPublicationRef ? GLOBAL_CHECKPOINT_EXACT_SQL : GLOBAL_CHECKPOINT_SQL,
+			expectedPublicationRef
+				? [
+						context.currentSeason.seasonId,
+						eventId,
+						expectedPublicationRef.publicationId,
+						expectedPublicationRef.generation,
+					]
+				: [context.currentSeason.seasonId, eventId]
+		);
 		const row = result.rows[0];
 		if (!row) return null;
 		const publicationId = typeof row.publication_id === "string" ? row.publication_id : null;
@@ -1987,7 +2023,8 @@ const readDatabaseGlobalMemoized = (
 		context,
 		context.currentSeason.seasonCode,
 		eventId,
-		expectedFixtureIds
+		expectedFixtureIds,
+		expectedPublicationRef
 	).then((value) =>
 		value &&
 		(expectedScoreCoreRevision === undefined ||
