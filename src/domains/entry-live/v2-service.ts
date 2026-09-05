@@ -934,6 +934,32 @@ const isEventLiveArray = (value: unknown): value is EventLiveRow[] => {
 	);
 };
 
+/**
+ * Validate the immutable event-live payload carried by a PostgreSQL
+ * checkpoint. Readers that only need checkpoint authority (for example the
+ * player-detail recent-gameweek projection) must still verify the payload
+ * bytes represented by the stored hash/count metadata.
+ */
+export const isValidEventLiveCheckpointPayload = (
+	value: unknown,
+	eventId: number,
+	sha256: unknown,
+	count: unknown,
+	bytes: unknown
+): boolean => {
+	const eventLives = jsonValue(value);
+	if (
+		!isEventLiveArray(eventLives) ||
+		eventLives.some((row) => row.eventId !== eventId) ||
+		typeof sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/i.test(sha256) ||
+		integer(count) !== eventLives.length ||
+		integer(bytes) !== Buffer.byteLength(stable(eventLives), "utf8")
+	)
+		return false;
+	return hash(eventLives) === sha256.toLowerCase();
+};
+
 const isFixtureArray = (value: unknown): value is FixtureRow[] => {
 	if (!Array.isArray(value) || !value.every(isRecord)) return false;
 	const rows = value as Record<string, unknown>[];

@@ -7,6 +7,7 @@ import {
 	calcLivePointsByEntryV2,
 	clearLivePointsV2Lkg,
 	EVENT_PLAYER_IDENTITY_SQL,
+	isValidEventLiveCheckpointPayload,
 	loadLiveSnapshotMetaV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
@@ -214,6 +215,26 @@ const buildV2Redis = (
 };
 
 describe("Live Points V2 projection", () => {
+	it("requires event-live checkpoint payload evidence to match its metadata", () => {
+		const eventLives = buildTestEventLives(buildTestCoreData(1), 1);
+		const payload = canonicalJson(eventLives);
+		const bytes = Buffer.byteLength(payload, "utf8");
+		const checksum = hash(eventLives);
+
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, checksum, eventLives.length, bytes)
+		).toBe(true);
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, checksum, eventLives.length + 1, bytes)
+		).toBe(false);
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, checksum, eventLives.length, bytes + 1)
+		).toBe(false);
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, "f".repeat(64), eventLives.length, bytes)
+		).toBe(false);
+	});
+
 	it("requires the GW1 baseline only for the GW1 identity publication", () => {
 		expect(EVENT_PLAYER_IDENTITY_SQL).toContain(
 			"AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)"

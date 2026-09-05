@@ -3,6 +3,7 @@ import type { GraphQLContext } from "../../graphql/context";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { isDataPublicationId } from "../../infra/data-publication";
 import {
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
@@ -12,6 +13,7 @@ import { getCurrentEvent, type CurrentEventCache } from "../../infra/event";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { metrics } from "../../infra/metrics";
 import { playersRepository } from "../players/repository";
+import { isValidEventLiveCheckpointPayload } from "../entry-live/v2-service";
 import {
 	getPlayerSeasonStatsLoadForContext,
 	resolvePlayerStatsContext,
@@ -197,8 +199,11 @@ type RecentGameweekCheckpointRow = {
 	generation: number | string | null;
 	state: string | null;
 	source_checked_at: string | Date | null;
+	checkpointed_at: string | Date | null;
+	event_live: unknown;
 	event_live_sha256: string | null;
 	event_live_count: number | string | null;
+	event_live_bytes: number | string | null;
 };
 
 type RecentGameweekAuthority = Readonly<{
@@ -297,7 +302,6 @@ const hasSameStatsAuthority = (cached: PlayerStatsContext, current: PlayerStatsC
 	cached.rowCount === current.rowCount &&
 	cached.expectedRowCount === current.expectedRowCount;
 
-const PUBLICATION_ID_PATTERN = /^[0-9a-f-]{36}$/i;
 const PUBLICATION_SHA_PATTERN = /^[0-9a-f]{64}$/i;
 const CHECKPOINT_STATES = new Set([
 	"PRE_DEADLINE",
@@ -327,14 +331,23 @@ const checkpointIsValid = (row: RecentGameweekCheckpointRow): boolean =>
 	Number.isSafeInteger(row.event_id) &&
 	row.event_id > 0 &&
 	typeof row.publication_id === "string" &&
-	PUBLICATION_ID_PATTERN.test(row.publication_id) &&
+	isDataPublicationId(row.publication_id) &&
 	parsePositiveInteger(row.generation) !== null &&
 	typeof row.event_live_sha256 === "string" &&
 	PUBLICATION_SHA_PATTERN.test(row.event_live_sha256) &&
 	parseCheckpointTimestamp(row.source_checked_at) !== null &&
+	parseCheckpointTimestamp(row.checkpointed_at) !== null &&
 	parsePositiveInteger(row.event_live_count) !== null &&
+	parsePositiveInteger(row.event_live_bytes) !== null &&
 	typeof row.state === "string" &&
-	CHECKPOINT_STATES.has(row.state);
+	CHECKPOINT_STATES.has(row.state) &&
+	isValidEventLiveCheckpointPayload(
+		row.event_live,
+		row.event_id,
+		row.event_live_sha256,
+		row.event_live_count,
+		row.event_live_bytes
+	);
 
 const recentGameweekRevision = (headers: readonly RecentGameweekCheckpointRow[]): string => {
 	const identity = headers
@@ -367,7 +380,7 @@ const readRecentGameweekAuthority = async (
 		const { data, error } = await context.data
 			.read("competition.live_points_publication_checkpoints")
 			.select(
-				"event_id, publication_id, generation, state, source_checked_at, event_live_sha256, event_live_count"
+				"event_id, publication_id, generation, state, source_checked_at, checkpointed_at, event_live, event_live_sha256, event_live_count, event_live_bytes"
 			)
 			.lte("event_id", statsContext.asOfEventId)
 			.order("event_id", { ascending: false })
@@ -375,6 +388,8 @@ const readRecentGameweekAuthority = async (
 		if (error) return { status: "FAILED", revision: null, sourceCheckedAt: null, headers: [] };
 		const rawHeaders = (data ?? []) as RecentGameweekCheckpointRow[];
 		if (rawHeaders.length === 0)
+			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
+		if (!rawHeaders.some((row) => row.event_id === statsContext.asOfEventId))
 			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
 		if (rawHeaders.some((row) => !checkpointIsValid(row)))
 			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
@@ -909,7 +924,7 @@ async function loadRecentGameweeks(
 			return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 		}
 		const rows = (data ?? []) as RecentGameweekRow[];
-		if (rows.length === 0) {
+		if (rows.length === 0 || !rows.some((row) => row.event_id === statsContext.asOfEventId)) {
 			return section(
 				[],
 				"FALLBACK",

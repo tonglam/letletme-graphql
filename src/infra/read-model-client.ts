@@ -359,16 +359,20 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 	[READ_MODELS.livePointsPublicationCheckpoints]: {
 		sourceRelations: ["competition.live_points_publication_checkpoints"],
 		sql: `
-			SELECT
+			SELECT DISTINCT ON (event_id)
 				event_id,
 				publication_id,
 				generation,
 				state,
 				source_checked_at,
+				checkpointed_at,
+				event_live,
 				event_live_sha256,
-				event_live_count
+				event_live_count,
+				event_live_bytes
 			FROM competition.live_points_publication_checkpoints
-			WHERE season_id = $1
+			WHERE season_id = $1 AND checkpointed_at IS NOT NULL
+			ORDER BY event_id, generation DESC
 		`,
 	},
 	[READ_MODELS.playerGameweekScoringItems]: {

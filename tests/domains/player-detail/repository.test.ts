@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import {
 	playerDetailCacheKey,
 	playerDetailRepository,
@@ -7,11 +8,34 @@ import { gqlCacheKey } from "../../../src/infra/cache-key";
 import {
 	buildCorePublication,
 	buildSnapshotContext,
+	buildTestEventLives,
 	buildTestCoreData,
 	TestRedis,
 } from "../../helpers/data-publication";
 
 type TableRows = Record<string, unknown[]>;
+
+const stable = (value: unknown): string => {
+	if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
+	if (value && typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stable(record[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "null";
+};
+
+const checkpointPayloadEvidence = (value: unknown) => {
+	const payload = stable(value);
+	return {
+		event_live: value,
+		event_live_sha256: createHash("sha256").update(payload, "utf8").digest("hex"),
+		event_live_count: Array.isArray(value) ? value.length : 0,
+		event_live_bytes: Buffer.byteLength(payload, "utf8"),
+	};
+};
 
 const queryBuilder = (rows: unknown[], queryError: unknown = null) => {
 	let selectedRows = [...rows];
@@ -199,11 +223,18 @@ function createContext(args: {
 				generation: "1",
 				state: "LIVE_ACTIVE",
 				source_checked_at: checkpointSourceCheckedAt,
-				event_live_sha256: "a".repeat(64),
-				event_live_count: 220,
 			}))) as Array<Record<string, unknown>>;
-		const checkpointsByEvent = new Map(checkpointRows.map((row) => [row.event_id, row]));
-		tables["competition.live_points_publication_checkpoints"] = checkpointRows;
+		const normalizedCheckpointRows: Array<Record<string, unknown>> = checkpointRows.map((row) => {
+			const eventId = Number(row.event_id);
+			const evidence = checkpointPayloadEvidence(buildTestEventLives(core, eventId));
+			return {
+				...row,
+				checkpointed_at: row.checkpointed_at ?? checkpointSourceCheckedAt,
+				...(row.event_live === undefined ? evidence : {}),
+			};
+		});
+		const checkpointsByEvent = new Map(normalizedCheckpointRows.map((row) => [row.event_id, row]));
+		tables["competition.live_points_publication_checkpoints"] = normalizedCheckpointRows;
 		tables["fpl.player_gameweek_stats"] = recentRows.map((row) => {
 			const source = row as Record<string, unknown>;
 			const checkpoint = checkpointsByEvent.get(Number(source.event_id));
@@ -666,6 +697,52 @@ describe("playerDetailRepository", () => {
 			state: "FALLBACK",
 			reasonCode: "recent_gameweeks_publication_mismatch",
 			revision: expect.stringMatching(/^recent-v1:/) as unknown,
+		});
+	});
+
+	it("fails closed when checkpoint event-live evidence is corrupt", async () => {
+		const eventLives = buildTestEventLives(buildTestCoreData(3), 3);
+		const evidence = checkpointPayloadEvidence(eventLives);
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"competition.live_points_publication_checkpoints": [
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000003",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: new Date().toISOString(),
+						...evidence,
+						event_live_bytes: evidence.event_live_bytes + 1,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_publication_invalid",
 		});
 	});
 
