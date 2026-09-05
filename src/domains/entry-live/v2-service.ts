@@ -2053,29 +2053,10 @@ const readGlobal = async (
 	expectedScoreCoreRevision?: string,
 	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
-	// An exact publication reference is already a producer-side coherence
-	// decision.  Read that Redis snapshot before consulting the mutable Core
-	// read model so a warm league board remains available during a PostgreSQL
-	// incident.  The complete projection still validates Core when it needs to
-	// calculate an uncached row; this boundary only prevents an avoidable DB
-	// dependency from hiding a valid publication or a warmed projection cache.
+	// A process LKG is only populated after the complete publication boundary
+	// below has accepted the payload.  An exact retained reference can use that
+	// immutable, already-validated value without reacquiring mutable Core.
 	if (expectedPublicationRef) {
-		const exactRedis = await readRedisGlobal(
-			context,
-			eventId,
-			undefined,
-			undefined,
-			expectedScoreCoreRevision,
-			expectedPublicationRef
-		);
-		if (exactRedis) {
-			// The producer has already accepted this immutable publication as a
-			// coherent event snapshot, and readRedisGlobal has validated its item
-			// checksums/schema. An exact retained reference must not acquire a
-			// mutable PostgreSQL dependency during a database incident.
-			rememberGlobalLkg(context, eventId, exactRedis);
-			return exactRedis;
-		}
 		const exactLkg = readGlobalLkg(
 			context,
 			eventId,
@@ -2084,18 +2065,59 @@ const readGlobal = async (
 		);
 		if (exactLkg) return exactLkg;
 	}
+
+	// An exact publication reference is already a producer-side coherence
+	// decision. Read that Redis snapshot before consulting the mutable Core read
+	// model, but do not return it until the event roster and fixture sets have
+	// been checked. A checksum-valid partial payload must never become READY.
+	if (expectedPublicationRef) {
+		const exactRedisCandidate = await readRedisGlobal(
+			context,
+			eventId,
+			undefined,
+			undefined,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		const core = await readCore(context);
+		if (!core) return null;
+		const expectedPlayerIds = await expectedPlayerIdsForEvent(context, eventId, core);
+		const expectedFixtureIds = await expectedFixtureIdsForEvent(context, eventId);
+		const exactRedis = requireCompleteGlobalPublication(
+			context,
+			exactRedisCandidate,
+			expectedPlayerIds,
+			expectedFixtureIds
+		);
+		if (exactRedis) {
+			rememberGlobalLkg(context, eventId, exactRedis);
+			return exactRedis;
+		}
+		const validatedRedis = await readRedisGlobal(
+			context,
+			eventId,
+			expectedPlayerIds,
+			expectedFixtureIds,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		if (validatedRedis) {
+			rememberGlobalLkg(context, eventId, validatedRedis);
+			return validatedRedis;
+		}
+		return null;
+	}
+
 	// Probe Redis before consulting process LKG.  A warmed LKG is a fallback, not
-	// a reason to ignore a recovered current/previous publication.
-	const redisProbe = expectedPublicationRef
-		? null
-		: await readRedisGlobal(
-				context,
-				eventId,
-				undefined,
-				undefined,
-				expectedScoreCoreRevision,
-				expectedPublicationRef
-			);
+	// a reason to ignore a recovered current/previous publication. The
+	// candidate is still provisional until the expected roster is known.
+	const redisProbe = await readRedisGlobal(
+		context,
+		eventId,
+		undefined,
+		undefined,
+		expectedScoreCoreRevision
+	);
 	if (!redisProbe) {
 		const processLkg = readGlobalLkg(
 			context,
@@ -2158,7 +2180,13 @@ const readGlobal = async (
 		expectedScoreCoreRevision,
 		expectedPublicationRef
 	);
-	if (processLkg) return processLkg;
+	const completeProcessLkg = requireCompleteGlobalPublication(
+		context,
+		processLkg,
+		expectedPlayerIds,
+		expectedFixtureIds
+	);
+	if (completeProcessLkg) return completeProcessLkg;
 	const databaseGlobal = await readDatabaseGlobalMemoized(
 		context,
 		eventId,

@@ -457,9 +457,6 @@ describe("Live Points V2 projection", () => {
 	it("reads an exact league publication from Redis before consulting PostgreSQL", async () => {
 		clearLivePointsV2Lkg();
 		const redis = buildV2Redis();
-		for (const key of [...redis.values.keys()]) {
-			if (key.startsWith("llm:data:fpl:core:2627:")) redis.values.delete(key);
-		}
 		const active = JSON.parse(redis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
 			publicationId: string;
 			generation: number;
@@ -477,6 +474,39 @@ describe("Live Points V2 projection", () => {
 		);
 		expect(result?.servedFrom).toBe("REDIS_CURRENT");
 		expect(databaseCalls).toBe(0);
+	});
+
+	it("rejects an exact Redis publication with an incomplete expected roster", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const itemKey = "llm:data:v2:fpl:live:2627:1:1:eventLive";
+		const activeKey = "llm:data:v2:fpl:live:2627:1:active";
+		const truncated = (JSON.parse(redis.values.get(itemKey)!) as Array<{ elementId: number }>).filter(
+			(row) => row.elementId !== 5
+		);
+		const payload = canonicalJson(truncated);
+		const checksum = hash(truncated);
+		redis.values.set(itemKey, payload);
+		redis.values.set(`${itemKey}:meta`, `${truncated.length}|${Buffer.byteLength(payload)}|${checksum}`);
+		const manifest = JSON.parse(redis.values.get(activeKey)!) as {
+			items: { eventLive: { count: number; bytes: number; sha256: string } };
+		};
+		manifest.items.eventLive = {
+			count: truncated.length,
+			bytes: Buffer.byteLength(payload),
+			sha256: checksum,
+		};
+		redis.values.set(activeKey, JSON.stringify(manifest));
+		const active = JSON.parse(redis.values.get(activeKey)!) as {
+			publicationId: string;
+			generation: number;
+		};
+		const result = await readLivePublicationByRefV2(
+			buildSnapshotContext(redis),
+			1,
+			{ publicationId: active.publicationId, generation: active.generation }
+		);
+		expect(result).toBeNull();
 	});
 
 	it("serves an exact league publication from process LKG before PostgreSQL", async () => {
