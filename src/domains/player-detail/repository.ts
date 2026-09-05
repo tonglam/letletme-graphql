@@ -493,6 +493,22 @@ const loadRecentGameweekAuthority = async (
 		const expectedPlayerIds = new Set(core.players.map((player) => player.id));
 		if (expectedPlayerIds.size === 0)
 			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
+		const eventSnapshot = await getCoreEventSnapshot(context).catch((error) => {
+			context.logger.warn(
+				{ err: error },
+				"Recent player gameweek event lifecycle authority unavailable"
+			);
+			return null;
+		});
+		const expectedPlayerIdsForEvent = (eventId: number): ReadonlySet<number> | undefined => {
+			const event = eventSnapshot?.events.find((candidate) => candidate.id === eventId);
+			const historical =
+				event?.finished === true ||
+				(eventSnapshot?.currentEventId !== null &&
+					eventSnapshot?.currentEventId !== undefined &&
+					eventId < eventSnapshot.currentEventId);
+			return historical ? undefined : expectedPlayerIds;
+		};
 		const { data, error } = await context.data
 			.read("competition.live_points_publication_checkpoints")
 			.select(
@@ -508,11 +524,14 @@ const loadRecentGameweekAuthority = async (
 		if (!rawHeaders.some((row) => row.event_id === statsContext.asOfEventId))
 			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
 		if (
-			rawHeaders.some(
-				(row) =>
-					!checkpointIsValid(row) ||
-					!hasCompleteEventLiveRoster(row.event_live as EventLiveRow[], expectedPlayerIds)
-			)
+			rawHeaders.some((row) => {
+				if (!checkpointIsValid(row)) return true;
+				const expected = expectedPlayerIdsForEvent(row.event_id);
+				return (
+					expected !== undefined &&
+					!hasCompleteEventLiveRoster(row.event_live as EventLiveRow[], expected)
+				);
+			})
 		)
 			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
 		const sourceCheckedAt =

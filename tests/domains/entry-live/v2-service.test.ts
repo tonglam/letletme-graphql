@@ -476,6 +476,60 @@ describe("Live Points V2 projection", () => {
 		expect(databaseCalls).toBe(0);
 	});
 
+	it("falls back to the exact PostgreSQL checkpoint after Redis misses", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const active = JSON.parse(redis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
+			publicationId: string;
+			generation: number;
+			state: string;
+			sourceCheckedAt: string;
+			publishedAt: string;
+			revisions: unknown;
+			items: {
+				eventLive: { key: string; count: number; bytes: number; sha256: string };
+				fixtures: { key: string; count: number; bytes: number; sha256: string };
+			};
+		};
+		const eventLives = JSON.parse(redis.values.get(active.items.eventLive.key)!) as unknown[];
+		const fixtures = JSON.parse(redis.values.get(active.items.fixtures.key)!) as unknown[];
+		const checkpoint = {
+			publication_id: active.publicationId,
+			generation: active.generation,
+			state: active.state,
+			source_checked_at: active.sourceCheckedAt,
+			published_at: active.publishedAt,
+			checkpointed_at: active.sourceCheckedAt,
+			expected_next_check_at: null,
+			revisions: active.revisions,
+			event_live: eventLives,
+			fixtures,
+			event_live_bytes: active.items.eventLive.bytes,
+			fixtures_bytes: active.items.fixtures.bytes,
+			event_live_sha256: active.items.eventLive.sha256,
+			fixtures_sha256: active.items.fixtures.sha256,
+			event_live_count: active.items.eventLive.count,
+			fixtures_count: active.items.fixtures.count,
+		};
+		for (const key of [...redis.values.keys()]) {
+			if (key.startsWith("llm:data:v2:fpl:live:2627:1:")) redis.values.delete(key);
+		}
+		let databaseCalls = 0;
+		const result = await readLivePublicationByRefV2(
+			buildSnapshotContext(redis, {
+				databaseQuery: async () => {
+					databaseCalls += 1;
+					return { rows: [checkpoint] };
+				},
+			}),
+			1,
+			{ publicationId: active.publicationId, generation: active.generation }
+		);
+
+		expect(result?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseCalls).toBe(1);
+	});
+
 	it("rejects an exact Redis publication with an incomplete expected roster", async () => {
 		clearLivePointsV2Lkg();
 		const redis = buildV2Redis();

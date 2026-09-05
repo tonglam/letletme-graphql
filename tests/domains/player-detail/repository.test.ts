@@ -496,6 +496,72 @@ describe("playerDetailRepository", () => {
 		});
 	});
 
+	it("keeps a historical checkpoint when the current Core roster has a late player", async () => {
+		const historicalEventLives = buildTestEventLives(buildTestCoreData(3), 1).filter(
+			(eventLive) => eventLive.elementId !== 10
+		);
+		const historicalEvidence = checkpointPayloadEvidence(historicalEventLives);
+		const checkpointSourceCheckedAt = new Date().toISOString();
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						element_id: 9,
+						event_id: 1,
+						total_points: 0,
+						minutes: 0,
+						starts: false,
+						goals_scored: 0,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 0,
+					},
+					{
+						element_id: 9,
+						event_id: 3,
+						total_points: 0,
+						minutes: 0,
+						starts: false,
+						goals_scored: 0,
+						assists: 0,
+						clean_sheets: 0,
+						saves: 0,
+						bonus: 0,
+						bps: 0,
+					},
+				],
+				"competition.live_points_publication_checkpoints": [
+					{
+						event_id: 1,
+						publication_id: "00000000-0000-4000-8000-000000000001",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: checkpointSourceCheckedAt,
+						...historicalEvidence,
+					},
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000003",
+						generation: "1",
+						state: "LIVE_ACTIVE",
+						source_checked_at: checkpointSourceCheckedAt,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.dataAvailability.recentGameweeks.state).toBe("READY");
+		expect(detail?.recentGameweeks.map((row) => row.eventId)).toEqual([3, 1]);
+	});
+
 	it("gates season production during preseason but keeps current market and fixtures", async () => {
 		const fromCalls: string[] = [];
 		const context = createContext({

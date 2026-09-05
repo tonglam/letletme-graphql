@@ -2105,7 +2105,21 @@ const readGlobal = async (
 			rememberGlobalLkg(context, eventId, validatedRedis);
 			return validatedRedis;
 		}
-		return null;
+		const databaseGlobal = await readDatabaseGlobalMemoized(
+			context,
+			eventId,
+			expectedFixtureIds,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		const completeDatabaseGlobal = requireCompleteGlobalPublication(
+			context,
+			databaseGlobal,
+			expectedPlayerIds,
+			expectedFixtureIds
+		);
+		if (completeDatabaseGlobal) rememberGlobalLkg(context, eventId, completeDatabaseGlobal);
+		return completeDatabaseGlobal;
 	}
 
 	// Probe Redis before consulting process LKG.  A warmed LKG is a fallback, not
