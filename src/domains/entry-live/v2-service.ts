@@ -89,7 +89,7 @@ type LivePublication = {
 	};
 };
 
-type EventLiveRow = {
+export type EventLiveRow = {
 	eventId: number;
 	elementId: number;
 	minutes: number | null;
@@ -934,6 +934,32 @@ const isEventLiveArray = (value: unknown): value is EventLiveRow[] => {
 	);
 };
 
+/**
+ * Validate the immutable event-live payload carried by a PostgreSQL
+ * checkpoint. Readers that only need checkpoint authority (for example the
+ * player-detail recent-gameweek projection) must still verify the payload
+ * bytes represented by the stored hash/count metadata.
+ */
+export const isValidEventLiveCheckpointPayload = (
+	value: unknown,
+	eventId: number,
+	sha256: unknown,
+	count: unknown,
+	bytes: unknown
+): boolean => {
+	const eventLives = jsonValue(value);
+	if (
+		!isEventLiveArray(eventLives) ||
+		eventLives.some((row) => row.eventId !== eventId) ||
+		typeof sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/i.test(sha256) ||
+		integer(count) !== eventLives.length ||
+		integer(bytes) !== Buffer.byteLength(stable(eventLives), "utf8")
+	)
+		return false;
+	return hash(eventLives) === sha256.toLowerCase();
+};
+
 const isFixtureArray = (value: unknown): value is FixtureRow[] => {
 	if (!Array.isArray(value) || !value.every(isRecord)) return false;
 	const rows = value as Record<string, unknown>[];
@@ -975,7 +1001,7 @@ export const isPublishedEntryLiveInputV2 = (
 	entryId: number
 ): boolean => validInput(value, season, eventId, entryId);
 
-const hasCompleteEventLiveRoster = (
+export const hasCompleteEventLiveRoster = (
 	eventLives: readonly EventLiveRow[],
 	expectedPlayerIds: ReadonlySet<number>
 ): boolean => {
@@ -1211,6 +1237,34 @@ export const GLOBAL_CHECKPOINT_SQL = `
 	FROM competition.live_points_publication_checkpoints
 	WHERE season_id = $1 AND event_id = $2 AND checkpointed_at IS NOT NULL
 	ORDER BY generation DESC
+	LIMIT 1
+`;
+
+/** Exact retained references must bypass a newer checkpoint head. */
+export const GLOBAL_CHECKPOINT_EXACT_SQL = `
+	SELECT
+		publication_id,
+		generation,
+		state,
+		source_checked_at,
+		published_at,
+		checkpointed_at,
+		expected_next_check_at,
+		revisions,
+		event_live,
+		fixtures,
+		event_live_bytes,
+		fixtures_bytes,
+		event_live_sha256,
+		fixtures_sha256,
+		event_live_count,
+		fixtures_count
+	FROM competition.live_points_publication_checkpoints
+	WHERE season_id = $1
+		AND event_id = $2
+		AND checkpointed_at IS NOT NULL
+		AND publication_id = $3
+		AND generation = $4
 	LIMIT 1
 `;
 
@@ -1545,13 +1599,21 @@ const readDatabaseGlobal = async (
 	context: GraphQLContext,
 	season: string,
 	eventId: number,
-	expectedFixtureIds: ReadonlySet<number> | null
+	expectedFixtureIds: ReadonlySet<number> | null,
+	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
 	try {
-		const result = await context.database.query<Row>(GLOBAL_CHECKPOINT_SQL, [
-			context.currentSeason.seasonId,
-			eventId,
-		]);
+		const result = await context.database.query<Row>(
+			expectedPublicationRef ? GLOBAL_CHECKPOINT_EXACT_SQL : GLOBAL_CHECKPOINT_SQL,
+			expectedPublicationRef
+				? [
+						context.currentSeason.seasonId,
+						eventId,
+						expectedPublicationRef.publicationId,
+						expectedPublicationRef.generation,
+					]
+				: [context.currentSeason.seasonId, eventId]
+		);
 		const row = result.rows[0];
 		if (!row) return null;
 		const publicationId = typeof row.publication_id === "string" ? row.publication_id : null;
@@ -1961,7 +2023,8 @@ const readDatabaseGlobalMemoized = (
 		context,
 		context.currentSeason.seasonCode,
 		eventId,
-		expectedFixtureIds
+		expectedFixtureIds,
+		expectedPublicationRef
 	).then((value) =>
 		value &&
 		(expectedScoreCoreRevision === undefined ||
@@ -2027,29 +2090,10 @@ const readGlobal = async (
 	expectedScoreCoreRevision?: string,
 	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
-	// An exact publication reference is already a producer-side coherence
-	// decision.  Read that Redis snapshot before consulting the mutable Core
-	// read model so a warm league board remains available during a PostgreSQL
-	// incident.  The complete projection still validates Core when it needs to
-	// calculate an uncached row; this boundary only prevents an avoidable DB
-	// dependency from hiding a valid publication or a warmed projection cache.
+	// A process LKG is only populated after the complete publication boundary
+	// below has accepted the payload.  An exact retained reference can use that
+	// immutable, already-validated value without reacquiring mutable Core.
 	if (expectedPublicationRef) {
-		const exactRedis = await readRedisGlobal(
-			context,
-			eventId,
-			undefined,
-			undefined,
-			expectedScoreCoreRevision,
-			expectedPublicationRef
-		);
-		if (exactRedis) {
-			// The producer has already accepted this immutable publication as a
-			// coherent event snapshot, and readRedisGlobal has validated its item
-			// checksums/schema. An exact retained reference must not acquire a
-			// mutable PostgreSQL dependency during a database incident.
-			rememberGlobalLkg(context, eventId, exactRedis);
-			return exactRedis;
-		}
 		const exactLkg = readGlobalLkg(
 			context,
 			eventId,
@@ -2058,18 +2102,73 @@ const readGlobal = async (
 		);
 		if (exactLkg) return exactLkg;
 	}
+
+	// An exact publication reference is already a producer-side coherence
+	// decision. Read that Redis snapshot before consulting the mutable Core read
+	// model, but do not return it until the event roster and fixture sets have
+	// been checked. A checksum-valid partial payload must never become READY.
+	if (expectedPublicationRef) {
+		const exactRedisCandidate = await readRedisGlobal(
+			context,
+			eventId,
+			undefined,
+			undefined,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		const core = await readCore(context);
+		if (!core) return null;
+		const expectedPlayerIds = await expectedPlayerIdsForEvent(context, eventId, core);
+		const expectedFixtureIds = await expectedFixtureIdsForEvent(context, eventId);
+		const exactRedis = requireCompleteGlobalPublication(
+			context,
+			exactRedisCandidate,
+			expectedPlayerIds,
+			expectedFixtureIds
+		);
+		if (exactRedis) {
+			rememberGlobalLkg(context, eventId, exactRedis);
+			return exactRedis;
+		}
+		const validatedRedis = await readRedisGlobal(
+			context,
+			eventId,
+			expectedPlayerIds,
+			expectedFixtureIds,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		if (validatedRedis) {
+			rememberGlobalLkg(context, eventId, validatedRedis);
+			return validatedRedis;
+		}
+		const databaseGlobal = await readDatabaseGlobalMemoized(
+			context,
+			eventId,
+			expectedFixtureIds,
+			expectedScoreCoreRevision,
+			expectedPublicationRef
+		);
+		const completeDatabaseGlobal = requireCompleteGlobalPublication(
+			context,
+			databaseGlobal,
+			expectedPlayerIds,
+			expectedFixtureIds
+		);
+		if (completeDatabaseGlobal) rememberGlobalLkg(context, eventId, completeDatabaseGlobal);
+		return completeDatabaseGlobal;
+	}
+
 	// Probe Redis before consulting process LKG.  A warmed LKG is a fallback, not
-	// a reason to ignore a recovered current/previous publication.
-	const redisProbe = expectedPublicationRef
-		? null
-		: await readRedisGlobal(
-				context,
-				eventId,
-				undefined,
-				undefined,
-				expectedScoreCoreRevision,
-				expectedPublicationRef
-			);
+	// a reason to ignore a recovered current/previous publication. The
+	// candidate is still provisional until the expected roster is known.
+	const redisProbe = await readRedisGlobal(
+		context,
+		eventId,
+		undefined,
+		undefined,
+		expectedScoreCoreRevision
+	);
 	if (!redisProbe) {
 		const processLkg = readGlobalLkg(
 			context,
@@ -2132,7 +2231,13 @@ const readGlobal = async (
 		expectedScoreCoreRevision,
 		expectedPublicationRef
 	);
-	if (processLkg) return processLkg;
+	const completeProcessLkg = requireCompleteGlobalPublication(
+		context,
+		processLkg,
+		expectedPlayerIds,
+		expectedFixtureIds
+	);
+	if (completeProcessLkg) return completeProcessLkg;
 	const databaseGlobal = await readDatabaseGlobalMemoized(
 		context,
 		eventId,

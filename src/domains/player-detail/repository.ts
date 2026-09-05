@@ -1,8 +1,11 @@
+import { createHash } from "crypto";
 import type { GraphQLContext } from "../../graphql/context";
 import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
+import { isDataPublicationId } from "../../infra/data-publication";
 import {
+	getCoreDataSnapshot,
 	getCoreEventSnapshot,
 	getCoreFixtureSnapshot,
 	type CoreFixtureData,
@@ -11,6 +14,11 @@ import { getCurrentEvent, type CurrentEventCache } from "../../infra/event";
 import { QUERY_CACHE_TTL_SECONDS, writeQueryCache } from "../../infra/query-cache";
 import { metrics } from "../../infra/metrics";
 import { playersRepository } from "../players/repository";
+import {
+	hasCompleteEventLiveRoster,
+	isValidEventLiveCheckpointPayload,
+	type EventLiveRow,
+} from "../entry-live/v2-service";
 import {
 	getPlayerSeasonStatsLoadForContext,
 	resolvePlayerStatsContext,
@@ -25,7 +33,7 @@ const NULL_SENTINEL = "__pd:null__";
 // Bump the namespace for the hard-cut availability contract. Values written
 // by the previous runtime did not carry enough provenance to distinguish a
 // mutable recent-gameweek read from an authoritative publication.
-const PLAYER_DETAIL_CACHE_VERSION = "v2";
+const PLAYER_DETAIL_CACHE_VERSION = "v3";
 
 export const PLAYER_DETAIL_HISTORICAL_TEAMS_SQL = `
 	SELECT DISTINCT ON (event_id) event_id, team_id
@@ -176,6 +184,9 @@ type MarketSnapshotRow = {
 
 type RecentGameweekRow = {
 	event_id: number;
+	publication_id: string | null;
+	publication_generation: number | string | null;
+	publication_event_live_sha256: string | null;
 	total_points: number;
 	minutes: number | null;
 	starts: boolean | null;
@@ -186,6 +197,53 @@ type RecentGameweekRow = {
 	bonus: number | null;
 	bps: number | null;
 };
+
+type RecentGameweekCheckpointRow = {
+	event_id: number;
+	publication_id: string | null;
+	generation: number | string | null;
+	state: string | null;
+	source_checked_at: string | Date | null;
+	checkpointed_at: string | Date | null;
+	event_live: unknown;
+	event_live_sha256: string | null;
+	event_live_count: number | string | null;
+	event_live_bytes: number | string | null;
+};
+
+type RecentGameweekAuthority = Readonly<{
+	status: "READY" | "MISSING" | "INVALID" | "FAILED";
+	revision: string | null;
+	sourceCheckedAt: string | null;
+	headers: RecentGameweekCheckpointRow[];
+}>;
+
+const recentGameweekAuthorityMemo = new WeakMap<
+	object,
+	Map<string, Promise<RecentGameweekAuthority>>
+>();
+
+const requestRecentGameweekAuthorityMemo = (
+	context: GraphQLContext
+): Map<string, Promise<RecentGameweekAuthority>> => {
+	const scope = context.requestScope ?? context;
+	let memo = recentGameweekAuthorityMemo.get(scope);
+	if (!memo) {
+		memo = new Map();
+		recentGameweekAuthorityMemo.set(scope, memo);
+	}
+	return memo;
+};
+
+const recentGameweekAuthorityKey = (statsContext: PlayerStatsContext): string =>
+	[
+		statsContext.scope,
+		statsContext.season,
+		statsContext.asOfEventId ?? "null",
+		statsContext.status,
+		statsContext.revision ?? "null",
+		statsContext.sourceCheckedAt ?? "null",
+	].join("|");
 
 type ResolvedEventState = {
 	id: number;
@@ -275,6 +333,259 @@ const hasSameStatsAuthority = (cached: PlayerStatsContext, current: PlayerStatsC
 	cached.publishedAt === current.publishedAt &&
 	cached.rowCount === current.rowCount &&
 	cached.expectedRowCount === current.expectedRowCount;
+
+const PUBLICATION_SHA_PATTERN = /^[0-9a-f]{64}$/i;
+const CHECKPOINT_STATES = new Set([
+	"PRE_DEADLINE",
+	"PICKS_WAIT",
+	"PICKS_PROBE",
+	"PICKS_SYNC",
+	"LIVE_ACTIVE",
+	"BETWEEN_FIXTURES",
+	"DAY_SETTLING",
+	"GW_REVIEW",
+	"FINALIZED",
+]);
+
+const parsePositiveInteger = (value: unknown): number | null => {
+	const parsed =
+		typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+const parseCheckpointTimestamp = (value: string | Date | null): string | null => {
+	if (value === null) return null;
+	const parsed = value instanceof Date ? value : new Date(value);
+	return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+};
+
+const checkpointIsValid = (row: RecentGameweekCheckpointRow): boolean =>
+	Number.isSafeInteger(row.event_id) &&
+	row.event_id > 0 &&
+	typeof row.publication_id === "string" &&
+	isDataPublicationId(row.publication_id) &&
+	parsePositiveInteger(row.generation) !== null &&
+	typeof row.event_live_sha256 === "string" &&
+	PUBLICATION_SHA_PATTERN.test(row.event_live_sha256) &&
+	parseCheckpointTimestamp(row.source_checked_at) !== null &&
+	parseCheckpointTimestamp(row.checkpointed_at) !== null &&
+	parsePositiveInteger(row.event_live_count) !== null &&
+	parsePositiveInteger(row.event_live_bytes) !== null &&
+	typeof row.state === "string" &&
+	CHECKPOINT_STATES.has(row.state) &&
+	isValidEventLiveCheckpointPayload(
+		row.event_live,
+		row.event_id,
+		row.event_live_sha256,
+		row.event_live_count,
+		row.event_live_bytes
+	);
+
+const parsedInteger = (value: unknown): number | null | undefined => {
+	if (value === null) return null;
+	const numeric =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && value.trim() !== ""
+				? Number(value)
+				: Number.NaN;
+	return Number.isSafeInteger(numeric) ? numeric : undefined;
+};
+
+const parsedBoolean = (value: unknown): boolean | null | undefined =>
+	value === null ? null : typeof value === "boolean" ? value : undefined;
+
+const projectedRecentGameweekMatchesCheckpoint = (
+	row: RecentGameweekRow,
+	header: RecentGameweekCheckpointRow,
+	playerId: number
+): boolean => {
+	const eventLive = Array.isArray(header.event_live)
+		? (header.event_live as EventLiveRow[]).find(
+				(candidate) => parsedInteger(candidate.elementId) === playerId
+			)
+		: undefined;
+	if (!eventLive) return false;
+	const integerFields: ReadonlyArray<readonly [keyof RecentGameweekRow, keyof EventLiveRow]> = [
+		["total_points", "totalPoints"],
+		["minutes", "minutes"],
+		["goals_scored", "goalsScored"],
+		["assists", "assists"],
+		["clean_sheets", "cleanSheets"],
+		["saves", "saves"],
+		["bonus", "bonus"],
+		["bps", "bps"],
+	];
+	if (
+		!integerFields.every(
+			([rowField, payloadField]) =>
+				parsedInteger(row[rowField]) !== undefined &&
+				parsedInteger(row[rowField]) === parsedInteger(eventLive[payloadField])
+		)
+	)
+		return false;
+	return (
+		parsedBoolean(row.starts) !== undefined &&
+		parsedBoolean(row.starts) === parsedBoolean(eventLive.starts)
+	);
+};
+
+const recentGameweekRowsCoverAuthority = (
+	rows: readonly RecentGameweekRow[],
+	headers: readonly RecentGameweekCheckpointRow[],
+	playerId: number
+): boolean => {
+	const expectedEventIds = headers
+		.filter(
+			(header) =>
+				Array.isArray(header.event_live) &&
+				(header.event_live as EventLiveRow[]).some(
+					(eventLive) => parsedInteger(eventLive.elementId) === playerId
+				)
+		)
+		.map((header) => parsedInteger(header.event_id));
+	const expectedEventIdSet = new Set(expectedEventIds);
+	if (
+		expectedEventIds.length === 0 ||
+		expectedEventIds.some((eventId) => eventId === null) ||
+		expectedEventIdSet.size !== expectedEventIds.length ||
+		rows.length !== expectedEventIdSet.size
+	)
+		return false;
+
+	const actualEventIds = rows.map((row) => parsedInteger(row.event_id));
+	return (
+		actualEventIds.every(
+			(eventId): eventId is number => eventId !== null && expectedEventIdSet.has(eventId)
+		) && new Set(actualEventIds).size === expectedEventIdSet.size
+	);
+};
+
+const recentGameweekRevision = (headers: readonly RecentGameweekCheckpointRow[]): string => {
+	const identity = headers
+		.slice()
+		.sort((left, right) => left.event_id - right.event_id)
+		.map((row) =>
+			[
+				row.event_id,
+				row.publication_id,
+				parsePositiveInteger(row.generation),
+				row.event_live_sha256,
+			].join(":")
+		)
+		.join("|");
+	return `recent-v1:${createHash("sha256").update(identity, "utf8").digest("hex")}`;
+};
+
+const loadRecentGameweekAuthority = async (
+	context: GraphQLContext,
+	statsContext: PlayerStatsContext
+): Promise<RecentGameweekAuthority> => {
+	if (
+		statsContext.scope !== "CURRENT_SEASON" ||
+		statsContext.asOfEventId === null ||
+		(statsContext.status !== "AVAILABLE" && statsContext.status !== "STALE")
+	) {
+		return { status: "READY", revision: null, sourceCheckedAt: null, headers: [] };
+	}
+	try {
+		const core = await getCoreDataSnapshot(context);
+		const expectedPlayerIds = new Set(core.players.map((player) => player.id));
+		if (expectedPlayerIds.size === 0)
+			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
+		const eventSnapshot = await getCoreEventSnapshot(context).catch((error) => {
+			context.logger.warn(
+				{ err: error },
+				"Recent player gameweek event lifecycle authority unavailable"
+			);
+			return null;
+		});
+		const expectedPlayerIdsForEvent = (eventId: number): ReadonlySet<number> | undefined => {
+			const event = eventSnapshot?.events.find((candidate) => candidate.id === eventId);
+			const historical =
+				event?.finished === true ||
+				(eventSnapshot?.currentEventId !== null &&
+					eventSnapshot?.currentEventId !== undefined &&
+					eventId < eventSnapshot.currentEventId);
+			return historical ? undefined : expectedPlayerIds;
+		};
+		const { data, error } = await context.data
+			.read("competition.live_points_publication_checkpoints")
+			.select(
+				"event_id, publication_id, generation, state, source_checked_at, checkpointed_at, event_live, event_live_sha256, event_live_count, event_live_bytes"
+			)
+			.lte("event_id", statsContext.asOfEventId)
+			.order("event_id", { ascending: false })
+			.limit(RECENT_GAMEWEEK_LIMIT);
+		if (error) return { status: "FAILED", revision: null, sourceCheckedAt: null, headers: [] };
+		const rawHeaders = (data ?? []) as RecentGameweekCheckpointRow[];
+		if (rawHeaders.length === 0)
+			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
+		if (!rawHeaders.some((row) => row.event_id === statsContext.asOfEventId))
+			return { status: "MISSING", revision: null, sourceCheckedAt: null, headers: [] };
+		if (
+			rawHeaders.some((row) => {
+				if (!checkpointIsValid(row)) return true;
+				const expected = expectedPlayerIdsForEvent(row.event_id);
+				return (
+					expected !== undefined &&
+					!hasCompleteEventLiveRoster(row.event_live as EventLiveRow[], expected)
+				);
+			})
+		)
+			return { status: "INVALID", revision: null, sourceCheckedAt: null, headers: [] };
+		const sourceCheckedAt =
+			rawHeaders
+				.map((row) => parseCheckpointTimestamp(row.source_checked_at))
+				.filter((value): value is string => value !== null)
+				.sort()
+				.at(-1) ?? null;
+		return {
+			status: "READY",
+			revision: recentGameweekRevision(rawHeaders),
+			sourceCheckedAt,
+			headers: rawHeaders,
+		};
+	} catch (error) {
+		context.logger.warn({ err: error }, "Failed to read recent player gameweek authority");
+		return { status: "FAILED", revision: null, sourceCheckedAt: null, headers: [] };
+	}
+};
+
+const readRecentGameweekAuthority = (
+	context: GraphQLContext,
+	statsContext: PlayerStatsContext
+): Promise<RecentGameweekAuthority> => {
+	const memo = requestRecentGameweekAuthorityMemo(context);
+	const key = recentGameweekAuthorityKey(statsContext);
+	const existing = memo.get(key);
+	if (existing) return existing;
+	const load = loadRecentGameweekAuthority(context, statsContext);
+	memo.set(key, load);
+	return load;
+};
+
+const hasSameRecentGameweekAuthority = async (
+	context: GraphQLContext,
+	cached: PlayerDetailDataAvailability,
+	currentStatsContext: PlayerStatsContext
+): Promise<boolean> => {
+	const cachedRecent = cached.recentGameweeks;
+	if (
+		currentStatsContext.scope !== "CURRENT_SEASON" ||
+		currentStatsContext.asOfEventId === null ||
+		(currentStatsContext.status !== "AVAILABLE" && currentStatsContext.status !== "STALE")
+	) {
+		return cachedRecent.state === "EMPTY" || cachedRecent.state === "NOT_APPLICABLE";
+	}
+	if (cachedRecent.state !== "READY" || cachedRecent.revision === null) return false;
+	const current = await readRecentGameweekAuthority(context, currentStatsContext);
+	return (
+		current.status === "READY" &&
+		current.revision === cachedRecent.revision &&
+		current.sourceCheckedAt === cachedRecent.sourceCheckedAt
+	);
+};
 
 const asNullableNumber = (value: unknown): number | null => {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -741,26 +1052,65 @@ async function loadRecentGameweeks(
 		);
 	}
 	try {
+		const authority = await readRecentGameweekAuthority(context, statsContext);
+		if (authority.status === "FAILED") {
+			return section([], "UNAVAILABLE", "recent_gameweeks_publication_read_failed");
+		}
+		if (authority.status === "MISSING") {
+			return section([], "FALLBACK", "recent_gameweeks_publication_missing");
+		}
+		if (authority.status === "INVALID") {
+			return section([], "FALLBACK", "recent_gameweeks_publication_invalid");
+		}
+		const eventIds = authority.headers.map((header) => header.event_id);
+		const headerByEvent = new Map(authority.headers.map((header) => [header.event_id, header]));
 		const { data, error } = await context.data
-			// The mutable player_gameweek_stats table has no publication revision.
-			// Keep its rows request-local and mark the section non-authoritative
-			// below; it must never be labelled with statsContext.revision or enter
-			// the shared player-detail cache.
 			.read("fpl.player_gameweek_stats")
 			.select(
-				"event_id, total_points, minutes, starts, goals_scored, assists, clean_sheets, saves, bonus, bps"
+				"event_id, publication_id, publication_generation, publication_event_live_sha256, total_points, minutes, starts, goals_scored, assists, clean_sheets, saves, bonus, bps"
 			)
 			.eq("element_id", playerId)
-			.lte("event_id", statsContext.asOfEventId)
+			.in("event_id", eventIds)
 			.order("event_id", { ascending: false })
-			.limit(RECENT_GAMEWEEK_LIMIT);
+			// Read one extra row so a duplicate at the oldest selected event cannot
+			// be hidden by the five-row limit before exact-set validation.
+			.limit(RECENT_GAMEWEEK_LIMIT + 1);
 		if (error) {
 			context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
 			return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");
 		}
 		const rows = (data ?? []) as RecentGameweekRow[];
-		if (rows.length === 0) {
-			return section([], "FALLBACK", "recent_gameweeks_revision_unverified");
+		if (
+			!recentGameweekRowsCoverAuthority(rows, authority.headers, playerId) ||
+			!rows.some((row) => parsedInteger(row.event_id) === statsContext.asOfEventId)
+		) {
+			return section(
+				[],
+				"FALLBACK",
+				"recent_gameweeks_player_rows_incomplete",
+				authority.revision,
+				authority.sourceCheckedAt
+			);
+		}
+		const bindingMismatch = rows.some((row) => {
+			const header = headerByEvent.get(row.event_id);
+			return (
+				!header ||
+				row.publication_id !== header.publication_id ||
+				parsePositiveInteger(row.publication_generation) !==
+					parsePositiveInteger(header.generation) ||
+				row.publication_event_live_sha256 !== header.event_live_sha256 ||
+				!projectedRecentGameweekMatchesCheckpoint(row, header, playerId)
+			);
+		});
+		if (bindingMismatch) {
+			return section(
+				[],
+				"FALLBACK",
+				"recent_gameweeks_publication_mismatch",
+				authority.revision,
+				authority.sourceCheckedAt
+			);
 		}
 		const historicalTeams = await loadHistoricalTeamIds(
 			context,
@@ -824,7 +1174,9 @@ async function loadRecentGameweeks(
 				? "UNAVAILABLE"
 				: statsContext.status === "STALE"
 					? "STALE"
-					: "FALLBACK";
+					: fixtureState === "FALLBACK"
+						? "FALLBACK"
+						: "READY";
 		return section(
 			value,
 			recentState,
@@ -832,7 +1184,11 @@ async function loadRecentGameweeks(
 				? "recent_fixture_read_failed"
 				: statsContext.status === "STALE"
 					? "recent_stats_stale"
-					: "recent_gameweeks_revision_unverified"
+					: fixtureState === "FALLBACK"
+						? "recent_fixture_evidence_incomplete"
+						: null,
+			authority.revision,
+			authority.sourceCheckedAt
 		);
 	} catch (error) {
 		context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
@@ -1014,7 +1370,14 @@ export const playerDetailRepository: PlayerDetailRepository = {
 		if (cached !== undefined) {
 			if (cached === null) return null;
 			const currentStatsContext = await resolvePlayerStatsContext(context, eventId);
-			if (hasSameStatsAuthority(cached.statsContext, currentStatsContext)) {
+			if (
+				hasSameStatsAuthority(cached.statsContext, currentStatsContext) &&
+				(await hasSameRecentGameweekAuthority(
+					context,
+					cached.dataAvailability,
+					currentStatsContext
+				))
+			) {
 				recordDataAvailability(cached);
 				return cached;
 			}

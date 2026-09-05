@@ -7,6 +7,7 @@ import {
 	calcLivePointsByEntryV2,
 	clearLivePointsV2Lkg,
 	EVENT_PLAYER_IDENTITY_SQL,
+	isValidEventLiveCheckpointPayload,
 	loadLiveSnapshotMetaV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
@@ -214,6 +215,26 @@ const buildV2Redis = (
 };
 
 describe("Live Points V2 projection", () => {
+	it("requires event-live checkpoint payload evidence to match its metadata", () => {
+		const eventLives = buildTestEventLives(buildTestCoreData(1), 1);
+		const payload = canonicalJson(eventLives);
+		const bytes = Buffer.byteLength(payload, "utf8");
+		const checksum = hash(eventLives);
+
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, checksum, eventLives.length, bytes)
+		).toBe(true);
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, checksum, eventLives.length + 1, bytes)
+		).toBe(false);
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, checksum, eventLives.length, bytes + 1)
+		).toBe(false);
+		expect(
+			isValidEventLiveCheckpointPayload(eventLives, 1, "f".repeat(64), eventLives.length, bytes)
+		).toBe(false);
+	});
+
 	it("requires the GW1 baseline only for the GW1 identity publication", () => {
 		expect(EVENT_PLAYER_IDENTITY_SQL).toContain(
 			"AND (publication.event_id <> 1 OR publication.baseline_verified_at IS NOT NULL)"
@@ -436,9 +457,6 @@ describe("Live Points V2 projection", () => {
 	it("reads an exact league publication from Redis before consulting PostgreSQL", async () => {
 		clearLivePointsV2Lkg();
 		const redis = buildV2Redis();
-		for (const key of [...redis.values.keys()]) {
-			if (key.startsWith("llm:data:fpl:core:2627:")) redis.values.delete(key);
-		}
 		const active = JSON.parse(redis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
 			publicationId: string;
 			generation: number;
@@ -456,6 +474,105 @@ describe("Live Points V2 projection", () => {
 		);
 		expect(result?.servedFrom).toBe("REDIS_CURRENT");
 		expect(databaseCalls).toBe(0);
+	});
+
+	it("falls back to the exact PostgreSQL checkpoint after Redis misses", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const active = JSON.parse(redis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
+			publicationId: string;
+			generation: number;
+			state: string;
+			sourceCheckedAt: string;
+			publishedAt: string;
+			revisions: unknown;
+			items: {
+				eventLive: { key: string; count: number; bytes: number; sha256: string };
+				fixtures: { key: string; count: number; bytes: number; sha256: string };
+			};
+		};
+		const eventLives = JSON.parse(redis.values.get(active.items.eventLive.key)!) as unknown[];
+		const fixtures = JSON.parse(redis.values.get(active.items.fixtures.key)!) as unknown[];
+		const checkpoint = {
+			publication_id: active.publicationId,
+			generation: active.generation,
+			state: active.state,
+			source_checked_at: active.sourceCheckedAt,
+			published_at: active.publishedAt,
+			checkpointed_at: active.sourceCheckedAt,
+			expected_next_check_at: null,
+			revisions: active.revisions,
+			event_live: eventLives,
+			fixtures,
+			event_live_bytes: active.items.eventLive.bytes,
+			fixtures_bytes: active.items.fixtures.bytes,
+			event_live_sha256: active.items.eventLive.sha256,
+			fixtures_sha256: active.items.fixtures.sha256,
+			event_live_count: active.items.eventLive.count,
+			fixtures_count: active.items.fixtures.count,
+		};
+		const newerCheckpoint = {
+			...checkpoint,
+			publication_id: publicationId("999"),
+			generation: active.generation + 1,
+		};
+		for (const key of [...redis.values.keys()]) {
+			if (key.startsWith("llm:data:v2:fpl:live:2627:1:")) redis.values.delete(key);
+		}
+		const databaseCalls: Array<{ sql: string; values: unknown[] }> = [];
+		const result = await readLivePublicationByRefV2(
+			buildSnapshotContext(redis, {
+				databaseQuery: async (sql, values) => {
+					const call = { sql: String(sql), values: values as unknown[] };
+					databaseCalls.push(call);
+					const exactQuery = call.sql.includes("publication_id = $3");
+					const exactValues = call.values[2] === active.publicationId;
+					return { rows: [exactQuery && exactValues ? checkpoint : newerCheckpoint] };
+				},
+			}),
+			1,
+			{ publicationId: active.publicationId, generation: active.generation }
+		);
+
+		expect(result?.servedFrom).toBe("POSTGRES_CHECKPOINT");
+		expect(databaseCalls).toHaveLength(1);
+		expect(databaseCalls[0]?.sql).toContain("publication_id = $3");
+		expect(databaseCalls[0]?.values).toEqual([2026, 1, active.publicationId, active.generation]);
+	});
+
+	it("rejects an exact Redis publication with an incomplete expected roster", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const itemKey = "llm:data:v2:fpl:live:2627:1:1:eventLive";
+		const activeKey = "llm:data:v2:fpl:live:2627:1:active";
+		const truncated = (
+			JSON.parse(redis.values.get(itemKey)!) as Array<{ elementId: number }>
+		).filter((row) => row.elementId !== 5);
+		const payload = canonicalJson(truncated);
+		const checksum = hash(truncated);
+		redis.values.set(itemKey, payload);
+		redis.values.set(
+			`${itemKey}:meta`,
+			`${truncated.length}|${Buffer.byteLength(payload)}|${checksum}`
+		);
+		const manifest = JSON.parse(redis.values.get(activeKey)!) as {
+			items: { eventLive: { count: number; bytes: number; sha256: string } };
+		};
+		manifest.items.eventLive = {
+			count: truncated.length,
+			bytes: Buffer.byteLength(payload),
+			sha256: checksum,
+		};
+		redis.values.set(activeKey, JSON.stringify(manifest));
+		const active = JSON.parse(redis.values.get(activeKey)!) as {
+			publicationId: string;
+			generation: number;
+		};
+		const result = await readLivePublicationByRefV2(buildSnapshotContext(redis), 1, {
+			publicationId: active.publicationId,
+			generation: active.generation,
+		});
+		expect(result).toBeNull();
 	});
 
 	it("serves an exact league publication from process LKG before PostgreSQL", async () => {
