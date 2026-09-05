@@ -46,7 +46,8 @@ const queryBuilder = (rows: unknown[]) => {
 const installPlayerStatsReads = (
 	context: ReturnType<typeof buildSnapshotContext>,
 	core: ReturnType<typeof buildTestCoreData>,
-	sourceCheckedAt = new Date().toISOString()
+	sourceCheckedAt = new Date().toISOString(),
+	baselineVerifiedAt: string | null | undefined = undefined
 ) => {
 	const publishedAt = new Date().toISOString();
 	const maxEvent = Math.max(
@@ -60,7 +61,7 @@ const installPlayerStatsReads = (
 		published_at: publishedAt,
 		row_count: core.players.length,
 		expected_row_count: core.players.length,
-		baseline_verified_at: publishedAt,
+		baseline_verified_at: baselineVerifiedAt === undefined ? publishedAt : baselineVerifiedAt,
 	}));
 	const snapshots = Array.from({ length: maxEvent }, (_, index) =>
 		core.players.map((player) => ({
@@ -77,7 +78,8 @@ const installPlayerStatsReads = (
 		publication_row_count: core.players.length,
 		publication_expected_row_count: core.players.length,
 		publication_content_sha256: "a".repeat(64),
-		publication_baseline_verified_at: publishedAt,
+		publication_baseline_verified_at:
+			baselineVerifiedAt === undefined ? publishedAt : baselineVerifiedAt,
 	}));
 	context.data = {
 		read: (table: string) =>
@@ -94,16 +96,17 @@ const installPlayerStatsReads = (
 };
 
 describe("resolvePlayerStatsContext", () => {
-	it("uses the dedicated active-event cadence without reading live lifecycle state", () => {
-		expect(resolvePlayerStatsFreshnessBudgetMs("ACTIVE_EVENT")).toBe(90_000);
-		expect(resolvePlayerStatsFreshnessBudgetMs("STATIC")).toBe(60_000);
+	it("uses the daily publication obligation plus grace for every observer cadence", () => {
+		const expectedBudget = 26 * 60 * 60 * 1000;
+		expect(resolvePlayerStatsFreshnessBudgetMs("ACTIVE_EVENT")).toBe(expectedBudget);
+		expect(resolvePlayerStatsFreshnessBudgetMs("STATIC")).toBe(expectedBudget);
 	});
 
 	it("defaults unknown observer cadence to the static budget", () => {
-		expect(resolvePlayerStatsFreshnessBudgetMs(null)).toBe(60_000);
+		expect(resolvePlayerStatsFreshnessBudgetMs(null)).toBe(26 * 60 * 60 * 1000);
 	});
 
-	it("marks an active observer publication stale without reading live lifecycle state", async () => {
+	it("marks a missed daily publication stale without reading live lifecycle state", async () => {
 		const now = Date.now();
 		const publication = buildCorePublication("2627", 7, buildTestCoreData(3));
 		const context = buildSnapshotContext(new TestRedis(publication), {
@@ -122,7 +125,11 @@ describe("resolvePlayerStatsContext", () => {
 				],
 			}),
 		});
-		installPlayerStatsReads(context, buildTestCoreData(3), new Date(now - 120_000).toISOString());
+		installPlayerStatsReads(
+			context,
+			buildTestCoreData(3),
+			new Date(now - 27 * 60 * 60 * 1000).toISOString()
+		);
 
 		await expect(resolvePlayerStatsContext(context)).resolves.toMatchObject({
 			status: "STALE",
@@ -132,7 +139,7 @@ describe("resolvePlayerStatsContext", () => {
 		});
 	});
 
-	it("keeps the same two-minute-old publication stale while matches are live", async () => {
+	it("marks an over-budget publication stale while matches are live", async () => {
 		const now = Date.now();
 		const publication = buildCorePublication("2627", 7, buildTestCoreData(3));
 		const context = buildSnapshotContext(new TestRedis(publication), {
@@ -151,12 +158,62 @@ describe("resolvePlayerStatsContext", () => {
 				],
 			}),
 		});
-		installPlayerStatsReads(context, buildTestCoreData(3), new Date(now - 120_000).toISOString());
+		installPlayerStatsReads(
+			context,
+			buildTestCoreData(3),
+			new Date(now - 27 * 60 * 60 * 1000).toISOString()
+		);
 
 		await expect(resolvePlayerStatsContext(context)).resolves.toMatchObject({
 			status: "STALE",
 			asOfEventId: 3,
 		});
+	});
+
+	it("does not require the GW1 baseline for a complete GW2+ publication", async () => {
+		const core = buildTestCoreData(3);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		installPlayerStatsReads(context, core, new Date().toISOString(), null);
+
+		await expect(resolvePlayerStatsContext(context, 3)).resolves.toMatchObject({
+			status: "AVAILABLE",
+			asOfEventId: 3,
+			revision: "11",
+		});
+	});
+
+	it("still requires the GW1 baseline for the first publication", async () => {
+		const core = buildTestCoreData(3);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		installPlayerStatsReads(context, core, new Date().toISOString(), null);
+
+		await expect(resolvePlayerStatsContext(context, 1)).resolves.toMatchObject({
+			status: "UNAVAILABLE",
+			asOfEventId: 1,
+			revision: "11",
+		});
+	});
+
+	it("loads a complete pinned revision when its freshness state is STALE", async () => {
+		const core = buildTestCoreData(3);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		installPlayerStatsReads(context, core);
+
+		const load = await getPlayerSeasonStatsLoadForContext(context, [9], {
+			scope: "CURRENT_SEASON",
+			season: "2627",
+			asOfEventId: 3,
+			status: "STALE",
+			revision: "11",
+			sourceCheckedAt: new Date(Date.now() - 27 * 60 * 60 * 1000).toISOString(),
+			publishedAt: new Date(Date.now() - 27 * 60 * 60 * 1000).toISOString(),
+			rowCount: 220,
+			expectedRowCount: 220,
+		});
+
+		expect(load.sourceAvailable).toBe(true);
+		expect(load.stats.get(9)?.available).toBe(true);
+		expect(load.stats.get(9)?.eventId).toBe(3);
 	});
 
 	it("uses the request-pinned current event without querying a second authority", async () => {

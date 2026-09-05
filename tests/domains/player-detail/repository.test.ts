@@ -77,6 +77,8 @@ function createContext(args: {
 	tables: TableRows;
 	fromCalls?: string[];
 	lifecycleState?: "reference_only" | "completed" | "preseason" | "active" | "closed";
+	sourceCheckedAt?: string;
+	baselineVerifiedAt?: string | null;
 }) {
 	const fromCalls = args.fromCalls ?? [];
 	const explicitCurrent = Number(args.currentEvent?.id);
@@ -152,27 +154,30 @@ function createContext(args: {
 			};
 		})
 	).flat();
+	const sourceCheckedAt = args.sourceCheckedAt ?? new Date().toISOString();
+	const publishedAt = new Date().toISOString();
+	const baselineVerifiedAt =
+		args.baselineVerifiedAt === undefined ? publishedAt : args.baselineVerifiedAt;
 	const publicationRows = Array.from({ length: maxPublishedEvent }, (_, eventIndex) => ({
 		event_id: eventIndex + 1,
 		revision: "11",
-		source_checked_at: new Date().toISOString(),
-		published_at: new Date().toISOString(),
+		source_checked_at: sourceCheckedAt,
+		published_at: publishedAt,
 		row_count: core.players.length,
 		expected_row_count: core.players.length,
-		baseline_verified_at: new Date().toISOString(),
+		baseline_verified_at: baselineVerifiedAt,
 	}));
 	const bundleRows = snapshotRows.map((row) => {
 		const publication = publicationRows.find((candidate) => candidate.event_id === row.event_id);
 		return {
 			...row,
 			publication_revision: publication?.revision ?? "11",
-			publication_source_checked_at: publication?.source_checked_at ?? new Date().toISOString(),
-			publication_published_at: publication?.published_at ?? new Date().toISOString(),
+			publication_source_checked_at: publication?.source_checked_at ?? sourceCheckedAt,
+			publication_published_at: publication?.published_at ?? publishedAt,
 			publication_row_count: publication?.row_count ?? core.players.length,
 			publication_expected_row_count: publication?.expected_row_count ?? core.players.length,
 			publication_content_sha256: "test-player-event-bundle",
-			publication_baseline_verified_at:
-				publication?.baseline_verified_at ?? new Date().toISOString(),
+			publication_baseline_verified_at: publication?.baseline_verified_at ?? baselineVerifiedAt,
 		};
 	});
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
@@ -507,6 +512,48 @@ describe("playerDetailRepository", () => {
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
 		expect(fromCalls).toContain("fpl.player_gameweek_stats");
 		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("retains a complete stale season snapshot and marks recent rows stale", async () => {
+		const staleAt = new Date(Date.now() - 27 * 60 * 60 * 1000).toISOString();
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			sourceCheckedAt: staleAt,
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.statsContext.status).toBe("STALE");
+		expect(detail?.totalPoints).toBe(55);
+		expect(detail?.dataAvailability.seasonStats).toMatchObject({
+			state: "STALE",
+			reasonCode: "season_stats_stale",
+			sourceCheckedAt: staleAt,
+		});
+		expect(detail?.recentGameweeks[0]).toMatchObject({ eventId: 3, totalPoints: 9 });
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "STALE",
+			reasonCode: "recent_stats_stale",
+		});
 	});
 
 	it("keeps an empty mutable recent-gameweek read non-authoritative", async () => {
