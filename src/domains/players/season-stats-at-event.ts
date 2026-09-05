@@ -21,25 +21,24 @@ export type PlayerStatsContext = {
 	expectedRowCount: number;
 };
 
-const PLAYER_STATS_DEFAULT_FRESHNESS_MS = 60_000;
-const PLAYER_STATS_LIVE_FRESHNESS_MS = 90_000;
+const PLAYER_STATS_DAILY_OBLIGATION_MS = 24 * 60 * 60 * 1000;
+const PLAYER_STATS_FRESHNESS_GRACE_MS = 2 * 60 * 60 * 1000;
+const PLAYER_STATS_FRESHNESS_BUDGET_MS =
+	PLAYER_STATS_DAILY_OBLIGATION_MS + PLAYER_STATS_FRESHNESS_GRACE_MS;
 const PLAYER_SEASON_STATS_CACHE_VERSION = "v2";
 
 export type PlayerStatsFreshnessCadence = "ACTIVE_EVENT" | "STATIC";
 
 /**
- * Player statistics have their own observer cadence. They must not read the
- * live lifecycle table: that table is not on the live-points read path and a
- * lifecycle heartbeat outage must not turn a player-stats query into a second
- * live-data dependency.
+ * Player statistics have a daily publication obligation. Active-event
+ * reconciliation may make a publication newer, but its absence must not hide
+ * a complete daily snapshot or make this read path depend on live lifecycle
+ * heartbeats.
  */
 export function resolvePlayerStatsFreshnessBudgetMs(
-	cadence: PlayerStatsFreshnessCadence | null
+	_cadence: PlayerStatsFreshnessCadence | null
 ): number {
-	if (cadence === "ACTIVE_EVENT") {
-		return PLAYER_STATS_LIVE_FRESHNESS_MS;
-	}
-	return PLAYER_STATS_DEFAULT_FRESHNESS_MS;
+	return PLAYER_STATS_FRESHNESS_BUDGET_MS;
 }
 
 export type PlayerSeasonStatsAtEvent = {
@@ -245,7 +244,12 @@ async function resolvePlayerStatsContextUncached(
 	}
 
 	const header = publicationContext(season, event.id, publication, "AVAILABLE");
-	if (!header.sourceCheckedAt || !header.publishedAt || !publication.baseline_verified_at) {
+	const baselineRequired = event.id === 1;
+	if (
+		!header.sourceCheckedAt ||
+		!header.publishedAt ||
+		(baselineRequired && !publication.baseline_verified_at)
+	) {
 		return publicationContext(season, event.id, publication, "UNAVAILABLE");
 	}
 	if (
@@ -426,10 +430,11 @@ export async function getPlayerSeasonStatsLoadForContext(
 	);
 	const result = new Map<number, PlayerSeasonStatsAtEvent>();
 	const eventId = statsContext.asOfEventId;
+	const loadableStatus = statsContext.status === "AVAILABLE" || statsContext.status === "STALE";
 	if (
 		uniqueIds.length === 0 ||
 		statsContext.scope !== "CURRENT_SEASON" ||
-		statsContext.status !== "AVAILABLE" ||
+		!loadableStatus ||
 		eventId === null ||
 		statsContext.revision === null
 	) {

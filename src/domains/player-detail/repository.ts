@@ -716,15 +716,13 @@ async function loadRecentGameweeks(
 			statsContext.revision,
 			statsContext.sourceCheckedAt
 		);
-	if (statsContext.status !== "AVAILABLE") {
+	if (statsContext.status !== "AVAILABLE" && statsContext.status !== "STALE") {
 		const state: PlayerDataState =
 			statsContext.status === "PRESEASON"
 				? "EMPTY"
-				: statsContext.status === "STALE"
-					? "STALE"
-					: statsContext.status === "INCOMPLETE"
-						? "FALLBACK"
-						: "UNAVAILABLE";
+				: statsContext.status === "INCOMPLETE"
+					? "FALLBACK"
+					: "UNAVAILABLE";
 		return section(
 			[],
 			state,
@@ -821,12 +819,20 @@ async function loadRecentGameweeks(
 			: fixturesFallback || !historicalTeams.complete
 				? "FALLBACK"
 				: "READY";
+		const recentState: PlayerDataState =
+			fixtureState === "UNAVAILABLE"
+				? "UNAVAILABLE"
+				: statsContext.status === "STALE"
+					? "STALE"
+					: "FALLBACK";
 		return section(
 			value,
-			fixtureState === "UNAVAILABLE" ? "UNAVAILABLE" : "FALLBACK",
-			fixtureState === "UNAVAILABLE"
+			recentState,
+			recentState === "UNAVAILABLE"
 				? "recent_fixture_read_failed"
-				: "recent_gameweeks_revision_unverified"
+				: statsContext.status === "STALE"
+					? "recent_stats_stale"
+					: "recent_gameweeks_revision_unverified"
 		);
 	} catch (error) {
 		context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
@@ -838,7 +844,9 @@ const currentSeasonStats = (
 	statsContext: PlayerStatsContext,
 	stats: PlayerSeasonStatsAtEvent | null
 ): PlayerSeasonStatsAtEvent | null =>
-	statsContext.scope === "CURRENT_SEASON" && statsContext.status === "AVAILABLE" && stats?.available
+	statsContext.scope === "CURRENT_SEASON" &&
+	(statsContext.status === "AVAILABLE" || statsContext.status === "STALE") &&
+	stats?.available
 		? stats
 		: null;
 
