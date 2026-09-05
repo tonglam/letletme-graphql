@@ -11,6 +11,7 @@ export const READ_MODELS = {
 	playerEventSnapshotPublications: "fpl.player_event_snapshot_publications",
 	fixtures: "fpl.fixtures",
 	playerGameweekStats: "fpl.player_gameweek_stats",
+	livePointsPublicationCheckpoints: "competition.live_points_publication_checkpoints",
 	playerGameweekScoringItems: "fpl.player_gameweek_scoring_items",
 	playerSeasonSummaries: "reporting.player_season_summaries",
 	playerStateSeasonRows: "reporting.player_state_season_rows",
@@ -325,6 +326,9 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				source_live_id AS id,
 				event_id,
 				element_id,
+				publication_id,
+				publication_generation,
+				publication_event_live_sha256,
 				minutes,
 				goals_scored,
 				assists,
@@ -349,6 +353,21 @@ const READ_MODEL_DEFINITIONS: Readonly<Record<ReadModel, ReadModelDefinition>> =
 				updated_at,
 				defensive_contribution
 			FROM fpl.player_gameweek_stats
+			WHERE season_id = $1
+		`,
+	},
+	[READ_MODELS.livePointsPublicationCheckpoints]: {
+		sourceRelations: ["competition.live_points_publication_checkpoints"],
+		sql: `
+			SELECT
+				event_id,
+				publication_id,
+				generation,
+				state,
+				source_checked_at,
+				event_live_sha256,
+				event_live_count
+			FROM competition.live_points_publication_checkpoints
 			WHERE season_id = $1
 		`,
 	},

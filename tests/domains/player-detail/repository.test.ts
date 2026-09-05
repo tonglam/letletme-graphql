@@ -79,6 +79,7 @@ function createContext(args: {
 	lifecycleState?: "reference_only" | "completed" | "preseason" | "active" | "closed";
 	sourceCheckedAt?: string;
 	baselineVerifiedAt?: string | null;
+	recentAuthority?: boolean;
 }) {
 	const fromCalls = args.fromCalls ?? [];
 	const explicitCurrent = Number(args.currentEvent?.id);
@@ -180,6 +181,50 @@ function createContext(args: {
 			publication_baseline_verified_at: publication?.baseline_verified_at ?? baselineVerifiedAt,
 		};
 	});
+	const tables: TableRows = { ...args.tables };
+	const recentRows = [...(tables["fpl.player_gameweek_stats"] ?? [])];
+	if (args.recentAuthority !== false && recentRows.length > 0) {
+		const checkpointSourceCheckedAt = args.sourceCheckedAt ?? new Date().toISOString();
+		const eventIds = [
+			...new Set(
+				recentRows
+					.map((row) => Number((row as { event_id?: unknown }).event_id))
+					.filter((eventId) => Number.isSafeInteger(eventId) && eventId > 0)
+			),
+		];
+		const checkpointRows = (tables["competition.live_points_publication_checkpoints"] ??
+			eventIds.map((eventId) => ({
+				event_id: eventId,
+				publication_id: `00000000-0000-4000-8000-${String(eventId).padStart(12, "0")}`,
+				generation: "1",
+				state: "LIVE_ACTIVE",
+				source_checked_at: checkpointSourceCheckedAt,
+				event_live_sha256: "a".repeat(64),
+				event_live_count: 220,
+			}))) as Array<Record<string, unknown>>;
+		const checkpointsByEvent = new Map(checkpointRows.map((row) => [row.event_id, row]));
+		tables["competition.live_points_publication_checkpoints"] = checkpointRows;
+		tables["fpl.player_gameweek_stats"] = recentRows.map((row) => {
+			const source = row as Record<string, unknown>;
+			const checkpoint = checkpointsByEvent.get(Number(source.event_id));
+			return {
+				...source,
+				publication_id: source.publication_id ?? checkpoint?.publication_id,
+				publication_generation: source.publication_generation ?? checkpoint?.generation,
+				publication_event_live_sha256:
+					source.publication_event_live_sha256 ?? checkpoint?.event_live_sha256,
+			};
+		});
+		if (!tables["fpl.player_fixture_stats"]?.length) {
+			tables["fpl.player_fixture_stats"] = eventIds.map((eventId, index) => ({
+				season: "2627",
+				player_code: 900,
+				event_id: eventId,
+				fixture_id: index + 1,
+				team_id: 1,
+			}));
+		}
+	}
 	const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)), {
 		dataRevision: "core-7",
 	});
@@ -191,10 +236,13 @@ function createContext(args: {
 			fromCalls.push(table);
 			if (table === "fpl.player_event_snapshot_bundles") return queryBuilder(bundleRows);
 			if (table === "fpl.player_event_snapshot_publications") {
-				return queryBuilder(args.tables[table] ?? publicationRows);
+				return queryBuilder(tables[table] ?? publicationRows);
 			}
-			return queryBuilder(args.tables[table] ?? []);
+			return queryBuilder(tables[table] ?? []);
 		},
+	} as never;
+	context.database = {
+		query: async () => ({ rows: tables["fpl.player_fixture_stats"] ?? [] }),
 	} as never;
 	return context;
 }
@@ -471,6 +519,11 @@ describe("playerDetailRepository", () => {
 		});
 		expect(detail?.recentGameweeks[0].opponents).toHaveLength(2);
 		expect(detail?.fixtures.filter((fixture) => fixture.event === 3)).toHaveLength(2);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "READY",
+			revision: expect.stringMatching(/^recent-v1:[0-9a-f]{64}$/) as unknown,
+			sourceCheckedAt: expect.any(String) as unknown,
+		});
 	});
 
 	it("marks mutable recent gameweeks non-authoritative and excludes the shared cache", async () => {
@@ -478,6 +531,7 @@ describe("playerDetailRepository", () => {
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
 			fromCalls,
+			recentAuthority: false,
 			tables: {
 				"fpl.player_market_snapshots": [marketRow()],
 				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
@@ -502,15 +556,15 @@ describe("playerDetailRepository", () => {
 		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
 		const redis = context.redis as unknown as TestRedis;
 
-		expect(detail?.recentGameweeks[0]).toMatchObject({ eventId: 3, totalPoints: 9 });
+		expect(detail?.recentGameweeks).toEqual([]);
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
 			state: "FALLBACK",
-			reasonCode: "recent_gameweeks_revision_unverified",
+			reasonCode: "recent_gameweeks_publication_missing",
 			revision: null,
 			sourceCheckedAt: null,
 		});
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
-		expect(fromCalls).toContain("fpl.player_gameweek_stats");
+		expect(fromCalls).not.toContain("fpl.player_gameweek_stats");
 		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
 	});
 
@@ -572,12 +626,47 @@ describe("playerDetailRepository", () => {
 		expect(detail?.recentGameweeks).toEqual([]);
 		expect(detail?.dataAvailability.recentGameweeks).toEqual({
 			state: "FALLBACK",
-			reasonCode: "recent_gameweeks_revision_unverified",
+			reasonCode: "recent_gameweeks_publication_missing",
 			revision: null,
 			sourceCheckedAt: null,
 		});
 		expect(detail?.dataAvailability.isFullyAuthoritative).toBe(false);
 		expect(redis.setCalls.some(([key]) => key.includes("player-detail"))).toBe(false);
+	});
+
+	it("fails closed when a recent row is bound to a different checkpoint", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000099",
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_publication_mismatch",
+			revision: expect.stringMatching(/^recent-v1:/) as unknown,
+		});
 	});
 
 	it("does not write a shared cache entry when a data section is unavailable", async () => {
@@ -615,6 +704,7 @@ describe("playerDetailRepository", () => {
 	it("marks season-stat read failures unavailable and never caches the partial detail", async () => {
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
+			recentAuthority: false,
 			tables: {
 				"fpl.player_market_snapshots": [marketRow()],
 				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3, total_points: 55 }],
@@ -656,7 +746,7 @@ describe("playerDetailRepository", () => {
 		expect(detail?.totalPoints).toBeNull();
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
 			state: "FALLBACK",
-			reasonCode: "recent_gameweeks_revision_unverified",
+			reasonCode: "recent_gameweeks_publication_missing",
 		});
 		expect(detail?.dataAvailability.seasonStats).toMatchObject({
 			state: "UNAVAILABLE",
@@ -748,6 +838,7 @@ describe("playerDetailRepository", () => {
 	it("evicts a pre-hard-cut non-authoritative shared cache value", async () => {
 		const degradedContext = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
+			recentAuthority: false,
 			tables: {
 				"fpl.player_market_snapshots": [marketRow({ selected_by_percent: "bad" })],
 				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
@@ -760,6 +851,7 @@ describe("playerDetailRepository", () => {
 
 		const context = createContext({
 			currentEvent: { id: 3, isCurrent: true, finished: false },
+			recentAuthority: false,
 			tables: {
 				"fpl.player_market_snapshots": [marketRow()],
 				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
@@ -796,7 +888,7 @@ describe("playerDetailRepository", () => {
 		expect(detail?.dataAvailability.market.state).toBe("READY");
 		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
 			state: "FALLBACK",
-			reasonCode: "recent_gameweeks_revision_unverified",
+			reasonCode: "recent_gameweeks_publication_missing",
 			revision: null,
 			sourceCheckedAt: null,
 		});
@@ -880,6 +972,86 @@ describe("playerDetailRepository", () => {
 		expect(deleteCount).toBe(1);
 		expect(detail?.webName).toBe("Test Player");
 		expect(detail?.statsContext.sourceCheckedAt).not.toBe("2026-01-01T00:00:00.000Z");
+	});
+
+	it("invalidates a cached detail when the recent checkpoint generation changes", async () => {
+		const context = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+		const authoritative = await playerDetailRepository.getPlayerDetail(context, 9, 3);
+		if (!authoritative) throw new Error("expected authoritative player detail");
+
+		const nextContext = createContext({
+			currentEvent: { id: 3, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 3 }],
+				"fpl.player_gameweek_stats": [
+					{
+						event_id: 3,
+						total_points: 9,
+						minutes: 90,
+						starts: true,
+						goals_scored: 1,
+						assists: 0,
+						clean_sheets: 1,
+						saves: 0,
+						bonus: 2,
+						bps: 31,
+					},
+				],
+				"fpl.fixtures": [fixtureRow()],
+				"competition.live_points_publication_checkpoints": [
+					{
+						event_id: 3,
+						publication_id: "00000000-0000-4000-8000-000000000003",
+						generation: "2",
+						state: "LIVE_ACTIVE",
+						source_checked_at: new Date().toISOString(),
+						event_live_sha256: "a".repeat(64),
+						event_live_count: 220,
+					},
+				],
+			},
+		});
+		const redis = nextContext.redis as unknown as TestRedis;
+		const key = gqlCacheKey(nextContext, playerDetailCacheKey(9, 3));
+		redis.values.set(key, JSON.stringify(authoritative));
+		let deleteCount = 0;
+		const originalDelete = redis.del;
+		redis.del = async (...keys: string[]) => {
+			deleteCount += 1;
+			return originalDelete(...keys);
+		};
+
+		const detail = await playerDetailRepository.getPlayerDetail(nextContext, 9, 3);
+
+		expect(deleteCount).toBe(1);
+		expect(detail?.dataAvailability.recentGameweeks.revision).not.toBe(
+			authoritative.dataAvailability.recentGameweeks.revision
+		);
+		expect(detail?.dataAvailability.recentGameweeks.revision).toEqual(
+			expect.stringMatching(/^recent-v1:/)
+		);
 	});
 
 	it("keeps event-scoped transfer counts for a past event", async () => {
