@@ -481,13 +481,16 @@ describe("Live Points V2 projection", () => {
 		const redis = buildV2Redis();
 		const itemKey = "llm:data:v2:fpl:live:2627:1:1:eventLive";
 		const activeKey = "llm:data:v2:fpl:live:2627:1:active";
-		const truncated = (JSON.parse(redis.values.get(itemKey)!) as Array<{ elementId: number }>).filter(
-			(row) => row.elementId !== 5
-		);
+		const truncated = (
+			JSON.parse(redis.values.get(itemKey)!) as Array<{ elementId: number }>
+		).filter((row) => row.elementId !== 5);
 		const payload = canonicalJson(truncated);
 		const checksum = hash(truncated);
 		redis.values.set(itemKey, payload);
-		redis.values.set(`${itemKey}:meta`, `${truncated.length}|${Buffer.byteLength(payload)}|${checksum}`);
+		redis.values.set(
+			`${itemKey}:meta`,
+			`${truncated.length}|${Buffer.byteLength(payload)}|${checksum}`
+		);
 		const manifest = JSON.parse(redis.values.get(activeKey)!) as {
 			items: { eventLive: { count: number; bytes: number; sha256: string } };
 		};
@@ -501,11 +504,10 @@ describe("Live Points V2 projection", () => {
 			publicationId: string;
 			generation: number;
 		};
-		const result = await readLivePublicationByRefV2(
-			buildSnapshotContext(redis),
-			1,
-			{ publicationId: active.publicationId, generation: active.generation }
-		);
+		const result = await readLivePublicationByRefV2(buildSnapshotContext(redis), 1, {
+			publicationId: active.publicationId,
+			generation: active.generation,
+		});
 		expect(result).toBeNull();
 	});
 
