@@ -1072,7 +1072,9 @@ async function loadRecentGameweeks(
 			.eq("element_id", playerId)
 			.in("event_id", eventIds)
 			.order("event_id", { ascending: false })
-			.limit(RECENT_GAMEWEEK_LIMIT);
+			// Read one extra row so a duplicate at the oldest selected event cannot
+			// be hidden by the five-row limit before exact-set validation.
+			.limit(RECENT_GAMEWEEK_LIMIT + 1);
 		if (error) {
 			context.logger.warn({ err: error, playerId }, "Failed to load recent player gameweeks");
 			return section([], "UNAVAILABLE", "recent_gameweeks_read_failed");

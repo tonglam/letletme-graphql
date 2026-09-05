@@ -562,6 +562,39 @@ describe("playerDetailRepository", () => {
 		expect(detail?.recentGameweeks.map((row) => row.eventId)).toEqual([3, 1]);
 	});
 
+	it("fails closed when an extra oldest event row is hidden by the recent-row limit", async () => {
+		const recentRows = Array.from({ length: 5 }, (_, index) => ({
+			element_id: 9,
+			event_id: index + 2,
+			total_points: 0,
+			minutes: 0,
+			starts: false,
+			goals_scored: 0,
+			assists: 0,
+			clean_sheets: 0,
+			saves: 0,
+			bonus: 0,
+			bps: 0,
+		}));
+		const context = createContext({
+			currentEvent: { id: 6, isCurrent: true, finished: false },
+			tables: {
+				"fpl.player_market_snapshots": [marketRow()],
+				"fpl.player_event_snapshot_bundles": [{ element_id: 9, event_id: 6, total_points: 55 }],
+				"fpl.player_gameweek_stats": [...recentRows, recentRows[0]],
+				"fpl.fixtures": [fixtureRow()],
+			},
+		});
+
+		const detail = await playerDetailRepository.getPlayerDetail(context, 9, 6);
+
+		expect(detail?.recentGameweeks).toEqual([]);
+		expect(detail?.dataAvailability.recentGameweeks).toMatchObject({
+			state: "FALLBACK",
+			reasonCode: "recent_gameweeks_player_rows_incomplete",
+		});
+	});
+
 	it("gates season production during preseason but keeps current market and fixtures", async () => {
 		const fromCalls: string[] = [];
 		const context = createContext({
