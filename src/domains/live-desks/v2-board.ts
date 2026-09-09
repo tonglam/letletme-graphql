@@ -664,10 +664,20 @@ export const queryEntryLiveCompetitionBoardV2 = (
 	board: EntryLiveCompetitionBoardV2,
 	request: EntryLiveCompetitionBoardRequest
 ): EntryLiveCompetitionBoardPageV2 => {
-	const filtered = sortRows(
-		board.rows.filter((row) => matches(row, request)),
-		request
-	);
+	// Rank the complete league before filtering or paging, including the pinned
+	// viewer. Copy rows so request-specific ranks never alter the cached board.
+	let previous: number | null = null;
+	let rank = 0;
+	const filtered = sortRows(board.rows, request)
+		.map((row, index) => {
+			if (request.sort === "RANK" || request.sort === "ENTRY_NAME") return row;
+			const value = metric(row, request.sort);
+			if (value === null) return { ...row, liveRank: null };
+			if (previous === null || value !== previous) rank = index + 1;
+			previous = value;
+			return { ...row, liveRank: rank };
+		})
+		.filter((row) => matches(row, request));
 	const sortRevision = digest({
 		content: board.boardRevision,
 		sort: request.sort,
