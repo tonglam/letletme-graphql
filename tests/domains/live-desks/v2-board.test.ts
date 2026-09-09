@@ -212,6 +212,127 @@ describe("live competition board sorting", () => {
 		});
 
 		expect(result.rows.map((item) => item.entry)).toEqual([2, 1]);
+		expect(result.rows.map((item) => item.liveRank)).toEqual([1, 2]);
+	});
+});
+
+describe("live competition board selected-metric ranks", () => {
+	const board = (): EntryLiveCompetitionBoardV2 => ({
+		publication: manifest,
+		servedFrom: "REDIS_CURRENT",
+		boardRevision: "board",
+		scoreCoreRevision: "score-core",
+		rows: [256, 250, 241, 241, 240].map((value, index) => ({
+			...row(index + 1, 50 + index, 50 + index),
+			liveRank: 5 - index,
+			score: { ...score(50 + index, 50 + index), totalPoints: value },
+			overallRank: value,
+			teamValue: value / 10,
+			transferCost: value,
+			played: value,
+		})),
+		totalEntries: 5,
+		highestEventPoints: 54,
+		averageEventPoints: 52,
+	});
+	const totals = { ...request("DESC"), sort: "TOTAL_POINTS" as const };
+
+	it("changes ranks with the metric and direction without mutating the cached board", () => {
+		const source = board();
+		const original = structuredClone(source);
+		const query = (input: EntryLiveCompetitionBoardRequest) =>
+			queryEntryLiveCompetitionBoardV2(source, input).rows.map((item) => [
+				item.entry,
+				item.liveRank,
+			]);
+		expect(query(totals)).toEqual([
+			[1, 1],
+			[2, 2],
+			[3, 3],
+			[4, 3],
+			[5, 5],
+		]);
+		expect(query({ ...totals, direction: "ASC" })).toEqual([
+			[5, 1],
+			[3, 2],
+			[4, 2],
+			[2, 4],
+			[1, 5],
+		]);
+		expect(query({ ...totals, sort: "EVENT_POINTS" })).toEqual([
+			[5, 1],
+			[4, 2],
+			[3, 3],
+			[2, 4],
+			[1, 5],
+		]);
+		expect(source).toEqual(original);
+	});
+
+	for (const sort of [
+		"TOTAL_POINTS",
+		"OVERALL_RANK",
+		"TEAM_VALUE",
+		"TRANSFER_COST",
+		"PLAYED",
+	] as const) {
+		it(`uses equal ${sort} values for ties, independent of entry and event rank`, () => {
+			const result = queryEntryLiveCompetitionBoardV2(board(), { ...totals, sort });
+			expect(result.rows.map((item) => item.liveRank)).toEqual([1, 2, 3, 3, 5]);
+		});
+	}
+
+	it("preserves a tie across pages and returns the same rank for the pinned viewer", () => {
+		const source = board();
+		const input = { ...totals, first: 3, entryId: 4 };
+		const first = queryEntryLiveCompetitionBoardV2(source, input);
+		const second = queryEntryLiveCompetitionBoardV2(source, {
+			...input,
+			after: first.pageInfo.endCursor,
+		});
+		expect(first.rows.map((item) => item.liveRank)).toEqual([1, 2, 3]);
+		expect(first.viewerRow?.liveRank).toBe(3);
+		expect(second.rows.map((item) => item.liveRank)).toEqual([3, 5]);
+		expect(first.viewerRow).toEqual(second.rows[0]!);
+		expect(second.pageInfo.hasNextPage).toBe(false);
+	});
+
+	it("retains league-wide ranks when search or ownership filters hide earlier teams", () => {
+		const source = board();
+		source.rows[3]!.ownerAny = [99];
+		for (const filter of [
+			{ search: "Entry 4" },
+			{ ownership: { playerIds: [99], scope: "ANY" as const, captainMode: "ANY" as const } },
+		]) {
+			const result = queryEntryLiveCompetitionBoardV2(source, { ...totals, ...filter, entryId: 4 });
+			expect(result.filteredEntries).toBe(1);
+			expect(result.rows.map((item) => item.liveRank)).toEqual([3]);
+			expect(result.viewerRow?.liveRank).toBe(3);
+		}
+	});
+
+	it("leaves missing metrics and unavailable rows unranked in either direction", () => {
+		const source = board();
+		source.rows = [...source.rows, { ...row(6, 0, 0), overallRank: null }, noPicksRow(7)];
+		for (const direction of ["ASC", "DESC"] as const) {
+			const result = queryEntryLiveCompetitionBoardV2(source, {
+				...totals,
+				sort: "OVERALL_RANK",
+				direction,
+			});
+			expect(result.rows.slice(-2).map((item) => [item.entry, item.liveRank])).toEqual([
+				[6, null],
+				[7, null],
+			]);
+		}
+	});
+
+	it("keeps canonical event ranks for explicit rank and name ordering", () => {
+		const source = board();
+		for (const sort of ["RANK", "ENTRY_NAME"] as const) {
+			const result = queryEntryLiveCompetitionBoardV2(source, { ...totals, sort });
+			for (const item of result.rows) expect(item.liveRank).toBe(6 - item.entry);
+		}
 	});
 });
 
