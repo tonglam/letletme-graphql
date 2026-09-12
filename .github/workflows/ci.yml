@@ -218,6 +218,14 @@ jobs:
       - name: Validate isolated Redis clients
         run: bun run redis:check
 
+      - name: Verify bounded database execution without startup timeout options
+        env:
+          DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
+          RUN_DATABASE_EXECUTION_INTEGRATION: "1"
+        run: |
+          psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 -c "ALTER DATABASE testdb SET statement_timeout = '120s'"
+          bun test tests/infra/database-execution.integration.test.ts
+
       - name: Exercise reader, resolver, and fail-closed contract cases
         env:
           RUN_DATABASE_CONTRACT_INTEGRATION: "1"
