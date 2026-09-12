@@ -75,9 +75,12 @@ suite("real PostgreSQL execution boundary (disposable fixture only)", () => {
 	it("bounds a slow query and restores pool capacity", async () => {
 		const started = performance.now();
 		await expect(
-			createDatabaseExecutor(undefined, () => pool.connect(), 80).query("SELECT pg_sleep(1)")
+			createDatabaseExecutor(undefined, () => pool.connect(), 80).query("SELECT pg_sleep(2)")
 		).rejects.toThrow();
-		expect(performance.now() - started).toBeLessThan(1000);
+		// Keep enough room for a busy CI runner to deliver CancelRequest and
+		// bounded cleanup, while a query that ignores cancellation still exceeds
+		// the 1.5s assertion because it sleeps for two seconds.
+		expect(performance.now() - started).toBeLessThan(1500);
 		expect(
 			(await createDatabaseExecutor(undefined, () => pool.connect()).query("SELECT 1 AS value"))
 				.rows[0].value
