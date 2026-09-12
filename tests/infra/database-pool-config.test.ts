@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { parseDatabasePoolMax } from "../../src/infra/database-pool-config";
+import { databasePoolErrorCategory } from "../../src/infra/db-pool";
 
 describe("GraphQL database pool configuration", () => {
 	test("keeps an isolated process alive after idle pool errors, including shutdown", async () => {
@@ -49,5 +50,12 @@ describe("GraphQL database pool configuration", () => {
 				"DATABASE_POOL_MAX must be an integer between 1 and 4"
 			);
 		}
+	});
+
+	test("classifies driver close reasons without retaining the error payload", () => {
+		expect(databasePoolErrorCategory({ code: "57P01" })).toBe("server_shutdown");
+		expect(databasePoolErrorCategory({ code: "CONNECTION_CLOSED" })).toBe("connection");
+		expect(databasePoolErrorCategory({ code: "ECONNRESET" })).toBe("connection");
+		expect(databasePoolErrorCategory({ code: "XX000" })).toBe("other");
 	});
 });

@@ -2,7 +2,7 @@ diff --git a/cf/src/query.js b/cf/src/query.js
 index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..0806da5e0f2639e26034780fdcae7d9d4fb32639 100644
 --- a/cf/src/query.js
 +++ b/cf/src/query.js
-@@ -50,7 +50,9 @@ export class Query extends Promise {
+@@ -50,7 +50,9 @@
    }
  
    cancel() {
@@ -17,7 +17,7 @@ diff --git a/cjs/src/query.js b/cjs/src/query.js
 index 45327f2fabcdbf8f8ec5020675012c310c04fee6..7d59c3ed75bfa605a7bda15a2225646974237745 100644
 --- a/cjs/src/query.js
 +++ b/cjs/src/query.js
-@@ -50,7 +50,9 @@ const Query = module.exports.Query = class Query extends Promise {
+@@ -50,7 +50,9 @@
    }
  
    cancel() {
@@ -32,7 +32,7 @@ diff --git a/src/query.js b/src/query.js
 index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..0806da5e0f2639e26034780fdcae7d9d4fb32639 100644
 --- a/src/query.js
 +++ b/src/query.js
-@@ -50,7 +50,9 @@ export class Query extends Promise {
+@@ -50,7 +50,9 @@
    }
  
    cancel() {
@@ -43,11 +43,59 @@ index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..0806da5e0f2639e26034780fdcae7d9d
    }
  
    simple() {
+diff --git a/src/index.js b/src/index.js
+index c7fba3dace20173f4cb13f3f138bb6d213b43683..e9e246dadcb995c0799b8977362344ea62cab58b 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -422,7 +422,7 @@
+     move(c, closed)
+     c.reserved = null
+     c.onclose && (c.onclose(e), c.onclose = null)
+-    options.onclose && options.onclose(c.id)
++    options.onclose && options.onclose(c.id, e)
+     queries.length && connect(c, queries.shift())
+   }
+ }
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+index f09c61c7e998f411560b95c9a8e1ed6a97972c11..284b0aa6f0d1973849239cea5fe08b70ee97f765 100644
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -422,7 +422,7 @@
+     move(c, closed)
+     c.reserved = null
+     c.onclose && (c.onclose(e), c.onclose = null)
+-    options.onclose && options.onclose(c.id)
++    options.onclose && options.onclose(c.id, e)
+     queries.length && connect(c, queries.shift())
+   }
+ }
+diff --git a/cf/src/index.js b/cf/src/index.js
+index ffbe7aef075d6037c540cbd5e8f7e298d4345cc3..4df5da76dbab900627fe450045d07d1928d037e0 100644
+--- a/cf/src/index.js
++++ b/cf/src/index.js
+@@ -423,7 +423,7 @@
+     move(c, closed)
+     c.reserved = null
+     c.onclose && (c.onclose(e), c.onclose = null)
+-    options.onclose && options.onclose(c.id)
++    options.onclose && options.onclose(c.id, e)
+     queries.length && connect(c, queries.shift())
+   }
+ }
 diff --git a/types/index.d.ts b/types/index.d.ts
-index 13c3432f761e2c2ee5b7dc1bdafe93e49f993dc7..ccfc379d4cbc95dfbb669df74dea43cce1a7185e 100644
+index 13c3432f761e2c2ee5b7dc1bdafe93e49f993dc7..a870254d0a2fd5edcb7788dacf79dfca988f9bf7 100644
 --- a/types/index.d.ts
 +++ b/types/index.d.ts
-@@ -605,7 +605,7 @@ declare namespace postgres {
+@@ -118,7 +118,7 @@
+    * @default 'alltables'
+    */
+   publications: string
+-  onclose: (connId: number) => void;
++  onclose: (connId: number, error?: Error) => void;
+   backoff: boolean | ((attemptNum: number) => number);
+   max_lifetime: number | null;
+   keep_alive: number | null;
+@@ -605,7 +605,7 @@
      writable(): Promise<Writable>;
  
      execute(): this;

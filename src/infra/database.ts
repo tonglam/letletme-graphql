@@ -2,7 +2,11 @@ import type { QueryResultRow } from "pg";
 import { dbPool, type DatabaseClient, type DatabaseResult } from "./db-pool";
 import { env } from "./env";
 import { postgresPoolWaitEvents } from "./metrics";
-import { DATABASE_CLEANUP_BUDGET_MS, ExecutionScope } from "./execution-scope";
+import {
+	DATABASE_CLEANUP_BUDGET_MS,
+	ExecutionExpiredError,
+	ExecutionScope,
+} from "./execution-scope";
 
 export type DatabaseHealthClient = {
 	query: (text: string, values?: readonly unknown[]) => Promise<unknown>;
@@ -86,6 +90,16 @@ export const createDatabaseExecutor = (
 			Math.min(execution?.deadlineAt ?? Infinity, Date.now() + statementTimeoutMs),
 			execution?.signal
 		);
+		const propagateDeadline = (): void => {
+			if (
+				execution &&
+				scope.signal.reason instanceof ExecutionExpiredError &&
+				scope.signal.reason.reason === "deadline"
+			) {
+				execution.cancel("deadline");
+			}
+		};
+		scope.signal.addEventListener("abort", propagateDeadline, { once: true });
 		let completed!: () => void;
 		execution?.track(
 			new Promise<void>((resolve) => {
@@ -180,6 +194,7 @@ export const createDatabaseExecutor = (
 			}
 			release(!reusable);
 			await releaseWork;
+			scope.signal.removeEventListener("abort", propagateDeadline);
 			scope.dispose();
 			completed?.();
 		}

@@ -38,12 +38,34 @@ type Slot = {
 	busy: boolean;
 	retiring: boolean;
 	idleTimer?: ReturnType<typeof setTimeout>;
+	retirement?: Promise<void>;
 };
 type Checkout = {
 	done: boolean;
 	timer: ReturnType<typeof setTimeout>;
 	resolve: (client: DatabaseClient) => void;
 	reject: (error: Error) => void;
+};
+
+export type DatabasePoolErrorCategory = "server_shutdown" | "connection" | "other";
+
+/** Keep the bounded metric useful even when the driver only reports a close. */
+export const databasePoolErrorCategory = (error: unknown): DatabasePoolErrorCategory => {
+	const code =
+		error && typeof error === "object" && "code" in error && typeof error.code === "string"
+			? error.code
+			: undefined;
+	if (code === "57P01" || code === "57P02" || code === "57P03") return "server_shutdown";
+	if (
+		code === "ECONNRESET" ||
+		code === "EPIPE" ||
+		code === "ETIMEDOUT" ||
+		code === "ENOTFOUND" ||
+		code?.startsWith("CONNECTION_") ||
+		code === "CONNECT_TIMEOUT"
+	)
+		return "connection";
+	return "other";
 };
 
 /** One max:1 driver per slot lets public end({timeout:0}) discard only the
@@ -63,13 +85,7 @@ export class DatabasePool extends EventEmitter {
 	) {
 		super();
 		this.on("error", (error: Error) => {
-			const code = "code" in error ? error.code : undefined;
-			const category =
-				code === "57P01" || code === "57P02" || code === "57P03"
-					? "server_shutdown"
-					: code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT"
-						? "connection"
-						: "other";
+			const category = databasePoolErrorCategory(error);
 			postgresPoolErrors.labels(category).inc();
 			logger.warn({ category }, "PostgreSQL connection removed after pool error");
 		});
@@ -124,9 +140,14 @@ export class DatabasePool extends EventEmitter {
 						])
 					),
 					onnotice: () => {},
-					onclose: () => {
+					onclose: (_connectionId, error) => {
 						if (!created.retiring) {
-							this.emit("error", new Error("Database connection closed unexpectedly"));
+							this.emit(
+								"error",
+								error instanceof Error
+									? error
+									: new Error("Database connection closed unexpectedly")
+							);
 							void this.retire(created);
 						}
 					},
@@ -225,18 +246,21 @@ export class DatabasePool extends EventEmitter {
 		}
 	}
 
-	private async retire(slot: Slot): Promise<void> {
-		if (slot.retiring) return;
+	private retire(slot: Slot): Promise<void> {
+		if (slot.retirement) return slot.retirement;
 		slot.retiring = true;
 		clearTimeout(slot.idleTimer);
-		try {
-			await slot.sql.end({ timeout: 0 });
-		} catch {
-			this.emit("error", new Error("Database connection cleanup failed"));
-		} finally {
-			this.slots.delete(slot);
-			this.dispatch();
-		}
+		slot.retirement = (async () => {
+			try {
+				await slot.sql.end({ timeout: 0 });
+			} catch {
+				this.emit("error", new Error("Database connection cleanup failed"));
+			} finally {
+				this.slots.delete(slot);
+				this.dispatch();
+			}
+		})();
+		return slot.retirement;
 	}
 	async end(): Promise<void> {
 		this.ending = true;

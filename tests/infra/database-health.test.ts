@@ -203,6 +203,26 @@ describe("bounded read-only SQL execution", () => {
 		).rejects.toThrow("no longer available");
 		expect(releases).toEqual([true]);
 	});
+
+	it("propagates a child statement deadline to the request scope", async () => {
+		const requestScope = new ExecutionScope(Date.now() + 500);
+		let fail!: (error: Error) => void;
+		const client: DatabaseHealthClient = {
+			query: (text) =>
+				text === "SELECT slow"
+					? new Promise((_, reject) => {
+							fail = reject;
+						})
+					: Promise.resolve(),
+			release: () => fail(new Error("closed")),
+		};
+		await expect(
+			createDatabaseExecutor(requestScope, async () => client, 20).query("SELECT slow")
+		).rejects.toThrow("no longer available");
+		expect(requestScope.signal.aborted).toBe(true);
+		expect((requestScope.signal.reason as { reason?: string }).reason).toBe("deadline");
+		requestScope.dispose();
+	});
 });
 
 it("observes cancellation failures and destroys the uncertain connection", async () => {
