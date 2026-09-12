@@ -222,9 +222,10 @@ jobs:
         env:
           DATA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
           RUN_DATABASE_EXECUTION_INTEGRATION: "1"
+          FIXTURE_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/testdb
         run: |
           psql "$DATA_DATABASE_URL" -v ON_ERROR_STOP=1 -c "ALTER DATABASE testdb SET statement_timeout = '120s'"
-          bun test tests/infra/database-execution.integration.test.ts
+          bun test tests/infra/database-execution.integration.test.ts tests/http/execution-scope.test.ts
 
       - name: Exercise reader, resolver, and fail-closed contract cases
         env:

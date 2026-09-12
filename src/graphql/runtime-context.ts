@@ -1,5 +1,6 @@
 import { coreDatasetRevision, getCoreDataSnapshot } from "../infra/data-snapshot";
-import { database } from "../infra/database";
+import { database, createDatabaseExecutor } from "../infra/database";
+import { ExecutionScope, ExecutionExpiredError } from "../infra/execution-scope";
 import { logger } from "../infra/logger";
 import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "../infra/principal";
 import { ReadModelClient } from "../infra/read-model-client";
@@ -79,6 +80,7 @@ export const buildGraphQLRuntimeContext = async ({
 				: currentSeasonProvider.refresh(database, 5_000)
 		);
 	} catch (error) {
+		if (error instanceof ExecutionExpiredError) throw error;
 		if (readOnlyHotPath) {
 			try {
 				// The season identity was pinned at startup. During a PostgreSQL
@@ -119,7 +121,10 @@ export const buildGraphQLRuntimeContext = async ({
 		}
 	}
 
-	const data = new ReadModelClient(database, currentSeason);
+	const executionScope = ExecutionScope.current();
+	executionScope?.remainingMs();
+	const requestDatabase = executionScope ? createDatabaseExecutor(executionScope) : database;
+	const data = new ReadModelClient(requestDatabase, currentSeason);
 	const requestScope = {};
 	const authorizedTournamentMemberships = new Set<number>();
 	const authorization = await requestTiming.measure("authorization", () =>
@@ -144,7 +149,8 @@ export const buildGraphQLRuntimeContext = async ({
 
 	const context: GraphQLContext = {
 		data,
-		database,
+		database: requestDatabase,
+		executionScope,
 		currentSeason,
 		refreshCurrentSeason: () => currentSeasonProvider.refresh(database, 5_000, currentSeason),
 		redis: getRedis(),
@@ -185,6 +191,7 @@ export const buildGraphQLRuntimeContext = async ({
 			coreDatasetRevision(await getCoreDataSnapshot(context))
 		);
 	} catch (error) {
+		if (error instanceof ExecutionExpiredError) throw error;
 		logger.error({ err: error, requestId }, "Data publication authority is unavailable");
 		return {
 			ok: false,

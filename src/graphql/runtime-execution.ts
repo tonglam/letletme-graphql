@@ -8,6 +8,9 @@ import {
 } from "@apollo/server";
 import depthLimit from "graphql-depth-limit";
 import { sanitizeGraphQLMultipartChunk, sanitizeGraphQLResponseBody } from "../http/graphql-error";
+import { ExecutionScope } from "../infra/execution-scope";
+import { createDatabaseExecutor } from "../infra/database";
+import { ReadModelClient } from "../infra/read-model-client";
 import { env } from "../infra/env";
 import { logger } from "../infra/logger";
 import type { RequestTiming } from "../http/request-timing";
@@ -89,7 +92,14 @@ type CompleteApolloResponse = Readonly<{
 	observation: LiveMatchExecutionObservation;
 }>;
 
-const liveMatchdayExecutionFlights = new Map<string, Promise<CompleteApolloResponse | null>>();
+type LiveFlight = {
+	scope: ExecutionScope;
+	waiters: number;
+	streaming: boolean;
+	owner: Promise<ApolloHttpGraphQLResponse>;
+	shared: Promise<CompleteApolloResponse | null>;
+};
+const liveMatchdayExecutionFlights = new Map<string, LiveFlight>();
 
 type LiveMatchdayExecutionTransport = Readonly<{
 	method: string;
@@ -174,40 +184,93 @@ const isLiveMatchdayResponseShareable = (response: CompleteApolloResponse): bool
  */
 const executeLiveMatchdayFlight = async (
 	key: string,
-	execute: () => Promise<ApolloHttpGraphQLResponse>,
-	getObservation: () => LiveMatchExecutionObservation | null
+	execute: (context: GraphQLContext) => Promise<ApolloHttpGraphQLResponse>,
+	context: GraphQLContext,
+	getObservation: (context: GraphQLContext) => LiveMatchExecutionObservation | null
 ): Promise<ApolloHttpGraphQLResponse> => {
-	const existing = liveMatchdayExecutionFlights.get(key);
-	if (existing) {
-		const response = await existing;
-		if (response && isLiveMatchdayResponseShareable(response)) {
-			metrics.liveMatchExecutionCoalescedTotal.inc();
-			metrics.liveMatchDeliveryTotal
-				.labels(
-					response.observation.view,
-					response.observation.state,
-					response.observation.servedFrom
-				)
-				.inc();
-			return restoreCompleteResponse(response);
-		}
-		return execute();
+	const caller = context.executionScope ?? ExecutionScope.current();
+	caller?.remainingMs();
+	let flight = liveMatchdayExecutionFlights.get(key);
+	if (flight && (flight.scope.signal.aborted || Date.now() >= flight.scope.deadlineAt)) {
+		liveMatchdayExecutionFlights.delete(key);
+		flight = undefined;
 	}
-
-	const ownerExecution = execute();
-	const shared = ownerExecution
-		.then(
-			(response) => materializeCompleteResponseSafely(response, getObservation),
-			() => null
-		)
-		.finally(() => {
-			if (liveMatchdayExecutionFlights.get(key) === shared) {
-				liveMatchdayExecutionFlights.delete(key);
+	const ownsFlight = !flight;
+	if (!flight) {
+		const scope = new ExecutionScope(caller?.deadlineAt);
+		const database = createDatabaseExecutor(scope);
+		const ownerContext: GraphQLContext = {
+			...context,
+			executionScope: scope,
+			database,
+			data: new ReadModelClient(database, context.currentSeason),
+			requestScope: {},
+		};
+		const owner = scope.run(() => scope.wait(execute(ownerContext)));
+		const created: LiveFlight = {
+			scope,
+			waiters: 0,
+			streaming: false,
+			owner,
+			shared: undefined as unknown as Promise<CompleteApolloResponse | null>,
+		};
+		created.shared = owner
+			.then(
+				(response) => {
+					scope.remainingMs();
+					return materializeCompleteResponseSafely(response, () => getObservation(ownerContext));
+				},
+				() => null
+			)
+			.finally(() => {
+				if (liveMatchdayExecutionFlights.get(key) === created)
+					liveMatchdayExecutionFlights.delete(key);
+			});
+		flight = created;
+		liveMatchdayExecutionFlights.set(key, flight);
+	}
+	flight.waiters++;
+	try {
+		const shared = await (caller ? caller.wait(flight.shared) : flight.shared);
+		if (shared && (ownsFlight || isLiveMatchdayResponseShareable(shared))) {
+			if (!ownsFlight) {
+				metrics.liveMatchExecutionCoalescedTotal.inc();
+				metrics.liveMatchDeliveryTotal
+					.labels(shared.observation.view, shared.observation.state, shared.observation.servedFrom)
+					.inc();
 			}
-		});
-	liveMatchdayExecutionFlights.set(key, shared);
-	const response = await shared;
-	return response ? restoreCompleteResponse(response) : ownerExecution;
+			return restoreCompleteResponse(shared);
+		}
+		if (!ownsFlight) {
+			flight.scope.remainingMs();
+			caller?.remainingMs();
+			return execute(context);
+		}
+		const response = await flight.owner;
+		if (response.body.kind !== "complete") {
+			flight.streaming = true;
+			const scope = flight.scope;
+			const source = response.body.asyncIterator;
+			const abort = (): void => scope.cancel();
+			caller?.signal.addEventListener("abort", abort, { once: true });
+			response.body.asyncIterator = (async function* () {
+				try {
+					while (true) {
+						const item = await scope.wait(scope.run(() => source.next()));
+						if (item.done) return;
+						yield item.value;
+					}
+				} finally {
+					caller?.signal.removeEventListener("abort", abort);
+					scope.dispose();
+					await source.return?.();
+				}
+			})();
+		}
+		return response;
+	} finally {
+		if (--flight.waiters === 0 && !flight.streaming) flight.scope.dispose();
+	}
 };
 
 export type GraphQLExecutionResult = Readonly<{
@@ -236,14 +299,16 @@ export const executeGraphQLRequest = async ({
 	/** Only set for the public, single-root liveMatchday operation. */
 	responseFlightKey?: string;
 	/** Owner-only publication metadata used to guard and observe restored results. */
-	responseFlightObservation?: () => LiveMatchExecutionObservation | null;
+	responseFlightObservation?: (context: GraphQLContext) => LiveMatchExecutionObservation | null;
 }): Promise<GraphQLExecutionResult> => {
 	const headers = new HeaderMap();
 	request.headers.forEach((value, key) => {
 		headers.set(key, value);
 	});
 
-	const execute = (): Promise<ApolloHttpGraphQLResponse> =>
+	const execute = (
+		executionContext: GraphQLContext = context
+	): Promise<ApolloHttpGraphQLResponse> =>
 		apollo.executeHTTPGraphQLRequest({
 			httpGraphQLRequest: {
 				method: request.method.toUpperCase(),
@@ -251,14 +316,15 @@ export const executeGraphQLRequest = async ({
 				body: parsedBody,
 				search: "",
 			},
-			context: async () => context,
+			context: async () => executionContext,
 		});
 	const httpGraphQLResponse = await requestTiming.measure("apollo", () =>
 		responseFlightKey && responseFlightObservation
-			? executeLiveMatchdayFlight(responseFlightKey, execute, responseFlightObservation)
+			? executeLiveMatchdayFlight(responseFlightKey, execute, context, responseFlightObservation)
 			: execute()
 	);
 
+	context.executionScope?.remainingMs();
 	const stopResponseBuild = requestTiming.start("responseBuild");
 	const responseHeaders: Record<string, string> = {};
 	for (const [key, value] of httpGraphQLResponse.headers) {
@@ -290,6 +356,10 @@ export const executeGraphQLRequest = async ({
 					logger.error({ err: error, requestId }, "GraphQL multipart response sanitization failed");
 					controller.error(error);
 				}
+			},
+			async cancel(): Promise<void> {
+				context.executionScope?.cancel();
+				await asyncIterator.return?.();
 			},
 		});
 	}

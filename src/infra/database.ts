@@ -1,12 +1,13 @@
-import type { PoolClient, QueryResult, QueryResultRow } from "pg";
-import { dbPool } from "./db-pool";
+import type { QueryResultRow } from "pg";
+import { dbPool, type DatabaseClient, type DatabaseResult } from "./db-pool";
 import { env } from "./env";
 import { postgresPoolWaitEvents } from "./metrics";
 import { DATABASE_CLEANUP_BUDGET_MS, ExecutionScope } from "./execution-scope";
 
 export type DatabaseHealthClient = {
 	query: (text: string, values?: readonly unknown[]) => Promise<unknown>;
-	release: (destroy?: boolean) => void;
+	release: (destroy?: boolean) => void | Promise<void>;
+	cancel?: () => Promise<void>;
 	on?: (event: "error", listener: (error: Error) => void) => unknown;
 	removeListener?: (event: "error", listener: (error: Error) => void) => unknown;
 };
@@ -15,7 +16,7 @@ export interface QueryExecutor {
 	query<Row extends QueryResultRow = QueryResultRow>(
 		text: string,
 		values?: readonly unknown[]
-	): Promise<QueryResult<Row>>;
+	): Promise<DatabaseResult<Row>>;
 }
 
 /**
@@ -46,7 +47,7 @@ export const poolCheckoutNeedsWaitMetric = (
 	totalCountBefore >= poolMax &&
 	idleCountBefore <= waitingCountBefore;
 
-const connectFromPool = (): Promise<PoolClient> => {
+const connectFromPool = (): Promise<DatabaseClient> => {
 	const waitingCountBefore = dbPool.waitingCount;
 	const idleCountBefore = dbPool.idleCount;
 	const totalCountBefore = dbPool.totalCount;
@@ -78,28 +79,40 @@ export const createDatabaseExecutor = (
 	async query<Row extends QueryResultRow = QueryResultRow>(
 		text: string,
 		values: readonly unknown[] = []
-	): Promise<QueryResult<Row>> {
-		requestScope?.remainingMs();
+	): Promise<DatabaseResult<Row>> {
+		const execution = requestScope ?? ExecutionScope.current();
+		execution?.remainingMs();
 		const scope = new ExecutionScope(
-			Math.min(requestScope?.deadlineAt ?? Infinity, Date.now() + statementTimeoutMs),
-			requestScope?.signal
+			Math.min(execution?.deadlineAt ?? Infinity, Date.now() + statementTimeoutMs),
+			execution?.signal
+		);
+		let completed!: () => void;
+		execution?.track(
+			new Promise<void>((resolve) => {
+				completed = resolve;
+			})
 		);
 		let client: DatabaseHealthClient | undefined;
 		let released = false;
 		let inTransaction = false;
 		let reusable = false;
 		let pending: Promise<unknown> | undefined;
+		let cancellation: Promise<unknown> | undefined;
+		let releaseWork: Promise<unknown> | undefined;
 		const connectionError = (): void => scope.cancel("cancelled");
 		const release = (destroy: boolean): void => {
 			if (client && !released) {
 				released = true;
-				client.release(destroy);
+				releaseWork = Promise.resolve(client.release(destroy)).catch(() => undefined);
 				// Keep the handler on a discarded client through asynchronous socket
 				// teardown; a reusable client is handed back to the pool's listener.
 				if (!destroy) client.removeListener?.("error", connectionError);
 			}
 		};
-		const abort = (): void => release(true);
+		const abort = (): void => {
+			if (client?.cancel) cancellation = client.cancel().catch(() => undefined);
+			else release(true);
+		};
 		const execute = async (sql: string, args?: readonly unknown[]): Promise<unknown> => {
 			scope.remainingMs();
 			pending = client!.query(sql, args);
@@ -107,13 +120,13 @@ export const createDatabaseExecutor = (
 		};
 		try {
 			scope.remainingMs();
-			// pg has no cancellable checkout API. Own late arrivals and never run
+			// Own the pool checkout even after its caller stops waiting. Own late arrivals and never run
 			// SQL on a connection acquired after this operation has expired.
 			const checkout = connect().then((acquired) => {
 				try {
 					scope.remainingMs();
 				} catch (error) {
-					acquired.release();
+					void Promise.resolve(acquired.release()).catch(() => undefined);
 					throw error;
 				}
 				client = acquired;
@@ -132,12 +145,13 @@ export const createDatabaseExecutor = (
 			await execute("COMMIT");
 			inTransaction = false;
 			reusable = true;
-			return result as QueryResult<Row>;
+			return result as DatabaseResult<Row>;
 		} catch (error) {
 			const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
 			const connectionFailure =
 				typeof code === "string" &&
 				(code.startsWith("08") ||
+					code.startsWith("CONNECTION_") ||
 					["57P01", "57P02", "57P03", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ENOTFOUND"].includes(
 						code
 					));
@@ -152,20 +166,22 @@ export const createDatabaseExecutor = (
 			throw error;
 		} finally {
 			scope.signal.removeEventListener("abort", abort);
-			release(!reusable);
 			if (pending && !reusable) {
 				// Discarded connections cannot be reused. Give the driver a bounded
 				// cleanup window and observe a later rejection even if it exceeds it.
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				await Promise.race([
-					pending.catch(() => undefined),
+					Promise.all([pending.catch(() => undefined), cancellation]),
 					new Promise<void>((resolve) => {
 						timer = setTimeout(resolve, DATABASE_CLEANUP_BUDGET_MS);
 					}),
 				]);
 				clearTimeout(timer);
 			}
+			release(!reusable);
+			await releaseWork;
 			scope.dispose();
+			completed?.();
 		}
 	},
 });

@@ -204,3 +204,34 @@ describe("bounded read-only SQL execution", () => {
 		expect(releases).toEqual([true]);
 	});
 });
+
+it("observes cancellation failures and destroys the uncertain connection", async () => {
+	const scope = new ExecutionScope();
+	let rejectQuery!: (error: Error) => void;
+	let started!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	const releases: boolean[] = [];
+	const work = createDatabaseExecutor(scope, async () => ({
+		query: (text) =>
+			text === "SELECT slow"
+				? new Promise((_, reject) => {
+						rejectQuery = reject;
+						started();
+					})
+				: Promise.resolve(),
+		cancel: async () => {
+			rejectQuery(new Error("connection failed"));
+			throw new Error("cancel failed");
+		},
+		release: (destroy) => {
+			releases.push(Boolean(destroy));
+		},
+	})).query("SELECT slow");
+	await gate;
+	scope.cancel();
+	await expect(work).rejects.toThrow("no longer available");
+	expect(releases).toEqual([true]);
+	scope.dispose();
+});

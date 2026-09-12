@@ -1,0 +1,58 @@
+diff --git a/cf/src/query.js b/cf/src/query.js
+index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..0806da5e0f2639e26034780fdcae7d9d4fb32639 100644
+--- a/cf/src/query.js
++++ b/cf/src/query.js
+@@ -50,7 +50,9 @@ export class Query extends Promise {
+   }
+ 
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    const cancel = this.canceller
++    this.canceller = null
++    return cancel ? cancel(this) : Promise.resolve()
+   }
+ 
+   simple() {
+diff --git a/cjs/src/query.js b/cjs/src/query.js
+index 45327f2fabcdbf8f8ec5020675012c310c04fee6..7d59c3ed75bfa605a7bda15a2225646974237745 100644
+--- a/cjs/src/query.js
++++ b/cjs/src/query.js
+@@ -50,7 +50,9 @@ const Query = module.exports.Query = class Query extends Promise {
+   }
+ 
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    const cancel = this.canceller
++    this.canceller = null
++    return cancel ? cancel(this) : Promise.resolve()
+   }
+ 
+   simple() {
+diff --git a/src/query.js b/src/query.js
+index 0d44a15cd9e42beaf11d4be6ccde60223e09508a..0806da5e0f2639e26034780fdcae7d9d4fb32639 100644
+--- a/src/query.js
++++ b/src/query.js
+@@ -50,7 +50,9 @@ export class Query extends Promise {
+   }
+ 
+   cancel() {
+-    return this.canceller && (this.canceller(this), this.canceller = null)
++    const cancel = this.canceller
++    this.canceller = null
++    return cancel ? cancel(this) : Promise.resolve()
+   }
+ 
+   simple() {
+diff --git a/types/index.d.ts b/types/index.d.ts
+index 13c3432f761e2c2ee5b7dc1bdafe93e49f993dc7..ccfc379d4cbc95dfbb669df74dea43cce1a7185e 100644
+--- a/types/index.d.ts
++++ b/types/index.d.ts
+@@ -605,7 +605,7 @@ declare namespace postgres {
+     writable(): Promise<Writable>;
+ 
+     execute(): this;
+-    cancel(): void;
++    cancel(): Promise<void>;
+ 
+     /**
+      * @deprecated `.stream` has been renamed to `.forEach`

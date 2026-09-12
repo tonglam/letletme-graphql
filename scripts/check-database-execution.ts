@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { DatabasePool, closeDbPool } from "../src/infra/db-pool";
 import { createDatabaseExecutor } from "../src/infra/database";
 import { env } from "../src/infra/env";
 import { ExecutionScope } from "../src/infra/execution-scope";
@@ -9,12 +9,12 @@ if (!process.argv.includes("--bounded-probe")) {
 	throw new Error("Pass --bounded-probe to run the single-concurrency database probe");
 }
 
-const workPool = new Pool({
+const workPool = new DatabasePool({
 	connectionString: env.DATABASE_URL,
 	max: 1,
 	connectionTimeoutMillis: 2000,
 });
-const observerPool = new Pool({
+const observerPool = new DatabasePool({
 	connectionString: env.DATABASE_URL,
 	max: 1,
 	connectionTimeoutMillis: 2000,
@@ -26,7 +26,7 @@ let scope: ExecutionScope | undefined;
 
 try {
 	const settings = (
-		await createDatabaseExecutor(undefined, () => workPool.connect()).query<{
+		await createDatabaseExecutor(undefined, () => workPool.connect(), 1000).query<{
 			timeout_ms: number;
 			read_only: string;
 		}>(
@@ -38,6 +38,7 @@ try {
 		timeoutMs > 0 && timeoutMs <= env.DATABASE_STATEMENT_TIMEOUT_MS && settings.read_only === "on";
 	record.localSetting = {
 		configuredMs: env.DATABASE_STATEMENT_TIMEOUT_MS,
+		probeBudgetMs: 1000,
 		effectiveMs: timeoutMs,
 		readOnly: settings.read_only,
 		passed: localSettingPassed,
@@ -109,6 +110,6 @@ try {
 	process.exitCode = 1;
 } finally {
 	scope?.dispose();
-	await Promise.all([workPool.end(), observerPool.end()]);
+	await Promise.all([workPool.end(), observerPool.end(), closeDbPool()]);
 	console.log(JSON.stringify(record));
 }

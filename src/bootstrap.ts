@@ -1,3 +1,4 @@
+import { ExecutionScope, ExecutionExpiredError } from "./infra/execution-scope";
 import { graphQLErrorResponse } from "./graphql/authorization";
 import type { GraphQLContext, LiveMatchExecutionObservation } from "./graphql/context";
 import { buildGraphQLRuntimeContext, resolvePrincipalAndUser } from "./graphql/runtime-context";
@@ -193,6 +194,7 @@ export const startServer = async (): Promise<void> => {
 			}
 
 			if (url.pathname === "/graphql") {
+				const executionScope = new ExecutionScope(undefined, request.signal);
 				const requestTiming = new RequestTiming();
 				const admissionOrder = new GraphQLAdmissionOrder();
 				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
@@ -233,7 +235,12 @@ export const startServer = async (): Promise<void> => {
 						outcome: terminalV3Outcome(terminalDecision),
 					});
 				};
-				const finalizeGraphQLResponse = (response: Response, outcome: string): Response => {
+				const finalizeGraphQLResponse = (
+					response: Response,
+					outcome: string,
+					expired = false
+				): Response => {
+					if (!expired) executionScope.remainingMs();
 					fullCoreLoaded =
 						fullCoreLoaded ||
 						graphQLContext?.fullCoreLoaded === true ||
@@ -314,328 +321,352 @@ export const startServer = async (): Promise<void> => {
 					return finalizeGraphQLResponse(response, outcome);
 				};
 
-				try {
-					const methodFailure = graphQLMethodFailure(request.method);
-					if (methodFailure) {
-						return finalizeGraphQLResponse(
-							jsonError(
-								methodFailure.status,
-								methodFailure.code,
-								methodFailure.message,
-								corsHeaders,
-								{ Allow: "POST, OPTIONS" }
-							),
-							"method_rejected"
-						);
-					}
-
-					const ingress = requestTiming.measureSync("ingressClassification", () =>
-						classifyGraphQLIngress(request.headers)
-					);
-					ingressClass = ingress.class;
-					trafficClass = ingress.trafficClass;
-					workload = ingress.workload;
-					subjectFingerprint = rateLimitFingerprint(ingress.subject);
-					metrics.graphqlIngressRequests.labels(ingress.class).inc();
-					const ingressFailure = graphQLIngressFailure(ingress);
-					if (ingressFailure) {
-						return finalizeGraphQLResponse(
-							jsonError(
-								ingressFailure.status,
-								ingressFailure.code,
-								ingressFailure.message,
-								corsHeaders
-							),
-							"ingress_rejected"
-						);
-					}
-					trustedIngress = ingress;
-					capacityAdmission = isLiveMatchCapacityAdmission(request.headers, ingress);
-
-					admissionOrder.enter("pre-auth");
-					const preAuthAdmission = await requestTiming.measure("preAuthAdmission", () =>
-						runGraphQLRateLimitStage({
-							v3Checks: capacityAdmission ? [] : graphQLVersionedPreAuthRateLimitChecks(ingress),
-							corsHeaders,
-							rateLimitWorkload: ingress.workload,
-						})
-					);
-					if (preAuthAdmission.v3Decision) {
-						if (!preAuthAdmission.v3Decision.allowed) {
-							terminalPreAuthV3Denial = preAuthAdmission.v3Decision;
-						}
-						captureShadowRateLimitDecision(preAuthAdmission.v3Decision);
-						logV3RateLimitDecision({
-							requestId,
-							operation: operationName,
-							rootFields,
-							ingress,
-							stage: "pre-auth",
-							decision: preAuthAdmission.v3Decision,
-						});
-					}
-					if (preAuthAdmission.response) {
-						if (
-							isGraphQLRateLimitEnforceMode &&
-							preAuthAdmission.v3Decision &&
-							!preAuthAdmission.v3Decision.allowed
-						) {
-							await recordTerminalRequestV3Outcome(ingress, preAuthAdmission.v3Decision);
-						}
-						return finalizeGraphQLResponse(
-							preAuthAdmission.response,
-							"pre_auth_admission_rejected"
-						);
-					}
-
-					admissionOrder.enter("body-read");
-					const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
-					let parsedBody: unknown = undefined;
-					if (body) {
-						try {
-							parsedBody = requestTiming.measureSync(
-								"jsonParse",
-								() => JSON.parse(body) as unknown
-							);
-						} catch {
-							return finalizePostPreAuthResponse(
+				const run = async (): Promise<Response> => {
+					try {
+						const methodFailure = graphQLMethodFailure(request.method);
+						if (methodFailure) {
+							return finalizeGraphQLResponse(
 								jsonError(
-									400,
-									"INVALID_GRAPHQL_REQUEST",
-									"Request body must be valid JSON",
+									methodFailure.status,
+									methodFailure.code,
+									methodFailure.message,
+									corsHeaders,
+									{ Allow: "POST, OPTIONS" }
+								),
+								"method_rejected"
+							);
+						}
+
+						const ingress = requestTiming.measureSync("ingressClassification", () =>
+							classifyGraphQLIngress(request.headers)
+						);
+						ingressClass = ingress.class;
+						trafficClass = ingress.trafficClass;
+						workload = ingress.workload;
+						subjectFingerprint = rateLimitFingerprint(ingress.subject);
+						metrics.graphqlIngressRequests.labels(ingress.class).inc();
+						const ingressFailure = graphQLIngressFailure(ingress);
+						if (ingressFailure) {
+							return finalizeGraphQLResponse(
+								jsonError(
+									ingressFailure.status,
+									ingressFailure.code,
+									ingressFailure.message,
 									corsHeaders
 								),
-								"invalid_json"
+								"ingress_rejected"
 							);
 						}
-					}
-					admissionOrder.enter("transport");
-					const transportFailure = validateGraphQLTransportPayload(parsedBody);
-					if (transportFailure) {
-						return finalizePostPreAuthResponse(
-							jsonError(400, transportFailure.code, transportFailure.message, corsHeaders),
-							"invalid_transport_payload"
-						);
-					}
-					operationName = extractGraphQLOperationName(parsedBody);
+						trustedIngress = ingress;
+						capacityAdmission = isLiveMatchCapacityAdmission(request.headers, ingress);
 
-					const limits = requestTiming.measureSync("requestLimits", () =>
-						validateGraphQLRequestLimits(parsedBody, schema)
-					);
-					if (!limits.ok) {
-						return finalizePostPreAuthResponse(
-							jsonError(400, limits.code, limits.message, corsHeaders),
-							"request_limits_rejected"
+						admissionOrder.enter("pre-auth");
+						const preAuthAdmission = await requestTiming.measure("preAuthAdmission", () =>
+							runGraphQLRateLimitStage({
+								v3Checks: capacityAdmission ? [] : graphQLVersionedPreAuthRateLimitChecks(ingress),
+								corsHeaders,
+								rateLimitWorkload: ingress.workload,
+							})
 						);
-					}
-					rootFields = limits.rootFields;
-					const livePointsHotPath = isLivePointsHotPathOperation(rootFields);
-					const liveMatchesHotPath = isLiveMatchesHotPathOperation(rootFields);
-					const requiresLivePointsContract = requiresLivePointsV2Contract(rootFields);
-					const requiresLiveMatchesContract = requiresLiveMatchesV3Contract(rootFields);
-					if (requiresLivePointsContract && requiresLiveMatchesContract) {
-						const response = jsonError(
-							400,
-							"MIXED_LIVE_CONTRACTS",
-							"Live Points and Live Matches must use separate GraphQL operations",
-							corsHeaders
-						);
-						return finalizePostPreAuthResponse(response, "mixed_live_contracts_rejected");
-					}
-					if (requiresLivePointsContract && !hasLivePointsV2Contract(request.headers)) {
-						const response = jsonError(
-							426,
-							"CLIENT_UPGRADE_REQUIRED",
-							"Live Points requires the live-points-v2 client contract",
-							corsHeaders,
-							{ [LIVE_POINTS_CONTRACT_HEADER]: LIVE_POINTS_CONTRACT_VALUE }
-						);
-						return finalizePostPreAuthResponse(response, "live_points_contract_rejected");
-					}
-					if (requiresLiveMatchesContract && !hasLiveMatchesV3Contract(request.headers)) {
-						const response = jsonError(
-							426,
-							"CLIENT_UPGRADE_REQUIRED",
-							"Live Matches requires the live-matches-v3 client contract",
-							corsHeaders,
-							{ [LIVE_MATCHES_CONTRACT_HEADER]: LIVE_MATCHES_CONTRACT_VALUE }
-						);
-						return finalizePostPreAuthResponse(response, "live_matches_contract_rejected");
-					}
-					const contractFailure = validateMyTournamentReviewContract(rootFields, request.headers);
-					if (contractFailure) {
-						return finalizePostPreAuthResponse(
-							jsonError(
-								contractFailure.status,
-								contractFailure.code,
-								contractFailure.message,
-								corsHeaders
-							),
-							"client_contract_rejected"
-						);
-					}
-					admissionOrder.enter("principal");
-					const { principal, user } = await requestTiming.measure("principal", () =>
-						resolvePrincipalAndUser(request)
-					);
-					admissionOrder.enter("authentication");
-					if (!principal && hasAuthenticationMaterial(request.headers)) {
-						return finalizePostPreAuthResponse(
-							jsonError(
-								401,
-								"INVALID_AUTH_CONTEXT",
-								"Authentication context is invalid or expired",
-								corsHeaders
-							),
-							"authentication_rejected"
-						);
-					}
-
-					admissionOrder.enter("weighted");
-					const v3PrincipalAdmission = graphQLVersionedPrincipalAdmission({
-						ingress,
-						principal,
-						cost: limits.rateLimitCostUnits,
-					});
-					rateLimitAudience = v3PrincipalAdmission.audience;
-					const principalAdmissionResult = await requestTiming.measure("principalAdmission", () =>
-						runGraphQLRateLimitStage({
-							v3Checks: capacityAdmission ? [] : v3PrincipalAdmission.checks,
-							corsHeaders,
-							rateLimitWorkload: ingress.workload,
-						})
-					);
-					v3AdmissionEvaluated = true;
-					if (principalAdmissionResult.v3Decision) {
-						captureShadowRateLimitDecision(principalAdmissionResult.v3Decision);
-						logV3RateLimitDecision({
-							requestId,
-							operation: operationName,
-							rootFields,
-							ingress,
-							stage: "weighted",
-							audience: rateLimitAudience,
-							identitySubject: principal ? graphQLPrincipalSubject(principal) : ingress.subject,
-							decision: principalAdmissionResult.v3Decision,
-						});
-						await recordTerminalRequestV3Outcome(ingress, principalAdmissionResult.v3Decision);
-					}
-					if (principalAdmissionResult.response) {
-						return finalizeGraphQLResponse(
-							principalAdmissionResult.response,
-							"principal_admission_rejected"
-						);
-					}
-					admissionOrder.enter("authorization");
-					const contextResult = await buildGraphQLRuntimeContext({
-						currentSeasonProvider,
-						parsedBody,
-						principal,
-						user,
-						requestTiming,
-						requestId,
-						operationName,
-						limits,
-						readOnlyHotPath: livePointsHotPath || liveMatchesHotPath,
-					});
-					if (!contextResult.ok) {
-						fullCoreLoaded = contextResult.fullCoreLoaded;
-						const { failure } = contextResult;
-						if (failure.kind === "authorization") {
+						if (preAuthAdmission.v3Decision) {
+							if (!preAuthAdmission.v3Decision.allowed) {
+								terminalPreAuthV3Denial = preAuthAdmission.v3Decision;
+							}
+							captureShadowRateLimitDecision(preAuthAdmission.v3Decision);
+							logV3RateLimitDecision({
+								requestId,
+								operation: operationName,
+								rootFields,
+								ingress,
+								stage: "pre-auth",
+								decision: preAuthAdmission.v3Decision,
+							});
+						}
+						if (preAuthAdmission.response) {
+							if (
+								isGraphQLRateLimitEnforceMode &&
+								preAuthAdmission.v3Decision &&
+								!preAuthAdmission.v3Decision.allowed
+							) {
+								await recordTerminalRequestV3Outcome(ingress, preAuthAdmission.v3Decision);
+							}
 							return finalizeGraphQLResponse(
-								graphQLErrorResponse(failure.authorization, corsHeaders, requestId),
+								preAuthAdmission.response,
+								"pre_auth_admission_rejected"
+							);
+						}
+
+						admissionOrder.enter("body-read");
+						const body = await requestTiming.measure("bodyRead", () => readRequestBody(request));
+						let parsedBody: unknown = undefined;
+						if (body) {
+							try {
+								parsedBody = requestTiming.measureSync(
+									"jsonParse",
+									() => JSON.parse(body) as unknown
+								);
+							} catch {
+								return finalizePostPreAuthResponse(
+									jsonError(
+										400,
+										"INVALID_GRAPHQL_REQUEST",
+										"Request body must be valid JSON",
+										corsHeaders
+									),
+									"invalid_json"
+								);
+							}
+						}
+						admissionOrder.enter("transport");
+						const transportFailure = validateGraphQLTransportPayload(parsedBody);
+						if (transportFailure) {
+							return finalizePostPreAuthResponse(
+								jsonError(400, transportFailure.code, transportFailure.message, corsHeaders),
+								"invalid_transport_payload"
+							);
+						}
+						operationName = extractGraphQLOperationName(parsedBody);
+
+						const limits = requestTiming.measureSync("requestLimits", () =>
+							validateGraphQLRequestLimits(parsedBody, schema)
+						);
+						if (!limits.ok) {
+							return finalizePostPreAuthResponse(
+								jsonError(400, limits.code, limits.message, corsHeaders),
+								"request_limits_rejected"
+							);
+						}
+						rootFields = limits.rootFields;
+						const livePointsHotPath = isLivePointsHotPathOperation(rootFields);
+						const liveMatchesHotPath = isLiveMatchesHotPathOperation(rootFields);
+						const requiresLivePointsContract = requiresLivePointsV2Contract(rootFields);
+						const requiresLiveMatchesContract = requiresLiveMatchesV3Contract(rootFields);
+						if (requiresLivePointsContract && requiresLiveMatchesContract) {
+							const response = jsonError(
+								400,
+								"MIXED_LIVE_CONTRACTS",
+								"Live Points and Live Matches must use separate GraphQL operations",
+								corsHeaders
+							);
+							return finalizePostPreAuthResponse(response, "mixed_live_contracts_rejected");
+						}
+						if (requiresLivePointsContract && !hasLivePointsV2Contract(request.headers)) {
+							const response = jsonError(
+								426,
+								"CLIENT_UPGRADE_REQUIRED",
+								"Live Points requires the live-points-v2 client contract",
+								corsHeaders,
+								{ [LIVE_POINTS_CONTRACT_HEADER]: LIVE_POINTS_CONTRACT_VALUE }
+							);
+							return finalizePostPreAuthResponse(response, "live_points_contract_rejected");
+						}
+						if (requiresLiveMatchesContract && !hasLiveMatchesV3Contract(request.headers)) {
+							const response = jsonError(
+								426,
+								"CLIENT_UPGRADE_REQUIRED",
+								"Live Matches requires the live-matches-v3 client contract",
+								corsHeaders,
+								{ [LIVE_MATCHES_CONTRACT_HEADER]: LIVE_MATCHES_CONTRACT_VALUE }
+							);
+							return finalizePostPreAuthResponse(response, "live_matches_contract_rejected");
+						}
+						const contractFailure = validateMyTournamentReviewContract(rootFields, request.headers);
+						if (contractFailure) {
+							return finalizePostPreAuthResponse(
+								jsonError(
+									contractFailure.status,
+									contractFailure.code,
+									contractFailure.message,
+									corsHeaders
+								),
+								"client_contract_rejected"
+							);
+						}
+						admissionOrder.enter("principal");
+						const { principal, user } = await requestTiming.measure("principal", () =>
+							resolvePrincipalAndUser(request)
+						);
+						admissionOrder.enter("authentication");
+						if (!principal && hasAuthenticationMaterial(request.headers)) {
+							return finalizePostPreAuthResponse(
+								jsonError(
+									401,
+									"INVALID_AUTH_CONTEXT",
+									"Authentication context is invalid or expired",
+									corsHeaders
+								),
+								"authentication_rejected"
+							);
+						}
+
+						admissionOrder.enter("weighted");
+						const v3PrincipalAdmission = graphQLVersionedPrincipalAdmission({
+							ingress,
+							principal,
+							cost: limits.rateLimitCostUnits,
+						});
+						rateLimitAudience = v3PrincipalAdmission.audience;
+						const principalAdmissionResult = await requestTiming.measure("principalAdmission", () =>
+							runGraphQLRateLimitStage({
+								v3Checks: capacityAdmission ? [] : v3PrincipalAdmission.checks,
+								corsHeaders,
+								rateLimitWorkload: ingress.workload,
+							})
+						);
+						v3AdmissionEvaluated = true;
+						if (principalAdmissionResult.v3Decision) {
+							captureShadowRateLimitDecision(principalAdmissionResult.v3Decision);
+							logV3RateLimitDecision({
+								requestId,
+								operation: operationName,
+								rootFields,
+								ingress,
+								stage: "weighted",
+								audience: rateLimitAudience,
+								identitySubject: principal ? graphQLPrincipalSubject(principal) : ingress.subject,
+								decision: principalAdmissionResult.v3Decision,
+							});
+							await recordTerminalRequestV3Outcome(ingress, principalAdmissionResult.v3Decision);
+						}
+						if (principalAdmissionResult.response) {
+							return finalizeGraphQLResponse(
+								principalAdmissionResult.response,
+								"principal_admission_rejected"
+							);
+						}
+						admissionOrder.enter("authorization");
+						const contextResult = await buildGraphQLRuntimeContext({
+							currentSeasonProvider,
+							parsedBody,
+							principal,
+							user,
+							requestTiming,
+							requestId,
+							operationName,
+							limits,
+							readOnlyHotPath: livePointsHotPath || liveMatchesHotPath,
+						});
+						if (!contextResult.ok) {
+							fullCoreLoaded = contextResult.fullCoreLoaded;
+							const { failure } = contextResult;
+							if (failure.kind === "authorization") {
+								return finalizeGraphQLResponse(
+									graphQLErrorResponse(failure.authorization, corsHeaders, requestId),
+									failure.outcome
+								);
+							}
+							return finalizePostPreAuthResponse(
+								jsonError(failure.status, failure.code, failure.message, corsHeaders),
 								failure.outcome
 							);
 						}
-						return finalizePostPreAuthResponse(
-							jsonError(failure.status, failure.code, failure.message, corsHeaders),
-							failure.outcome
-						);
-					}
-					graphQLContext = contextResult.context;
-					fullCoreLoaded = contextResult.fullCoreLoaded;
-					const liveMatchRequestContext = graphQLContext;
-					const execution = await executeGraphQLRequest({
-						apollo,
-						request,
-						parsedBody,
-						context: liveMatchRequestContext,
-						requestTiming,
-						requestId,
-						corsHeaders,
-						responseFlightKey:
-							liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
-								? (liveMatchdayExecutionFlightKey(
-										parsedBody,
-										liveMatchRequestContext.currentSeason.seasonCode,
-										{
-											method: request.method,
-											accept: request.headers.get("accept") ?? "",
-											contentType: request.headers.get("content-type") ?? "",
-											apolloRequirePreflight: request.headers.get("apollo-require-preflight") ?? "",
-											apolloOperationName: request.headers.get("x-apollo-operation-name") ?? "",
-										}
-									) ?? undefined)
-								: undefined,
-						responseFlightObservation:
-							liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
-								? () =>
-										(
-											liveMatchRequestContext.requestScope as
-												| {
-														liveMatchExecutionObservation?: LiveMatchExecutionObservation;
-												  }
-												| undefined
-										)?.liveMatchExecutionObservation ?? null
-								: undefined,
-					});
-					// A resolver may fall back from a lightweight root to the full Core
-					// publication. Reflect the actual read path in the request log.
-					fullCoreLoaded =
-						fullCoreLoaded ||
-						graphQLContext.fullCoreLoaded === true ||
-						(graphQLContext.requestScope as { fullCoreLoaded?: boolean } | undefined)
-							?.fullCoreLoaded === true;
-					return finalizeGraphQLResponse(
-						execution.response,
-						execution.response.status >= 400 || execution.hasErrors ? "graphql_error" : "completed"
-					);
-				} catch (error) {
-					if (error instanceof PayloadTooLargeError) {
-						return finalizePostPreAuthResponse(
-							jsonError(413, error.code, error.message, corsHeaders),
-							"payload_too_large"
-						);
-					}
-					logger.error(
-						{
-							err: error,
+						graphQLContext = contextResult.context;
+						fullCoreLoaded = contextResult.fullCoreLoaded;
+						const liveMatchRequestContext = graphQLContext;
+						const execution = await executeGraphQLRequest({
+							apollo,
+							request,
+							parsedBody,
+							context: liveMatchRequestContext,
+							requestTiming,
 							requestId,
-							operationName,
-							durationMs: Number(requestTiming.elapsedMs().toFixed(2)),
-							timings: requestTiming.snapshot(),
-						},
-						"GraphQL request failed"
-					);
-					return finalizePostPreAuthResponse(
-						new Response(
-							JSON.stringify({
-								errors: [
-									{
-										message: "Internal server error",
-										extensions: { code: "INTERNAL_SERVER_ERROR", requestId },
-									},
-								],
-							}),
+							corsHeaders,
+							responseFlightKey:
+								liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
+									? (liveMatchdayExecutionFlightKey(
+											parsedBody,
+											liveMatchRequestContext.currentSeason.seasonCode,
+											{
+												method: request.method,
+												accept: request.headers.get("accept") ?? "",
+												contentType: request.headers.get("content-type") ?? "",
+												apolloRequirePreflight:
+													request.headers.get("apollo-require-preflight") ?? "",
+												apolloOperationName: request.headers.get("x-apollo-operation-name") ?? "",
+											}
+										) ?? undefined)
+									: undefined,
+							responseFlightObservation:
+								liveMatchesHotPath && rootFields.length === 1 && rootFields[0] === "liveMatchday"
+									? (executionContext) =>
+											(
+												executionContext.requestScope as
+													| {
+															liveMatchExecutionObservation?: LiveMatchExecutionObservation;
+													  }
+													| undefined
+											)?.liveMatchExecutionObservation ?? null
+									: undefined,
+						});
+						// A resolver may fall back from a lightweight root to the full Core
+						// publication. Reflect the actual read path in the request log.
+						fullCoreLoaded =
+							fullCoreLoaded ||
+							graphQLContext.fullCoreLoaded === true ||
+							(graphQLContext.requestScope as { fullCoreLoaded?: boolean } | undefined)
+								?.fullCoreLoaded === true;
+						return finalizeGraphQLResponse(
+							execution.response,
+							execution.response.status >= 400 || execution.hasErrors
+								? "graphql_error"
+								: "completed"
+						);
+					} catch (error) {
+						executionScope.remainingMs();
+						if (error instanceof ExecutionExpiredError) throw error;
+						if (error instanceof PayloadTooLargeError) {
+							return finalizePostPreAuthResponse(
+								jsonError(413, error.code, error.message, corsHeaders),
+								"payload_too_large"
+							);
+						}
+						logger.error(
 							{
-								status: 500,
-								headers: {
-									"Content-Type": "application/json",
-									...corsHeaders,
-								},
-							}
+								err: error,
+								requestId,
+								operationName,
+								durationMs: Number(requestTiming.elapsedMs().toFixed(2)),
+								timings: requestTiming.snapshot(),
+							},
+							"GraphQL request failed"
+						);
+						return finalizePostPreAuthResponse(
+							new Response(
+								JSON.stringify({
+									errors: [
+										{
+											message: "Internal server error",
+											extensions: { code: "INTERNAL_SERVER_ERROR", requestId },
+										},
+									],
+								}),
+								{
+									status: 500,
+									headers: {
+										"Content-Type": "application/json",
+										...corsHeaders,
+									},
+								}
+							),
+							"internal_error"
+						);
+					}
+				};
+				try {
+					return executionScope.finishResponse(await executionScope.wait(executionScope.run(run)));
+				} catch (error) {
+					executionScope.cancel();
+					await executionScope.settleCleanup();
+					executionScope.dispose();
+					return finalizeGraphQLResponse(
+						jsonError(
+							503,
+							"DEPENDENCY_UNAVAILABLE",
+							"Dependency execution is temporarily unavailable",
+							corsHeaders
 						),
-						"internal_error"
+						error instanceof ExecutionExpiredError ? "execution_expired" : "dependency_unavailable",
+						true
 					);
 				}
 			}

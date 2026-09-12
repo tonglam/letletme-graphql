@@ -2,6 +2,7 @@ import { GraphQLError } from "graphql";
 import type { GraphQLContext } from "../graphql/context";
 import type { QueryExecutor } from "./database";
 import { metrics } from "./metrics";
+import { ExecutionScope, ExecutionExpiredError } from "./execution-scope";
 
 export type CurrentSeason = Readonly<{
 	seasonId: number;
@@ -69,7 +70,8 @@ export const loadCurrentSeason = async (database: QueryExecutor): Promise<Curren
 			 LIMIT 2`
 		);
 		rows = result.rows;
-	} catch {
+	} catch (error) {
+		if (error instanceof ExecutionExpiredError) throw error;
 		throw unavailable("database_query_failed");
 	}
 
@@ -102,7 +104,11 @@ export const loadCurrentSeason = async (database: QueryExecutor): Promise<Curren
 export class CurrentSeasonProvider {
 	private value: CurrentSeason | null = null;
 	private refreshedAt = 0;
-	private refreshPromise: Promise<CurrentSeason> | null = null;
+	private refreshFlight: {
+		scope: ExecutionScope;
+		promise: Promise<CurrentSeason>;
+		waiters: number;
+	} | null = null;
 
 	private static sameIdentity(
 		left: Pick<CurrentSeason, "seasonId" | "seasonCode">,
@@ -140,20 +146,41 @@ export class CurrentSeasonProvider {
 				? pinnedIdentity
 				: this.value;
 		}
-		if (!this.refreshPromise) {
-			this.refreshPromise = loadCurrentSeason(database)
+		const caller = ExecutionScope.current();
+		caller?.remainingMs();
+		let flight = this.refreshFlight;
+		if (!flight || flight.scope.signal.aborted || Date.now() >= flight.scope.deadlineAt) {
+			const scope = new ExecutionScope();
+			const created = {
+				scope,
+				waiters: 0,
+				promise: undefined as unknown as Promise<CurrentSeason>,
+			};
+			created.promise = scope
+				.run(() => scope.wait(loadCurrentSeason(database)))
 				.then((value) => {
-					// Always advance the process-level provider to the authority's
-					// latest season. A caller with an older request pin is mapped back
-					// to that identity below, while future requests see this value.
+					scope.remainingMs();
 					this.seed(value);
 					return value;
 				})
 				.finally(() => {
-					this.refreshPromise = null;
+					if (this.refreshFlight === created) this.refreshFlight = null;
+					scope.dispose();
 				});
+			flight = created;
+			this.refreshFlight = created;
 		}
-		const refreshed = await this.refreshPromise;
+		flight.waiters++;
+		let refreshed: CurrentSeason;
+		try {
+			refreshed = await (caller ? caller.wait(flight.promise) : flight.promise);
+		} finally {
+			if (--flight.waiters === 0) {
+				flight.scope.cancel();
+				if (this.refreshFlight === flight) this.refreshFlight = null;
+			}
+		}
+
 		return pinnedIdentity && !CurrentSeasonProvider.sameIdentity(refreshed, pinnedIdentity)
 			? pinnedIdentity
 			: refreshed;
