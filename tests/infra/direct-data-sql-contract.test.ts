@@ -1535,6 +1535,7 @@ describe("direct Data SQL contract", () => {
 			ownership_state: "READY",
 			element_id: 1,
 			selected_count: 1,
+			captain_count: 1,
 		};
 		expect(validateTournamentSelectionIndexContractRows([row])).toBe(true);
 		expect(

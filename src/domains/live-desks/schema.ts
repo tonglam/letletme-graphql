@@ -214,6 +214,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		teamShortName: String!
 		position: Position!
 		count: Int!
+		captainCount: Int!
 		percentage: Float!
 	}
 

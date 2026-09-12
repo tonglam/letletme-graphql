@@ -249,6 +249,7 @@ export type DbTournamentSelectionStatRow = {
 export type TournamentSelectionIndexRow = {
 	playerId: number;
 	count: number;
+	captainCount: number;
 	percentage: number;
 };
 
@@ -261,6 +262,7 @@ type TournamentSelectionIndexReadRow = {
 	ownership_state: string;
 	element_id: number | string | null;
 	selected_count: number | string | null;
+	captain_count: number | string | null;
 };
 
 const parseSelectionIndexInteger = (value: unknown, minimum: number): number | null => {
@@ -282,9 +284,10 @@ export type TournamentSelectionIndexContractRow = Readonly<{
 	revision: number;
 	playerId: number;
 	count: number;
+	captainCount: number;
 }>;
 
-/** Decode only the fields consumed by the live player picker contract. */
+/** Decode only the fields consumed by the live player and captain picker contract. */
 export const parseTournamentSelectionIndexContractRow = (
 	value: unknown
 ): TournamentSelectionIndexContractRow | null => {
@@ -296,6 +299,7 @@ export const parseTournamentSelectionIndexContractRow = (
 	const revision = parseSelectionIndexInteger(row.revision, 1);
 	const playerId = parseSelectionIndexInteger(row.element_id, 1);
 	const count = parseSelectionIndexInteger(row.selected_count, 0);
+	const captainCount = parseSelectionIndexInteger(row.captain_count, 0);
 	if (
 		publicationId === null ||
 		expectedEntries === null ||
@@ -306,7 +310,9 @@ export const parseTournamentSelectionIndexContractRow = (
 		row.ownership_state !== "READY" ||
 		playerId === null ||
 		count === null ||
-		count > expectedEntries
+		count > expectedEntries ||
+		captainCount === null ||
+		captainCount > count
 	) {
 		return null;
 	}
@@ -317,6 +323,7 @@ export const parseTournamentSelectionIndexContractRow = (
 		revision,
 		playerId,
 		count,
+		captainCount,
 	};
 };
 
@@ -335,7 +342,8 @@ export const TOURNAMENT_SELECTION_INDEX_SQL = `
 		publication.publication_state,
 		publication.ownership_state,
 		rows.element_id,
-		rows.selected_count
+		rows.selected_count,
+		rows.captain_count
 	FROM reporting.tournament_selection_stat_publications publication
 	LEFT JOIN reporting.tournament_selection_stat_rows rows
 		ON rows.publication_id = publication.publication_id
@@ -394,6 +402,11 @@ export const TOURNAMENT_SELECTION_INDEX_DATA_SQL_CONTRACT: readonly DataSqlContr
 			{
 				relation: "reporting.tournament_selection_stat_rows",
 				column: "selected_count",
+				pgType: "integer",
+			},
+			{
+				relation: "reporting.tournament_selection_stat_rows",
+				column: "captain_count",
 				pgType: "integer",
 			},
 		],
@@ -619,6 +632,7 @@ export async function getTournamentSelectionIndexRows(
 		projected.push({
 			playerId,
 			count: parsed.count,
+			captainCount: parsed.captainCount,
 			percentage: Number(((parsed.count * 100) / publication.expectedEntries).toFixed(4)),
 		});
 	}

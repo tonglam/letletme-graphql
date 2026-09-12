@@ -282,16 +282,16 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 	it("projects the live selection index from the immutable reporting publication", async () => {
 		const context = createContext({ selectionRows: SELECTION_INDEX_ROWS });
 		await expect(getTournamentSelectionIndexRows(context, 1, 10)).resolves.toEqual([
-			{ playerId: 1, count: 8, percentage: 80 },
-			{ playerId: 2, count: 7, percentage: 70 },
-			{ playerId: 3, count: 6, percentage: 60 },
-			{ playerId: 4, count: 5, percentage: 50 },
+			{ playerId: 1, count: 8, captainCount: 0, percentage: 80 },
+			{ playerId: 2, count: 7, captainCount: 1, percentage: 70 },
+			{ playerId: 3, count: 6, captainCount: 6, percentage: 60 },
+			{ playerId: 4, count: 5, captainCount: 3, percentage: 50 },
 		]);
 		expect(context.__readModels).toEqual([]);
 		expect(context.__directDatabaseReads()).toBe(1);
 	});
 
-	it("ignores readiness of picker capabilities it does not consume", async () => {
+	it("projects captain counts without requiring unrelated picker readiness", async () => {
 		const context = createContext({
 			selectionRows: [
 				{
@@ -304,7 +304,7 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 		});
 
 		expect(await getTournamentSelectionIndexRows(context, 1, 10)).toEqual([
-			{ playerId: 1, count: 8, percentage: 80 },
+			{ playerId: 1, count: 8, captainCount: 0, percentage: 80 },
 		]);
 	});
 
@@ -338,6 +338,15 @@ describe("eventStatsRepository tournament selection materialized view", () => {
 			getTournamentSelectionIndexRows(
 				createContext({
 					selectionRows: [{ ...SELECTION_INDEX_ROWS[0]!, selected_count: "not-a-count" }],
+				}),
+				1,
+				10
+			)
+		).rejects.toThrow("Malformed tournament selection index");
+		await expect(
+			getTournamentSelectionIndexRows(
+				createContext({
+					selectionRows: [{ ...SELECTION_INDEX_ROWS[0]!, captain_count: "not-a-count" }],
 				}),
 				1,
 				10
