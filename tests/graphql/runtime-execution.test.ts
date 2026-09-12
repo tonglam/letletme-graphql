@@ -317,6 +317,52 @@ describe("live flight cancellation ownership", () => {
 		c.dispose();
 		d.dispose();
 	});
+
+	it("retries under a later caller budget after the owner flight expires", async () => {
+		let calls = 0;
+		const apollo = {
+			executeHTTPGraphQLRequest: async () => {
+				calls++;
+				if (calls === 1) await Bun.sleep(40);
+				return {
+					status: 200,
+					headers: responseHeaders(),
+					body: { kind: "complete", string: '{"data":{}}' },
+				};
+			},
+		} as unknown as ApolloServer<GraphQLContext>;
+		const run = (scope: ExecutionScope) =>
+			scope.run(() =>
+				executeGraphQLRequest({
+					apollo,
+					request: request(),
+					parsedBody: {},
+					context: { executionScope: scope } as GraphQLContext,
+					requestTiming: new RequestTiming(),
+					requestId: "budget-test",
+					corsHeaders: {},
+					responseFlightKey: "later-budget-flight",
+					responseFlightObservation: () => ({
+						view: "FULL",
+						state: "FRESH",
+						servedFrom: "REDIS_CURRENT",
+						shareUntilMs: null,
+					}),
+				})
+			);
+		const early = new ExecutionScope(Date.now() + 20);
+		const late = new ExecutionScope(Date.now() + 250);
+		const first = run(early);
+		await Bun.sleep(2);
+		const second = run(late);
+		const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+		expect(firstResult.status).toBe("rejected");
+		expect(secondResult.status).toBe("fulfilled");
+		if (secondResult.status === "fulfilled") expect(secondResult.value.response.status).toBe(200);
+		expect(calls).toBe(2);
+		early.dispose();
+		late.dispose();
+	});
 });
 
 it("keeps a non-shared streaming owner alive when another waiter falls back", async () => {

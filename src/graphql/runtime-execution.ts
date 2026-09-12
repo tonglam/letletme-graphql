@@ -242,7 +242,6 @@ const executeLiveMatchdayFlight = async (
 			return restoreCompleteResponse(shared);
 		}
 		if (!ownsFlight) {
-			flight.scope.remainingMs();
 			caller?.remainingMs();
 			return execute(context);
 		}
