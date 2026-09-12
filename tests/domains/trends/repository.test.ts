@@ -47,7 +47,7 @@ describe("Trends revisioned cache", () => {
 			.update("7:2026:10|7:abc", "utf8")
 			.digest("hex")
 			.slice(0, 24)}`;
-		expect(keys.some((key) => key.includes(":trends-v4:"))).toBe(true);
+		expect(keys.some((key) => key.includes(":trends-v5:"))).toBe(true);
 		expect(keys.some((key) => key.includes(`:${revisionKey}:`))).toBe(true);
 	});
 
@@ -68,7 +68,7 @@ describe("Trends revisioned cache", () => {
 		]);
 		await trendsRepository.listCohorts(context, "PUBLIC");
 		const payloadKey = [...values.keys()].find(
-			(key) => key.includes(":trends-v4:") && !key.includes(":pointer:")
+			(key) => key.includes(":trends-v5:") && !key.includes(":pointer:")
 		);
 		expect(payloadKey).toBeDefined();
 		values.set(payloadKey!, JSON.stringify({ invalid: true }));
@@ -186,6 +186,12 @@ describe("Trends private access", () => {
 		expect(calls[1]?.sql.match(/UNION ALL/g)).toHaveLength(6);
 		expect(calls[1]?.sql.match(/LIMIT \$2/g)).toHaveLength(5);
 		expect(calls[1]?.sql).toContain("LIMIT 1000");
+		expect(calls[1]?.sql).toContain(
+			"ORDER BY stat_row.captain_count DESC NULLS LAST, stat_row.element_id"
+		);
+		expect(calls[1]?.sql).toContain(
+			"ORDER BY stat_row.vice_captain_count DESC NULLS LAST, stat_row.element_id"
+		);
 		expect(calls[1]?.sql.trim()).toEndWith(
 			"ORDER BY capability, count DESC NULLS LAST, pick_position ASC NULLS LAST, element_id"
 		);
