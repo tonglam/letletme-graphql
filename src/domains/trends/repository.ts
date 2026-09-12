@@ -72,9 +72,9 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
         SELECT 'CAPTAINCY'::text AS capability, element_id, player_name, player_position, team_short_name,
           captain_count AS count, NULL::integer AS pick_position,
           NULL::integer AS captain_count, NULL::integer AS vice_captain_count
-        FROM reporting.tournament_selection_stat_rows
-        WHERE publication_id = $1
-        ORDER BY captain_count DESC NULLS LAST, element_id
+        FROM reporting.tournament_selection_stat_rows AS stat_row
+        WHERE stat_row.publication_id = $1
+        ORDER BY stat_row.captain_count DESC NULLS LAST, stat_row.element_id
         LIMIT $2
       ) captaincy
       UNION ALL
@@ -82,9 +82,9 @@ export const TRENDS_AGGREGATE_UNION_SQL = `
         SELECT 'VICE_CAPTAINCY'::text AS capability, element_id, player_name, player_position, team_short_name,
           vice_captain_count AS count, NULL::integer AS pick_position,
           NULL::integer AS captain_count, NULL::integer AS vice_captain_count
-        FROM reporting.tournament_selection_stat_rows
-        WHERE publication_id = $1
-        ORDER BY vice_captain_count DESC NULLS LAST, element_id
+        FROM reporting.tournament_selection_stat_rows AS stat_row
+        WHERE stat_row.publication_id = $1
+        ORDER BY stat_row.vice_captain_count DESC NULLS LAST, stat_row.element_id
         LIMIT $2
       ) vice_captaincy
       UNION ALL
@@ -313,7 +313,7 @@ const FPL_SQUAD_SIZE = 15;
 // Trends snapshots are revisioned by their own publication pointer. They are
 // deliberately kept out of the core Data snapshot path, so use an explicit
 // cache-key revision rather than forcing a full core snapshot read.
-const TRENDS_CACHE_SCHEMA_VERSION = "trends-v4";
+const TRENDS_CACHE_SCHEMA_VERSION = "trends-v5";
 
 const trendsRevisionKey = (revision: string): string =>
 	`trends-${createHash("sha256").update(revision, "utf8").digest("hex").slice(0, 24)}`;
