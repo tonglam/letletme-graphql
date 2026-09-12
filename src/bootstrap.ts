@@ -10,7 +10,7 @@ import {
 import { validateGraphQLRequestLimits } from "./graphql/limits";
 import { schema } from "./graphql/schema";
 import { validateDatabaseContract } from "./infra/database-contract";
-import { database } from "./infra/database";
+import { database, createDatabaseExecutor } from "./infra/database";
 import { closeDbPool, dbPool } from "./infra/db-pool";
 import { env } from "./infra/env";
 import { logger } from "./infra/logger";
@@ -195,6 +195,7 @@ export const startServer = async (): Promise<void> => {
 
 			if (url.pathname === "/graphql") {
 				const executionScope = new ExecutionScope(undefined, request.signal);
+				const requestDatabase = createDatabaseExecutor(executionScope);
 				const requestTiming = new RequestTiming();
 				const admissionOrder = new GraphQLAdmissionOrder();
 				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
@@ -484,7 +485,7 @@ export const startServer = async (): Promise<void> => {
 						}
 						admissionOrder.enter("principal");
 						const { principal, user } = await requestTiming.measure("principal", () =>
-							resolvePrincipalAndUser(request)
+							resolvePrincipalAndUser(request, requestDatabase)
 						);
 						admissionOrder.enter("authentication");
 						if (!principal && hasAuthenticationMaterial(request.headers)) {
@@ -545,6 +546,7 @@ export const startServer = async (): Promise<void> => {
 							operationName,
 							limits,
 							readOnlyHotPath: livePointsHotPath || liveMatchesHotPath,
+							databaseExecutor: requestDatabase,
 						});
 						if (!contextResult.ok) {
 							fullCoreLoaded = contextResult.fullCoreLoaded;

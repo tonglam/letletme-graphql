@@ -21,8 +21,8 @@ export interface QueryExecutor {
 
 /**
  * Infer whether this particular checkout had to wait from the synchronous
- * queue transition at the call boundary. `pg-pool` appends exactly one
- * pending item synchronously when a checkout cannot be handed off
+ * queue transition at the call boundary. The bounded GraphQL pool appends
+ * exactly one pending item synchronously when a checkout cannot be handed off
  * immediately; observing the delta on this call avoids losing a short wait
  * when another client is released before a later pool-wide sample. An idle
  * handoff with a spare pool slot is deliberately not counted as contention.

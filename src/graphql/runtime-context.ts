@@ -1,5 +1,5 @@
 import { coreDatasetRevision, getCoreDataSnapshot } from "../infra/data-snapshot";
-import { database, createDatabaseExecutor } from "../infra/database";
+import { database, createDatabaseExecutor, type QueryExecutor } from "../infra/database";
 import { ExecutionScope, ExecutionExpiredError } from "../infra/execution-scope";
 import { logger } from "../infra/logger";
 import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "../infra/principal";
@@ -42,12 +42,13 @@ export type RuntimeContextResult =
 	| Readonly<{ ok: false; failure: RuntimeContextFailure; fullCoreLoaded: boolean }>;
 
 export const resolvePrincipalAndUser = async (
-	request: Request
+	request: Request,
+	requestDatabase?: QueryExecutor
 ): Promise<{
 	principal: Principal | null;
 	user: ReturnType<typeof principalToAuthUser> | null;
 }> => {
-	const principal = await getPrincipalFromHeaders(request.headers);
+	const principal = await getPrincipalFromHeaders(request.headers, undefined, requestDatabase);
 	return { principal, user: principal ? principalToAuthUser(principal) : null };
 };
 
@@ -61,6 +62,7 @@ export const buildGraphQLRuntimeContext = async ({
 	operationName,
 	limits,
 	readOnlyHotPath = false,
+	databaseExecutor,
 }: {
 	currentSeasonProvider: CurrentSeasonProvider;
 	parsedBody: unknown;
@@ -71,7 +73,12 @@ export const buildGraphQLRuntimeContext = async ({
 	operationName: string;
 	limits: AcceptedGraphQLLimits;
 	readOnlyHotPath?: boolean;
+	databaseExecutor?: QueryExecutor;
 }): Promise<RuntimeContextResult> => {
+	const executionScope = ExecutionScope.current();
+	executionScope?.remainingMs();
+	const requestDatabase =
+		databaseExecutor ?? (executionScope ? createDatabaseExecutor(executionScope) : database);
 	let currentSeason: GraphQLContext["currentSeason"];
 	try {
 		currentSeason = await requestTiming.measure("season", () =>
@@ -121,9 +128,6 @@ export const buildGraphQLRuntimeContext = async ({
 		}
 	}
 
-	const executionScope = ExecutionScope.current();
-	executionScope?.remainingMs();
-	const requestDatabase = executionScope ? createDatabaseExecutor(executionScope) : database;
 	const data = new ReadModelClient(requestDatabase, currentSeason);
 	const requestScope = {};
 	const authorizedTournamentMemberships = new Set<number>();
@@ -152,7 +156,8 @@ export const buildGraphQLRuntimeContext = async ({
 		database: requestDatabase,
 		executionScope,
 		currentSeason,
-		refreshCurrentSeason: () => currentSeasonProvider.refresh(database, 5_000, currentSeason),
+		refreshCurrentSeason: () =>
+			currentSeasonProvider.refresh(database, 5_000, currentSeason),
 		redis: getRedis(),
 		logger,
 		requestId,
