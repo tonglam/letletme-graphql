@@ -134,7 +134,14 @@ export const createDatabaseExecutor = (
 			reusable = true;
 			return result as QueryResult<Row>;
 		} catch (error) {
-			if (inTransaction && !scope.signal.aborted && !released) {
+			const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+			const connectionFailure =
+				typeof code === "string" &&
+				(code.startsWith("08") ||
+					["57P01", "57P02", "57P03", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ENOTFOUND"].includes(
+						code
+					));
+			if (inTransaction && !scope.signal.aborted && !released && !connectionFailure) {
 				try {
 					await execute("ROLLBACK");
 					reusable = true;

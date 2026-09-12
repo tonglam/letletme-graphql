@@ -71,6 +71,25 @@ describe("PostgreSQL health probe", () => {
 });
 
 describe("bounded read-only SQL execution", () => {
+	it("does not issue rollback over a known failed connection", async () => {
+		const calls: string[] = [];
+		const releases: boolean[] = [];
+		const client: DatabaseHealthClient = {
+			query: async (text) => {
+				calls.push(text);
+				if (text === "SELECT 1")
+					throw Object.assign(new Error("connection failed"), { code: "57P01" });
+			},
+			release: (destroy) => {
+				releases.push(Boolean(destroy));
+			},
+		};
+		await expect(
+			createDatabaseExecutor(undefined, async () => client).query("SELECT 1")
+		).rejects.toThrow("connection failed");
+		expect(calls).not.toContain("ROLLBACK");
+		expect(releases).toEqual([true]);
+	});
 	it("does not start SQL on a checkout arriving after cancellation", async () => {
 		let arrive!: (client: DatabaseHealthClient) => void;
 		const checkout = new Promise<DatabaseHealthClient>((resolve) => {
