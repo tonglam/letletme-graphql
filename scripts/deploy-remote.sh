@@ -328,6 +328,10 @@ compose_exec graphql bun -e '
   }));
 '
 
+# Prove transaction-local timeout and active cancellation on this exact candidate.
+# A failure leaves the old slot serving traffic. All probe SQL is read-only and <=1s.
+docker exec "$candidate_container" bun scripts/check-database-execution.ts --bounded-probe
+
 # Validate the immutable public acceptance destinations before switching slots
 # or forwarding the service token. These exact routes are owned by the VPS Ops
 # Nginx contract; a pair of attacker-controlled URLs must not be able to approve

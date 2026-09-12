@@ -65,8 +65,10 @@ bun run contract:check
 bun run dev
 ```
 
-`DATABASE_POOL_MAX` defaults to `2` and accepts only `1` through `2`. Production must use `1` or `2`
-so the full-stack connection ceiling remains within the V2 release budget.
+`DATABASE_POOL_MAX` defaults to `4` and accepts `1` through `4`; `.env.example`
+explicitly uses `2`. Check the deployed environment for the actual production value.
+GraphQL uses a shared 12-second request budget, transaction-local SQL timeouts and
+active query cancellation. See [database execution](documentation/DATABASE_PRIVILEGE_SECURITY.md#query-execution-and-transaction-pooling).
 
 The service exposes:
 

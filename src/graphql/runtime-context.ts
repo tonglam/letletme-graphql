@@ -1,5 +1,6 @@
 import { coreDatasetRevision, getCoreDataSnapshot } from "../infra/data-snapshot";
-import { database } from "../infra/database";
+import { database, createDatabaseExecutor, type QueryExecutor } from "../infra/database";
+import { ExecutionScope, ExecutionExpiredError } from "../infra/execution-scope";
 import { logger } from "../infra/logger";
 import { getPrincipalFromHeaders, principalToAuthUser, type Principal } from "../infra/principal";
 import { ReadModelClient } from "../infra/read-model-client";
@@ -41,12 +42,13 @@ export type RuntimeContextResult =
 	| Readonly<{ ok: false; failure: RuntimeContextFailure; fullCoreLoaded: boolean }>;
 
 export const resolvePrincipalAndUser = async (
-	request: Request
+	request: Request,
+	requestDatabase?: QueryExecutor
 ): Promise<{
 	principal: Principal | null;
 	user: ReturnType<typeof principalToAuthUser> | null;
 }> => {
-	const principal = await getPrincipalFromHeaders(request.headers);
+	const principal = await getPrincipalFromHeaders(request.headers, undefined, requestDatabase);
 	return { principal, user: principal ? principalToAuthUser(principal) : null };
 };
 
@@ -60,6 +62,7 @@ export const buildGraphQLRuntimeContext = async ({
 	operationName,
 	limits,
 	readOnlyHotPath = false,
+	databaseExecutor,
 }: {
 	currentSeasonProvider: CurrentSeasonProvider;
 	parsedBody: unknown;
@@ -70,7 +73,12 @@ export const buildGraphQLRuntimeContext = async ({
 	operationName: string;
 	limits: AcceptedGraphQLLimits;
 	readOnlyHotPath?: boolean;
+	databaseExecutor?: QueryExecutor;
 }): Promise<RuntimeContextResult> => {
+	const executionScope = ExecutionScope.current();
+	executionScope?.remainingMs();
+	const requestDatabase =
+		databaseExecutor ?? (executionScope ? createDatabaseExecutor(executionScope) : database);
 	let currentSeason: GraphQLContext["currentSeason"];
 	try {
 		currentSeason = await requestTiming.measure("season", () =>
@@ -79,6 +87,7 @@ export const buildGraphQLRuntimeContext = async ({
 				: currentSeasonProvider.refresh(database, 5_000)
 		);
 	} catch (error) {
+		if (error instanceof ExecutionExpiredError) throw error;
 		if (readOnlyHotPath) {
 			try {
 				// The season identity was pinned at startup. During a PostgreSQL
@@ -119,7 +128,7 @@ export const buildGraphQLRuntimeContext = async ({
 		}
 	}
 
-	const data = new ReadModelClient(database, currentSeason);
+	const data = new ReadModelClient(requestDatabase, currentSeason);
 	const requestScope = {};
 	const authorizedTournamentMemberships = new Set<number>();
 	const authorization = await requestTiming.measure("authorization", () =>
@@ -144,7 +153,8 @@ export const buildGraphQLRuntimeContext = async ({
 
 	const context: GraphQLContext = {
 		data,
-		database,
+		database: requestDatabase,
+		executionScope,
 		currentSeason,
 		refreshCurrentSeason: () => currentSeasonProvider.refresh(database, 5_000, currentSeason),
 		redis: getRedis(),
@@ -185,6 +195,7 @@ export const buildGraphQLRuntimeContext = async ({
 			coreDatasetRevision(await getCoreDataSnapshot(context))
 		);
 	} catch (error) {
+		if (error instanceof ExecutionExpiredError) throw error;
 		logger.error({ err: error, requestId }, "Data publication authority is unavailable");
 		return {
 			ok: false,

@@ -230,6 +230,12 @@ export const postgresPoolWaitEvents = new Counter({
 	help: "PostgreSQL pool checkout requests that waited for a client",
 });
 
+export const postgresPoolErrors = new Counter({
+	name: "postgres_pool_errors_total",
+	help: "Background PostgreSQL pool errors after an idle client is removed",
+	labelNames: ["category"] as const,
+});
+
 registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
@@ -258,6 +264,7 @@ registry.registerMetric(liveMatchExecutionCoalescedTotal);
 registry.registerMetric(rateLimitTelemetryOverflows);
 registry.registerMetric(postgresPoolClients);
 registry.registerMetric(postgresPoolWaitEvents);
+registry.registerMetric(postgresPoolErrors);
 
 export const registerDatabasePoolMetrics = (provider: () => DatabasePoolMetrics): void => {
 	readDatabasePoolMetrics = provider;

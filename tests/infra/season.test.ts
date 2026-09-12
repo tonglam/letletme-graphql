@@ -1,3 +1,4 @@
+import { ExecutionScope } from "../../src/infra/execution-scope";
 import { describe, expect, it } from "bun:test";
 import { GraphQLError } from "graphql";
 import type { QueryResultRow } from "pg";
@@ -115,5 +116,49 @@ describe("PostgreSQL current-season authority", () => {
 			currentSeason: { seasonId: 2026, seasonCode: "2627" },
 		} as never;
 		await expect(getCurrentSeason(context)).resolves.toBe("2627");
+	});
+});
+
+describe("shared current season cancellation", () => {
+	it("keeps refreshing for another caller and cancels only when all callers leave", async () => {
+		const provider = new CurrentSeasonProvider();
+		let finish!: () => void;
+		let shared: ExecutionScope | undefined;
+		let calls = 0;
+		const db: QueryExecutor = {
+			query: async () => {
+				calls++;
+				shared = ExecutionScope.current();
+				await new Promise<void>((resolve) => {
+					finish = resolve;
+				});
+				return { rows: [{ season_id: 2026, season_code: "2627" }], rowCount: 1 } as never;
+			},
+		};
+		const first = new ExecutionScope();
+		const second = new ExecutionScope();
+		const a = first.run(() => provider.refresh(db, 0));
+		const b = second.run(() => provider.refresh(db, 0));
+		first.cancel();
+		await expect(a).rejects.toThrow("no longer available");
+		expect(shared?.signal.aborted).toBe(false);
+		finish();
+		await expect(b).resolves.toMatchObject({ seasonCode: "2627" });
+		expect(calls).toBe(1);
+		first.dispose();
+		second.dispose();
+		const third = new ExecutionScope();
+		const fourth = new ExecutionScope();
+		const c = third.run(() => provider.refresh(db, 0));
+		const d = fourth.run(() => provider.refresh(db, 0));
+		const doneC = c.catch((error: unknown) => error);
+		const doneD = d.catch((error: unknown) => error);
+		third.cancel();
+		fourth.cancel();
+		await Promise.all([doneC, doneD]);
+		expect(shared?.signal.aborted).toBe(true);
+		finish();
+		third.dispose();
+		fourth.dispose();
 	});
 });

@@ -1,3 +1,4 @@
+import type { ExecutionScope } from "../infra/execution-scope";
 import type Redis from "ioredis";
 import type { AuthUser } from "../infra/principal";
 import type { Logger } from "../infra/logger";
@@ -17,6 +18,7 @@ export type LiveMatchExecutionObservation = Readonly<{
 }>;
 
 export type GraphQLContext = {
+	executionScope?: ExecutionScope;
 	data: ReadModelClient;
 	database: QueryExecutor;
 	currentSeason: CurrentSeason;

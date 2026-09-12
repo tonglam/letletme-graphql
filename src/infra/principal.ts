@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "crypto";
-import { database } from "./database";
+import { database, type QueryExecutor } from "./database";
 import { env } from "./env";
 import { hasExactFields } from "./exact-fields";
 import { verifyIngressContext } from "./ingress-context";
@@ -49,7 +49,10 @@ type MiniProgramSessionRow = {
 };
 
 type PrincipalValidators = {
-	validateMiniProgramSessionToken: (token: string) => Promise<Principal | null>;
+	validateMiniProgramSessionToken: (
+		token: string,
+		requestDatabase?: QueryExecutor
+	) => Promise<Principal | null>;
 };
 
 export const hashMiniProgramSessionToken = (token: string): string =>
@@ -163,9 +166,12 @@ const getBearerToken = (headers: Headers): string | null => {
 	return match?.[1]?.trim() || null;
 };
 
-export const validateMiniProgramSessionToken = async (token: string): Promise<Principal | null> => {
+export const validateMiniProgramSessionToken = async (
+	token: string,
+	requestDatabase: QueryExecutor = database
+): Promise<Principal | null> => {
 	const tokenHash = hashMiniProgramSessionToken(token);
-	const result = await database.query<MiniProgramSessionRow>(
+	const result = await requestDatabase.query<MiniProgramSessionRow>(
 		`SELECT COALESCE(account.id, s.user_id) AS user_id,
 		        CASE
 		          WHEN account.id IS NOT NULL AND linked_user.fpl_entry_verified_at IS NOT NULL
@@ -209,9 +215,8 @@ export const validateMiniProgramSessionToken = async (token: string): Promise<Pr
 
 export const getPrincipalFromHeaders = async (
 	headers: Headers,
-	validators: PrincipalValidators = {
-		validateMiniProgramSessionToken,
-	}
+	validators: PrincipalValidators = { validateMiniProgramSessionToken },
+	requestDatabase?: QueryExecutor
 ): Promise<Principal | null> => {
 	if (!verifyIngressContext(headers)) return null;
 	const token = getBearerToken(headers);
@@ -223,7 +228,7 @@ export const getPrincipalFromHeaders = async (
 	}
 	if (!token) return null;
 
-	return validators.validateMiniProgramSessionToken(token);
+	return validators.validateMiniProgramSessionToken(token, requestDatabase);
 };
 
 export const principalToAuthUser = (principal: Principal): AuthUser => ({

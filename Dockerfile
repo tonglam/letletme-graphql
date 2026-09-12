@@ -32,6 +32,7 @@ RUN set -eux; \
 
 FROM base AS deps
 COPY bun.lock package.json ./
+COPY patches ./patches
 RUN bun install --frozen-lockfile --production
 
 FROM base AS runner
@@ -48,6 +49,7 @@ COPY --from=deps --chown=bun:bun /app/package.json ./
 COPY --from=deps --chown=bun:bun /app/bun.lock ./
 COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun src ./src
+COPY --chown=bun:bun scripts/check-database-execution.ts ./scripts/check-database-execution.ts
 COPY --chown=bun:bun scripts/check-database-contract.ts ./scripts/check-database-contract.ts
 COPY --chown=bun:bun scripts/check-redis-connectivity.ts ./scripts/check-redis-connectivity.ts
 COPY --chown=bun:bun scripts/lib ./scripts/lib

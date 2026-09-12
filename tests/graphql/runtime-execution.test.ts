@@ -1,3 +1,4 @@
+import { ExecutionScope } from "../../src/infra/execution-scope";
 import { describe, expect, it } from "bun:test";
 import { HeaderMap } from "@apollo/server";
 import type { ApolloServer } from "@apollo/server";
@@ -246,4 +247,176 @@ describe("liveMatchday GraphQL execution coalescing", () => {
 		}
 		expect(calls).toBe(2);
 	});
+});
+
+describe("live flight cancellation ownership", () => {
+	it("detaches one waiter, preserves the task deadline, and cancels when the last waiter leaves", async () => {
+		let finish!: () => void;
+		let task: ExecutionScope | undefined;
+		let calls = 0;
+		const apollo = {
+			executeHTTPGraphQLRequest: async (options: { context: () => Promise<GraphQLContext> }) => {
+				calls++;
+				task = (await options.context()).executionScope;
+				await new Promise<void>((resolve) => {
+					finish = resolve;
+				});
+				return {
+					status: 200,
+					headers: responseHeaders(),
+					body: { kind: "complete", string: '{"data":{}}' },
+				};
+			},
+		} as unknown as ApolloServer<GraphQLContext>;
+		const run = (scope: ExecutionScope, key: string) =>
+			scope.run(() =>
+				executeGraphQLRequest({
+					apollo,
+					request: request(),
+					parsedBody: {},
+					context: { executionScope: scope } as GraphQLContext,
+					requestTiming: new RequestTiming(),
+					requestId: "scope-test",
+					corsHeaders: {},
+					responseFlightKey: key,
+					responseFlightObservation: () => ({
+						view: "FULL",
+						state: "FRESH",
+						servedFrom: "REDIS_CURRENT",
+						shareUntilMs: null,
+					}),
+				})
+			);
+		const a = new ExecutionScope(Date.now() + 500);
+		const b = new ExecutionScope(Date.now() + 1000);
+		const first = run(a, "cancel-one");
+		const second = run(b, "cancel-one");
+		await Bun.sleep(1);
+		const deadline = task?.deadlineAt;
+		a.cancel();
+		await expect(first).rejects.toThrow();
+		expect(task?.signal.aborted).toBe(false);
+		expect(task?.deadlineAt).toBe(deadline);
+		finish();
+		expect((await second).response.status).toBe(200);
+		expect(calls).toBe(1);
+		a.dispose();
+		b.dispose();
+		const c = new ExecutionScope();
+		const d = new ExecutionScope();
+		const third = run(c, "cancel-all");
+		const fourth = run(d, "cancel-all");
+		await Bun.sleep(1);
+		const endC = third.catch((error: unknown) => error);
+		const endD = fourth.catch((error: unknown) => error);
+		c.cancel();
+		d.cancel();
+		await Promise.all([endC, endD]);
+		expect(task?.signal.aborted).toBe(true);
+		finish();
+		c.dispose();
+		d.dispose();
+	});
+
+	it("retries under a later caller budget after the owner flight expires", async () => {
+		let calls = 0;
+		const apollo = {
+			executeHTTPGraphQLRequest: async () => {
+				calls++;
+				if (calls === 1) await Bun.sleep(40);
+				return {
+					status: 200,
+					headers: responseHeaders(),
+					body: { kind: "complete", string: '{"data":{}}' },
+				};
+			},
+		} as unknown as ApolloServer<GraphQLContext>;
+		const run = (scope: ExecutionScope) =>
+			scope.run(() =>
+				executeGraphQLRequest({
+					apollo,
+					request: request(),
+					parsedBody: {},
+					context: { executionScope: scope } as GraphQLContext,
+					requestTiming: new RequestTiming(),
+					requestId: "budget-test",
+					corsHeaders: {},
+					responseFlightKey: "later-budget-flight",
+					responseFlightObservation: () => ({
+						view: "FULL",
+						state: "FRESH",
+						servedFrom: "REDIS_CURRENT",
+						shareUntilMs: null,
+					}),
+				})
+			);
+		const early = new ExecutionScope(Date.now() + 20);
+		const late = new ExecutionScope(Date.now() + 250);
+		const first = run(early);
+		await Bun.sleep(2);
+		const second = run(late);
+		const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+		expect(firstResult.status).toBe("rejected");
+		expect(secondResult.status).toBe("fulfilled");
+		if (secondResult.status === "fulfilled") expect(secondResult.value.response.status).toBe(200);
+		expect(calls).toBe(2);
+		early.dispose();
+		late.dispose();
+	});
+});
+
+it("keeps a non-shared streaming owner alive when another waiter falls back", async () => {
+	let finish!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	let task: ExecutionScope | undefined;
+	let calls = 0;
+	const apollo = {
+		executeHTTPGraphQLRequest: async (options: { context: () => Promise<GraphQLContext> }) => {
+			const ctx = await options.context();
+			if (++calls > 1)
+				return {
+					status: 200,
+					headers: responseHeaders(),
+					body: { kind: "complete", string: '{"data":{}}' },
+				};
+			task = ctx.executionScope;
+			return {
+				status: 200,
+				headers: responseHeaders(),
+				body: {
+					kind: "chunked",
+					asyncIterator: (async function* () {
+						await gate;
+						yield '---\r\nContent-Type: application/json\r\n\r\n{"data":{}}\r\n-----\r\n';
+					})(),
+				},
+			};
+		},
+	} as unknown as ApolloServer<GraphQLContext>;
+	const a = new ExecutionScope();
+	const b = new ExecutionScope();
+	const run = (scope: ExecutionScope) =>
+		executeGraphQLRequest({
+			apollo,
+			request: request(),
+			parsedBody: {},
+			context: { executionScope: scope } as GraphQLContext,
+			requestTiming: new RequestTiming(),
+			requestId: "stream",
+			corsHeaders: {},
+			responseFlightKey: "stream-owner",
+			responseFlightObservation: () => null,
+		});
+	const first = run(a);
+	const second = run(b);
+	const [owner, waiter] = await Promise.all([first, second]);
+	expect(waiter.response.status).toBe(200);
+	expect(task?.signal.aborted).toBe(false);
+	finish();
+	await owner.response.text();
+	expect(task?.signal.aborted).toBe(true);
+	a.dispose();
+	b.dispose();
 });
