@@ -156,8 +156,7 @@ export const buildGraphQLRuntimeContext = async ({
 		database: requestDatabase,
 		executionScope,
 		currentSeason,
-		refreshCurrentSeason: () =>
-			currentSeasonProvider.refresh(database, 5_000, currentSeason),
+		refreshCurrentSeason: () => currentSeasonProvider.refresh(database, 5_000, currentSeason),
 		redis: getRedis(),
 		logger,
 		requestId,
