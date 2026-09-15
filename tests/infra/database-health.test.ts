@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import {
+	databaseQueryFamily,
 	poolCheckoutNeedsWaitMetric,
 	createDatabaseExecutor,
 	runDatabaseHealthCheck,
 	type DatabaseHealthClient,
 } from "../../src/infra/database";
 import { ExecutionScope } from "../../src/infra/execution-scope";
+import { metrics } from "../../src/infra/metrics";
 
 const makeClient = (failOn?: string) => {
 	const calls: Array<{ text: string; values?: readonly unknown[] }> = [];
@@ -23,6 +25,24 @@ const makeClient = (failOn?: string) => {
 };
 
 describe("PostgreSQL health probe", () => {
+	it("keeps SQL family labels fixed and records bounded execution phases", async () => {
+		expect(databaseQueryFamily("SELECT secret_column FROM fpl.players WHERE id = $1")).toBe("read");
+		expect(databaseQueryFamily("DROP TABLE fpl.players")).toBe("other");
+		const fake = makeClient();
+		await createDatabaseExecutor(undefined, async () => fake.client).query(
+			"SELECT secret_column FROM fpl.players WHERE id = $1",
+			[13]
+		);
+		const rendered = await metrics.registry.metrics();
+		expect(rendered).toContain(
+			'postgres_phase_total{service="graphql",query_family="read",phase="sql",result="ok"'
+		);
+		expect(rendered).toMatch(
+			/postgres_phase_duration_seconds_bucket\{le="[^"]+",service="graphql",query_family="read",phase="sql",result="ok"/
+		);
+		expect(rendered).not.toContain("secret_column");
+	});
+
 	it("recognizes the specific checkout queued behind a busy pool client", () => {
 		// The synchronous +1 proves that this checkout itself entered the
 		// pending queue; a later pool-wide sample could miss this short wait.
@@ -253,5 +273,12 @@ it("observes cancellation failures and destroys the uncertain connection", async
 	scope.cancel();
 	await expect(work).rejects.toThrow("no longer available");
 	expect(releases).toEqual([true]);
+	const rendered = await metrics.registry.metrics();
+	expect(rendered).toContain(
+		'postgres_cancellation_total{service="graphql",query_family="read",phase="requested",reason="client_abort",result="ok"'
+	);
+	expect(rendered).toContain(
+		'postgres_cancellation_total{service="graphql",query_family="read",phase="failed",reason="client_abort",result="error"'
+	);
 	scope.dispose();
 });

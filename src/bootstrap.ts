@@ -196,6 +196,16 @@ export const startServer = async (): Promise<void> => {
 			if (url.pathname === "/graphql") {
 				const executionScope = new ExecutionScope(undefined, request.signal);
 				const requestDatabase = createDatabaseExecutor(executionScope);
+				const releaseLabel = env.DEPLOY_SHA === "unknown" ? "unknown" : env.DEPLOY_SHA.slice(0, 12);
+				let requestAbortObserved = false;
+				const observeRequestAbort = (): void => {
+					if (requestAbortObserved) return;
+					requestAbortObserved = true;
+					metrics.graphqlRequestLifecycleTotal
+						.labels("client_abort", "aborted", releaseLabel)
+						.inc();
+				};
+				request.signal.addEventListener("abort", observeRequestAbort, { once: true });
 				const requestTiming = new RequestTiming();
 				const admissionOrder = new GraphQLAdmissionOrder();
 				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
@@ -257,6 +267,13 @@ export const startServer = async (): Promise<void> => {
 						.labels(request.method, url.pathname, String(response.status))
 						.observe(durationMs / 1000);
 					metrics.graphqlRequestOutcomes.labels(graphQLMetricResult(response, outcome)).inc();
+					metrics.graphqlRequestLifecycleTotal
+						.labels(
+							"response",
+							response.status >= 500 ? "5xx" : response.status >= 400 ? "4xx" : "2xx",
+							releaseLabel
+						)
+						.inc();
 					logger.info(
 						{
 							requestId,
@@ -657,6 +674,17 @@ export const startServer = async (): Promise<void> => {
 				try {
 					return executionScope.finishResponse(await executionScope.wait(executionScope.run(run)));
 				} catch (error) {
+					if (error instanceof ExecutionExpiredError) {
+						if (error.reason === "deadline") {
+							metrics.graphqlRequestLifecycleTotal
+								.labels("deadline", "expired", releaseLabel)
+								.inc();
+						} else if (!requestAbortObserved) {
+							metrics.graphqlRequestLifecycleTotal
+								.labels("client_abort", "aborted", releaseLabel)
+								.inc();
+						}
+					}
 					executionScope.cancel();
 					await executionScope.settleCleanup();
 					executionScope.dispose();
@@ -670,6 +698,8 @@ export const startServer = async (): Promise<void> => {
 						error instanceof ExecutionExpiredError ? "execution_expired" : "dependency_unavailable",
 						true
 					);
+				} finally {
+					request.signal.removeEventListener("abort", observeRequestAbort);
 				}
 			}
 
