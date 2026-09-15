@@ -686,6 +686,10 @@ export const startServer = async (): Promise<void> => {
 					const response = executionScope.finishResponse(
 						await executionScope.wait(executionScope.run(run)),
 						() => {
+							// A stream can finish in the same turn that the client aborts.
+							// Observe the signal state before removing the listener so the
+							// lifecycle counter cannot miss that disconnect race.
+							if (request.signal.aborted) observeRequestAbort();
 							request.signal.removeEventListener("abort", observeRequestAbort);
 							executionScope.signal.removeEventListener("abort", observeExecutionAbort);
 						}
