@@ -42,6 +42,7 @@ type Slot = {
 };
 type Checkout = {
 	done: boolean;
+	dispatched: boolean;
 	timer: ReturnType<typeof setTimeout>;
 	resolve: (client: DatabaseClient) => void;
 	reject: (error: Error) => void;
@@ -105,9 +106,23 @@ export class DatabasePool extends EventEmitter {
 		return new Promise((resolve, reject) => {
 			const checkout: Checkout = {
 				done: false,
+				dispatched: false,
 				resolve,
 				reject,
 				timer: setTimeout(() => {
+					// A queued checkout and a connection attempt have different
+					// meanings. The driver owns the latter's connect_timeout; if
+					// it has already been dispatched, report an unavailable backend
+					// rather than pool saturation.
+					if (checkout.dispatched) {
+						checkout.done = true;
+						checkout.reject(
+							Object.assign(new Error("Database connection unavailable"), {
+								code: "POOL_UNAVAILABLE",
+							})
+						);
+						return;
+					}
 					checkout.done = true;
 					const index = this.queue.indexOf(checkout);
 					if (index !== -1) this.queue.splice(index, 1);
@@ -161,6 +176,7 @@ export class DatabasePool extends EventEmitter {
 			}
 			const checkout = this.queue.shift()!;
 			if (checkout.done) continue;
+			checkout.dispatched = true;
 			slot.busy = true;
 			clearTimeout(slot.idleTimer);
 			void this.acquire(slot, checkout);
