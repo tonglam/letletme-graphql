@@ -106,7 +106,16 @@ const isConnectionFailure = (error: unknown): boolean => {
 		typeof code === "string" &&
 		(code.startsWith("08") ||
 			code.startsWith("CONNECTION_") ||
-			["57P01", "57P02", "57P03", "ECONNRESET", "EPIPE", "ETIMEDOUT", "ENOTFOUND"].includes(code))
+			[
+				"57P01",
+				"57P02",
+				"57P03",
+				"ECONNRESET",
+				"EPIPE",
+				"ETIMEDOUT",
+				"ENOTFOUND",
+				"CONNECT_TIMEOUT",
+			].includes(code))
 	);
 };
 

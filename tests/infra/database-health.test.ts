@@ -63,6 +63,8 @@ describe("PostgreSQL health probe", () => {
 				unavailableScope
 			)
 		).toBe("unavailable");
+		expect(databasePhaseResult({ code: "CONNECT_TIMEOUT" }, unavailableScope)).toBe("unavailable");
+		expect(databasePhaseResult({ code: "ETIMEDOUT" }, unavailableScope)).toBe("unavailable");
 		unavailableScope.dispose();
 		const parent = new ExecutionScope(Date.now() + 1000);
 		const child = new ExecutionScope(Date.now() + 1000, parent.signal);
