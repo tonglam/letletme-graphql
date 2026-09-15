@@ -198,6 +198,7 @@ export const startServer = async (): Promise<void> => {
 				const requestDatabase = createDatabaseExecutor(executionScope);
 				const releaseLabel = env.DEPLOY_SHA === "unknown" ? "unknown" : env.DEPLOY_SHA.slice(0, 12);
 				let requestAbortObserved = false;
+				let responseOwnsAbortListener = false;
 				const observeRequestAbort = (): void => {
 					if (requestAbortObserved) return;
 					requestAbortObserved = true;
@@ -672,7 +673,12 @@ export const startServer = async (): Promise<void> => {
 					}
 				};
 				try {
-					return executionScope.finishResponse(await executionScope.wait(executionScope.run(run)));
+					const response = executionScope.finishResponse(
+						await executionScope.wait(executionScope.run(run)),
+						() => request.signal.removeEventListener("abort", observeRequestAbort)
+					);
+					responseOwnsAbortListener = Boolean(response.body);
+					return response;
 				} catch (error) {
 					if (error instanceof ExecutionExpiredError) {
 						if (error.reason === "deadline") {
@@ -699,7 +705,9 @@ export const startServer = async (): Promise<void> => {
 						true
 					);
 				} finally {
-					request.signal.removeEventListener("abort", observeRequestAbort);
+					if (!responseOwnsAbortListener) {
+						request.signal.removeEventListener("abort", observeRequestAbort);
+					}
 				}
 			}
 

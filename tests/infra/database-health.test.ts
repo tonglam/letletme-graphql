@@ -1,12 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import {
 	databaseQueryFamily,
+	databasePhaseResult,
+	isPoolCheckoutTimeout,
 	poolCheckoutNeedsWaitMetric,
 	createDatabaseExecutor,
 	runDatabaseHealthCheck,
 	type DatabaseHealthClient,
 } from "../../src/infra/database";
-import { ExecutionScope } from "../../src/infra/execution-scope";
+import { ExecutionExpiredError, ExecutionScope } from "../../src/infra/execution-scope";
 import { metrics } from "../../src/infra/metrics";
 
 const makeClient = (failOn?: string) => {
@@ -27,6 +29,10 @@ const makeClient = (failOn?: string) => {
 describe("PostgreSQL health probe", () => {
 	it("keeps SQL family labels fixed and records bounded execution phases", async () => {
 		expect(databaseQueryFamily("SELECT secret_column FROM fpl.players WHERE id = $1")).toBe("read");
+		expect(
+			databaseQueryFamily("-- request comment\n/* trace */ SELECT secret_column FROM fpl.players")
+		).toBe("read");
+		expect(databaseQueryFamily("/* health */ SELECT 1")).toBe("health");
 		expect(databaseQueryFamily("DROP TABLE fpl.players")).toBe("other");
 		const fake = makeClient();
 		await createDatabaseExecutor(undefined, async () => fake.client).query(
@@ -41,6 +47,21 @@ describe("PostgreSQL health probe", () => {
 			/postgres_phase_duration_seconds_bucket\{le="[^"]+",service="graphql",query_family="read",phase="sql",result="ok"/
 		);
 		expect(rendered).not.toContain("secret_column");
+	});
+
+	it("keeps pool timeout and parent deadline attribution explicit", () => {
+		expect(isPoolCheckoutTimeout(new Error("Database connection acquisition timed out"))).toBe(
+			true
+		);
+		expect(isPoolCheckoutTimeout(new Error("Database connection unavailable"))).toBe(false);
+		const parent = new ExecutionScope(Date.now() + 1000);
+		const child = new ExecutionScope(Date.now() + 1000, parent.signal);
+		parent.cancel("deadline");
+		expect(databasePhaseResult(new ExecutionExpiredError("cancelled"), child, parent.signal)).toBe(
+			"timeout"
+		);
+		child.dispose();
+		parent.dispose();
 	});
 
 	it("recognizes the specific checkout queued behind a busy pool client", () => {

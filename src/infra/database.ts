@@ -70,7 +70,22 @@ export type DatabasePhaseResult = "ok" | "error" | "timeout" | "client_abort" | 
 
 /** Classify only fixed statement families; SQL text never becomes a metric label. */
 export const databaseQueryFamily = (text: string): string => {
-	const normalized = text.trim().replace(/\s+/g, " ").toUpperCase();
+	let withoutLeadingComments = text.trim();
+	for (;;) {
+		if (withoutLeadingComments.startsWith("--")) {
+			const lineEnd = withoutLeadingComments.indexOf("\n");
+			withoutLeadingComments = lineEnd < 0 ? "" : withoutLeadingComments.slice(lineEnd + 1).trim();
+			continue;
+		}
+		if (withoutLeadingComments.startsWith("/*")) {
+			const commentEnd = withoutLeadingComments.indexOf("*/", 2);
+			withoutLeadingComments =
+				commentEnd < 0 ? "" : withoutLeadingComments.slice(commentEnd + 2).trim();
+			continue;
+		}
+		break;
+	}
+	const normalized = withoutLeadingComments.replace(/\s+/g, " ").toUpperCase();
 	if (normalized === "BEGIN READ ONLY") return "transaction_begin";
 	if (normalized.startsWith("SELECT SET_CONFIG('STATEMENT_TIMEOUT'")) return "statement_timeout";
 	if (normalized === "COMMIT") return "transaction_commit";
@@ -102,19 +117,42 @@ export const databasePhaseResult = (
 ): DatabasePhaseResult => {
 	if (error instanceof ExecutionExpiredError) {
 		if (error.reason === "deadline") return "timeout";
-		if (error.reason === "cancelled" && parentSignal?.aborted) return "client_abort";
+		if (parentSignal?.aborted) {
+			const parentReason: unknown = parentSignal.reason;
+			if (parentReason instanceof ExecutionExpiredError && parentReason.reason === "deadline") {
+				return "timeout";
+			}
+			if (error.reason === "cancelled") return "client_abort";
+		}
 		return "unavailable";
 	}
 	if (scope.signal.aborted) {
 		const reason: unknown = scope.signal.reason;
 		if (reason instanceof ExecutionExpiredError && reason.reason === "deadline") return "timeout";
-		if (parentSignal?.aborted) return "client_abort";
+		if (parentSignal?.aborted) {
+			const parentReason: unknown = parentSignal.reason;
+			if (parentReason instanceof ExecutionExpiredError && parentReason.reason === "deadline") {
+				return "timeout";
+			}
+			return "client_abort";
+		}
 		return "unavailable";
 	}
 	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
 	if (code === "57014" || code === "QUERY_TIMEOUT") return "timeout";
 	if (isConnectionFailure(error)) return "unavailable";
 	return "error";
+};
+
+/** The bounded local pool rejects a queued checkout with this controlled error. */
+export const isPoolCheckoutTimeout = (error: unknown): boolean => {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+	const message = error instanceof Error ? error.message.toLowerCase() : "";
+	return (
+		code === "ETIMEDOUT" ||
+		code === "POOL_TIMEOUT" ||
+		message.includes("database connection acquisition timed out")
+	);
 };
 
 const observeDatabasePhase = (
@@ -292,7 +330,9 @@ export const createDatabaseExecutor = (
 			} catch (error) {
 				observePhase(
 					"checkout",
-					databasePhaseResult(error, scope, execution?.signal),
+					isPoolCheckoutTimeout(error)
+						? "timeout"
+						: databasePhaseResult(error, scope, execution?.signal),
 					checkoutStartedAt
 				);
 				throw error;
