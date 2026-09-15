@@ -99,9 +99,10 @@ export class ExecutionScope {
 	}
 
 	/** Keep cancellation attached until the actual response body ends. */
-	finishResponse(response: Response): Response {
+	finishResponse(response: Response, onFinished?: () => void): Response {
 		if (!response.body) {
 			this.dispose();
+			onFinished?.();
 			return response;
 		}
 		const reader = response.body.getReader();
@@ -112,6 +113,7 @@ export class ExecutionScope {
 			finished = true;
 			this.signal.removeEventListener("abort", abort);
 			this.dispose();
+			onFinished?.();
 		};
 		const abort = (): void => {
 			if (finished) return;

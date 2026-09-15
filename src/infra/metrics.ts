@@ -236,6 +236,48 @@ export const postgresPoolErrors = new Counter({
 	labelNames: ["category"] as const,
 });
 
+export const POSTGRES_PHASE_LABELS = [
+	"service",
+	"query_family",
+	"phase",
+	"result",
+	"release",
+] as const;
+
+export const postgresPhaseDurationSeconds = new Histogram({
+	name: "postgres_phase_duration_seconds",
+	help: "Bounded PostgreSQL checkout, statement, transaction, and retirement durations",
+	labelNames: POSTGRES_PHASE_LABELS,
+	buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30],
+});
+
+export const postgresPhaseTotal = new Counter({
+	name: "postgres_phase_total",
+	help: "Bounded PostgreSQL phase outcomes",
+	labelNames: POSTGRES_PHASE_LABELS,
+});
+
+export const POSTGRES_CANCELLATION_LABELS = [
+	"service",
+	"query_family",
+	"phase",
+	"reason",
+	"result",
+	"release",
+] as const;
+
+export const postgresCancellationTotal = new Counter({
+	name: "postgres_cancellation_total",
+	help: "PostgreSQL cancellation request, settlement, and failure outcomes",
+	labelNames: POSTGRES_CANCELLATION_LABELS,
+});
+
+export const graphqlRequestLifecycleTotal = new Counter({
+	name: "graphql_request_lifecycle_total",
+	help: "GraphQL request deadline, client-abort, and controlled response outcomes",
+	labelNames: ["event", "result", "release"] as const,
+});
+
 registry.registerMetric(rateLimitStorageFailures);
 registry.registerMetric(authTokenValidations);
 registry.registerMetric(graphqlIngressRequests);
@@ -265,6 +307,10 @@ registry.registerMetric(rateLimitTelemetryOverflows);
 registry.registerMetric(postgresPoolClients);
 registry.registerMetric(postgresPoolWaitEvents);
 registry.registerMetric(postgresPoolErrors);
+registry.registerMetric(postgresPhaseDurationSeconds);
+registry.registerMetric(postgresPhaseTotal);
+registry.registerMetric(postgresCancellationTotal);
+registry.registerMetric(graphqlRequestLifecycleTotal);
 
 export const registerDatabasePoolMetrics = (provider: () => DatabasePoolMetrics): void => {
 	readDatabasePoolMetrics = provider;
@@ -301,6 +347,11 @@ export const metrics = {
 	rateLimitTelemetryOverflows,
 	postgresPoolClients,
 	postgresPoolWaitEvents,
+	postgresPoolErrors,
+	postgresPhaseDurationSeconds,
+	postgresPhaseTotal,
+	postgresCancellationTotal,
+	graphqlRequestLifecycleTotal,
 };
 
 export const metricsResponse = async (): Promise<Response> => {

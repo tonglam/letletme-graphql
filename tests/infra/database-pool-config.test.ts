@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { parseDatabasePoolMax } from "../../src/infra/database-pool-config";
-import { databasePoolErrorCategory } from "../../src/infra/db-pool";
+import { databasePoolErrorCategory, DatabasePool } from "../../src/infra/db-pool";
 
 describe("GraphQL database pool configuration", () => {
 	test("keeps an isolated process alive after idle pool errors, including shutdown", async () => {
@@ -57,5 +57,20 @@ describe("GraphQL database pool configuration", () => {
 		expect(databasePoolErrorCategory({ code: "CONNECTION_CLOSED" })).toBe("connection");
 		expect(databasePoolErrorCategory({ code: "ECONNRESET" })).toBe("connection");
 		expect(databasePoolErrorCategory({ code: "XX000" })).toBe("other");
+	});
+
+	test("keeps a queued checkout timeout distinct from connection setup failure", async () => {
+		const pool = new DatabasePool({
+			connectionString: "postgres://127.0.0.1:1/test",
+			max: 1,
+			connectionTimeoutMillis: 20,
+		});
+		const first = await pool.connect();
+		try {
+			await expect(pool.connect()).rejects.toMatchObject({ code: "POOL_TIMEOUT" });
+		} finally {
+			await first.release(true);
+			await pool.end();
+		}
 	});
 });

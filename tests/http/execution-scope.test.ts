@@ -37,6 +37,7 @@ describe("request execution lifecycle", () => {
 	it("retains the scope for a streaming response and aborts it when the consumer leaves", async () => {
 		const scope = new ExecutionScope();
 		let cancelled = false;
+		let finished = 0;
 		const response = scope.finishResponse(
 			new Response(
 				new ReadableStream({
@@ -47,7 +48,10 @@ describe("request execution lifecycle", () => {
 						cancelled = true;
 					},
 				})
-			)
+			),
+			() => {
+				finished++;
+			}
 		);
 		expect(scope.signal.aborted).toBe(false);
 		const reader = response.body!.getReader();
@@ -55,6 +59,7 @@ describe("request execution lifecycle", () => {
 		await reader.cancel();
 		expect(scope.signal.aborted).toBe(true);
 		expect(cancelled).toBe(true);
+		expect(finished).toBe(1);
 	});
 
 	it("cancels an open response when the upstream request aborts", async () => {
