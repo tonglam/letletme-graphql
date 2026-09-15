@@ -111,7 +111,11 @@ export class DatabasePool extends EventEmitter {
 					checkout.done = true;
 					const index = this.queue.indexOf(checkout);
 					if (index !== -1) this.queue.splice(index, 1);
-					reject(new Error("Database connection acquisition timed out"));
+					reject(
+						Object.assign(new Error("Database connection acquisition timed out"), {
+							code: "POOL_TIMEOUT",
+						})
+					);
 				}, this.options.connectionTimeoutMillis ?? 2_000),
 			};
 			this.queue.push(checkout);
@@ -240,7 +244,11 @@ export class DatabasePool extends EventEmitter {
 			clearTimeout(checkout.timer);
 			if (!checkout.done) {
 				checkout.done = true;
-				checkout.reject(new Error("Database connection unavailable"));
+				checkout.reject(
+					Object.assign(new Error("Database connection unavailable"), {
+						code: "POOL_UNAVAILABLE",
+					})
+				);
 			}
 			await this.retire(slot);
 		}

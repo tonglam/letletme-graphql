@@ -3,6 +3,7 @@ import {
 	databaseQueryFamily,
 	databasePhaseResult,
 	isPoolCheckoutTimeout,
+	isPoolCheckoutUnavailable,
 	poolCheckoutNeedsWaitMetric,
 	createDatabaseExecutor,
 	runDatabaseHealthCheck,
@@ -54,6 +55,15 @@ describe("PostgreSQL health probe", () => {
 			true
 		);
 		expect(isPoolCheckoutTimeout(new Error("Database connection unavailable"))).toBe(false);
+		expect(isPoolCheckoutUnavailable(new Error("Database connection unavailable"))).toBe(true);
+		const unavailableScope = new ExecutionScope();
+		expect(
+			databasePhaseResult(
+				Object.assign(new Error("Database connection unavailable"), { code: "POOL_UNAVAILABLE" }),
+				unavailableScope
+			)
+		).toBe("unavailable");
+		unavailableScope.dispose();
 		const parent = new ExecutionScope(Date.now() + 1000);
 		const child = new ExecutionScope(Date.now() + 1000, parent.signal);
 		parent.cancel("deadline");

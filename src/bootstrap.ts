@@ -198,6 +198,7 @@ export const startServer = async (): Promise<void> => {
 				const requestDatabase = createDatabaseExecutor(executionScope);
 				const releaseLabel = env.DEPLOY_SHA === "unknown" ? "unknown" : env.DEPLOY_SHA.slice(0, 12);
 				let requestAbortObserved = false;
+				let requestDeadlineObserved = false;
 				let responseOwnsAbortListener = false;
 				const observeRequestAbort = (): void => {
 					if (requestAbortObserved) return;
@@ -207,6 +208,15 @@ export const startServer = async (): Promise<void> => {
 						.inc();
 				};
 				request.signal.addEventListener("abort", observeRequestAbort, { once: true });
+				const observeExecutionAbort = (): void => {
+					if (requestDeadlineObserved) return;
+					const reason: unknown = executionScope.signal.reason as unknown;
+					if (reason instanceof ExecutionExpiredError && reason.reason === "deadline") {
+						requestDeadlineObserved = true;
+						metrics.graphqlRequestLifecycleTotal.labels("deadline", "expired", releaseLabel).inc();
+					}
+				};
+				executionScope.signal.addEventListener("abort", observeExecutionAbort, { once: true });
 				const requestTiming = new RequestTiming();
 				const admissionOrder = new GraphQLAdmissionOrder();
 				const requestId = resolveRequestId(request.headers.get("X-Request-Id"));
@@ -675,16 +685,22 @@ export const startServer = async (): Promise<void> => {
 				try {
 					const response = executionScope.finishResponse(
 						await executionScope.wait(executionScope.run(run)),
-						() => request.signal.removeEventListener("abort", observeRequestAbort)
+						() => {
+							request.signal.removeEventListener("abort", observeRequestAbort);
+							executionScope.signal.removeEventListener("abort", observeExecutionAbort);
+						}
 					);
 					responseOwnsAbortListener = Boolean(response.body);
 					return response;
 				} catch (error) {
 					if (error instanceof ExecutionExpiredError) {
 						if (error.reason === "deadline") {
-							metrics.graphqlRequestLifecycleTotal
-								.labels("deadline", "expired", releaseLabel)
-								.inc();
+							if (!requestDeadlineObserved) {
+								requestDeadlineObserved = true;
+								metrics.graphqlRequestLifecycleTotal
+									.labels("deadline", "expired", releaseLabel)
+									.inc();
+							}
 						} else if (!requestAbortObserved) {
 							metrics.graphqlRequestLifecycleTotal
 								.labels("client_abort", "aborted", releaseLabel)
@@ -707,6 +723,7 @@ export const startServer = async (): Promise<void> => {
 				} finally {
 					if (!responseOwnsAbortListener) {
 						request.signal.removeEventListener("abort", observeRequestAbort);
+						executionScope.signal.removeEventListener("abort", observeExecutionAbort);
 					}
 				}
 			}

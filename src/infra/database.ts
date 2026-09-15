@@ -139,7 +139,8 @@ export const databasePhaseResult = (
 		return "unavailable";
 	}
 	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-	if (code === "57014" || code === "QUERY_TIMEOUT") return "timeout";
+	if (code === "57014" || code === "QUERY_TIMEOUT" || code === "POOL_TIMEOUT") return "timeout";
+	if (code === "POOL_UNAVAILABLE") return "unavailable";
 	if (isConnectionFailure(error)) return "unavailable";
 	return "error";
 };
@@ -153,6 +154,13 @@ export const isPoolCheckoutTimeout = (error: unknown): boolean => {
 		code === "POOL_TIMEOUT" ||
 		message.includes("database connection acquisition timed out")
 	);
+};
+
+/** The pool deliberately hides driver connection details behind this stable error. */
+export const isPoolCheckoutUnavailable = (error: unknown): boolean => {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+	const message = error instanceof Error ? error.message.toLowerCase() : "";
+	return code === "POOL_UNAVAILABLE" || message.includes("database connection unavailable");
 };
 
 const observeDatabasePhase = (
@@ -262,12 +270,17 @@ export const createDatabaseExecutor = (
 		};
 		const abort = (): void => {
 			const expired = scope.signal.reason instanceof ExecutionExpiredError;
+			const parentDeadline =
+				execution?.signal.reason instanceof ExecutionExpiredError &&
+				execution.signal.reason.reason === "deadline";
 			const reason =
 				expired && scope.signal.reason.reason === "deadline"
 					? "deadline"
-					: execution?.signal.aborted
-						? "client_abort"
-						: undefined;
+					: parentDeadline
+						? "deadline"
+						: execution?.signal.aborted
+							? "client_abort"
+							: undefined;
 			if (!reason) {
 				release(true);
 				return;
@@ -332,7 +345,9 @@ export const createDatabaseExecutor = (
 					"checkout",
 					isPoolCheckoutTimeout(error)
 						? "timeout"
-						: databasePhaseResult(error, scope, execution?.signal),
+						: isPoolCheckoutUnavailable(error)
+							? "unavailable"
+							: databasePhaseResult(error, scope, execution?.signal),
 					checkoutStartedAt
 				);
 				throw error;
