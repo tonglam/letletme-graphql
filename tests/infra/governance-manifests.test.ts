@@ -75,6 +75,8 @@ describe("GraphQL domain manifest", () => {
 		expect(miniProgram?.rateLimitBudget.miniProgramNotice).toBe(5);
 		const entryLiveDomain = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entry-live");
 		expect(entryLiveDomain?.rateLimitBudget.calcLivePointsForEntries).toBe(10);
+		const entries = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entries");
+		expect(entries?.rateLimitBudget.entryTransferHistory).toBe(215);
 		expect(players?.authByRootField).toMatchObject({
 			players: ["public"],
 			teams: ["public"],
@@ -84,6 +86,12 @@ describe("GraphQL domain manifest", () => {
 		).toMatchObject({
 			homePublicBootstrap: ["public"],
 			homePersonalDesk: ["viewerEntry"],
+		});
+		expect(
+			GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entries")?.authByRootField
+		).toMatchObject({
+			entryTransferHistory: ["public"],
+			entryHistory: ["viewerEntryArg"],
 		});
 		expect(trends?.authByRootField).toMatchObject({
 			trendCohorts: ["public", "viewerEntry"],

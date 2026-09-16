@@ -35,6 +35,8 @@ export type EntryLookupResult = Readonly<{
 const FPL_ENTRY_NEGATIVE_TTL_SECONDS = 60;
 const FPL_ENTRY_NEGATIVE_SENTINEL = "__entry_fpl:not_found__";
 const MAX_FPL_ENTRY_IN_FLIGHT = 8;
+/** FPL's regular season contains at most 38 gameweeks. */
+export const MAX_ENTRY_TRANSFER_HISTORY_EVENTS = 38;
 const fplEntryFlights = new Map<number, Promise<FplEntryLookupResult>>();
 let fplEntryInFlight = 0;
 const entryLookupMemos = new WeakMap<object, Map<number, Promise<EntryLookupResult>>>();
@@ -821,6 +823,11 @@ const entriesServiceBase = {
 		const eventIds = Array.from(new Set(transferRows.map((row) => row.eventId))).sort(
 			(a, b) => a - b
 		);
+		if (eventIds.length > MAX_ENTRY_TRANSFER_HISTORY_EVENTS) {
+			throw new GraphQLError("Entry transfer history exceeds the current season event bound", {
+				extensions: { code: "DATA_UNAVAILABLE" },
+			});
+		}
 
 		// Build per-event player map so the live pipeline only requests relevant players per event
 		const playerIdsByEvent = new Map<number, number[]>();

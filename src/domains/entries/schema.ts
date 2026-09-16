@@ -117,6 +117,9 @@ export const entriesTypeDefs = /* GraphQL */ `
 		searchEntries(query: String!, limit: Int = 10): [Entry!]!
 		entryHistory(entryId: Int!): EntryHistoryPayload!
 		entryEventResult(entryId: Int!, eventId: Int!): EntryEventResult
+		"""
+		Public synced transfer history for a selected FPL entry.
+		"""
 		entryTransferHistory(entryId: Int!, live: Boolean = false): [EntryGameweekTransfers!]!
 	}
 `;

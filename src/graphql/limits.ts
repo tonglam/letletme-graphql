@@ -1173,6 +1173,16 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["searchEntries", 10],
 	["entryLookup", 5],
 	["entryNameUsage", 5],
+	// Public transfer history can traverse a season of events and optionally
+	// enrich every transfer with live data. The service rejects more than the
+	// FPL season bound of 38 distinct events. A 2026-09-16 read-only benchmark
+	// measured the current three-event high-fanout path at live=true p95 1,123.3
+	// ms. Conservatively pricing that measured path across the bounded season,
+	// with current Mini public weighted refills (10 anonymous / 15 session
+	// units/s), gives ceil(max(10, 15) * 1.1233 * (38 / 3) / 5) * 5 = 215 units.
+	// Keep the run and derivation alongside the registry in
+	// documentation/ENTRY_TRANSFER_HISTORY_RATE_LIMIT_EVIDENCE.md.
+	["entryTransferHistory", 215],
 	["tournamentEventResults", 30],
 	["tournamentSelectionStats", 10],
 	["tournamentEntryRankingSummary", 10],
