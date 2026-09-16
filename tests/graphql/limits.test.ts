@@ -611,6 +611,22 @@ describe("GraphQL request limits", () => {
 		}
 	});
 
+	it("charges public transfer history at its heavy read floor", () => {
+		const result = validateGraphQLRequestLimits(
+			{
+				query:
+					"query EntryTransfers($entryId: Int!) { entryTransferHistory(entryId: $entryId) { eventId } }",
+				variables: { entryId: 1 },
+			},
+			schema
+		);
+		expect(result).toMatchObject({
+			ok: true,
+			rootFields: ["entryTransferHistory"],
+			rateLimitCostUnits: 20,
+		});
+	});
+
 	it("preserves bounded floors when a bounded root is mixed with ordinary roots", () => {
 		const result = validateGraphQLRequestLimits({ query: "query { teams { id } _empty }" }, schema);
 		expect(result).toMatchObject({ ok: true, rootFields: ["teams", "_empty"] });

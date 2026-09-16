@@ -1173,6 +1173,10 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["searchEntries", 10],
 	["entryLookup", 5],
 	["entryNameUsage", 5],
+	// Public transfer history can traverse a season of events and optionally
+	// enrich every transfer with live data. Charge it at the same measured
+	// heavy-desk floor used by other bounded reporting reads.
+	["entryTransferHistory", 20],
 	["tournamentEventResults", 30],
 	["tournamentSelectionStats", 10],
 	["tournamentEntryRankingSummary", 10],
