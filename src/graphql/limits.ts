@@ -1174,8 +1174,13 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["entryLookup", 5],
 	["entryNameUsage", 5],
 	// Public transfer history can traverse a season of events and optionally
-	// enrich every transfer with live data. Charge it at the same measured
-	// heavy-desk floor used by other bounded reporting reads.
+	// enrich every transfer with live data. A 2026-09-16 read-only benchmark
+	// (dataset revision 7808, high-fanout entry 702902, 94 rows across 3 events,
+	// 20 fresh-cache samples) measured live=true at p95 1,123.3 ms. With the
+	// current Mini public weighted refills (10 anonymous / 15 session units/s),
+	// the measured floor is ceil(max(10, 15) * 1.1233 / 5) * 5 = 20 units.
+	// Keep this evidence alongside the registry in
+	// documentation/ENTRY_TRANSFER_HISTORY_RATE_LIMIT_EVIDENCE.md.
 	["entryTransferHistory", 20],
 	["tournamentEventResults", 30],
 	["tournamentSelectionStats", 10],

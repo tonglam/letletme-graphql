@@ -72,6 +72,14 @@ const readBoundedInt = (
 const BENCHMARK_ITERATIONS = readBoundedInt(Bun.env.BENCHMARK_ITERATIONS, 5, 1, 20);
 const QUERY_TIMEOUT_MS = readBoundedInt(Bun.env.BENCHMARK_TIMEOUT_MS, 30_000, 1000, 300_000);
 const BENCHMARK_OUTPUT_FILE = Bun.env.BENCHMARK_OUTPUT_FILE?.trim() || null;
+const BENCHMARK_QUERY_FILTER = Bun.env.BENCHMARK_QUERY_FILTER?.trim() || null;
+const BENCHMARK_FRESH_CACHE = Bun.env.BENCHMARK_FRESH_CACHE === "true";
+const BENCHMARK_ENTRY_ID = (() => {
+	const raw = Bun.env.BENCHMARK_ENTRY_ID?.trim();
+	if (!raw) return null;
+	const parsed = Number(raw);
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+})();
 
 const resolveExternalOutputFile = (value: string | null): string | null => {
 	if (!value) return null;
@@ -723,6 +731,10 @@ async function runBenchmark(): Promise<void> {
 		data: new ReadModelClient(database, contract.currentSeason),
 		database,
 		currentSeason: contract.currentSeason,
+		// Entry-scoped reads, including public transfer history, use the same
+		// revisioned cache keys as the runtime. Without this value the benchmark
+		// fails before the resolver and cannot produce operation evidence.
+		dataRevision: contract.datasetRevision,
 		redis,
 		logger,
 	};
@@ -731,7 +743,19 @@ async function runBenchmark(): Promise<void> {
 	await apollo.start();
 
 	const ids = await discoverIds(contract.currentSeason.seasonId);
-	const queries = buildQueries(ids);
+	if (BENCHMARK_ENTRY_ID !== null) {
+		// A high-fanout entry makes the expensive public transfer path visible in
+		// evidence instead of benchmarking only the smallest discovered entry.
+		ids.entryId = BENCHMARK_ENTRY_ID;
+		ids.entryEventEntryId = BENCHMARK_ENTRY_ID;
+	}
+	const allQueries = buildQueries(ids);
+	const queries = BENCHMARK_QUERY_FILTER
+		? allQueries.filter((query) => query.name === BENCHMARK_QUERY_FILTER)
+		: allQueries;
+	if (queries.length === 0) {
+		throw new Error(`No benchmark query matched BENCHMARK_QUERY_FILTER=${BENCHMARK_QUERY_FILTER}`);
+	}
 
 	const results: BenchmarkResult[] = [];
 
@@ -767,6 +791,12 @@ async function runBenchmark(): Promise<void> {
 
 		const failures: TimedOperationResult[] = [];
 		for (let i = 0; i < BENCHMARK_ITERATIONS; i++) {
+			if (BENCHMARK_FRESH_CACHE) {
+				// Keep each sample on a revisioned cache namespace so repeated
+				// measurements exercise the cold resolver path. The read-only Redis
+				// proxy below prevents these synthetic writes from reaching Redis.
+				context.dataRevision = `${contract.datasetRevision}.benchmark-${i + 1}`;
+			}
 			const sample = await runTimedOperation(apollo, context, q);
 			if (sample.status === "OK") {
 				result.samplesMs.push(sample.ms);
@@ -812,7 +842,11 @@ async function runBenchmark(): Promise<void> {
 	console.log(`Timestamp: ${nowIso()}`);
 	console.log("Redis:     configured primary read-only endpoint (address redacted)");
 	console.log("Postgres:  read-only Data Platform");
-	console.log(`Mode:      read-only Redis, ${BENCHMARK_ITERATIONS} samples/query`);
+	console.log(
+		`Mode:      read-only Redis, ${BENCHMARK_ITERATIONS} samples/query${
+			BENCHMARK_QUERY_FILTER ? `, filter=${BENCHMARK_QUERY_FILTER}` : ""
+		}${BENCHMARK_FRESH_CACHE ? ", fresh-cache" : ""}`
+	);
 	console.log(`Timeout:   ${QUERY_TIMEOUT_MS} ms/query sample`);
 	console.log("=".repeat(100));
 
@@ -867,6 +901,9 @@ async function runBenchmark(): Promise<void> {
 			totalQueries: results.length,
 			iterations: BENCHMARK_ITERATIONS,
 			timeoutMs: QUERY_TIMEOUT_MS,
+			queryFilter: BENCHMARK_QUERY_FILTER,
+			freshCache: BENCHMARK_FRESH_CACHE,
+			benchmarkEntryId: BENCHMARK_ENTRY_ID,
 			redisMode: "read-only",
 		},
 		summary: {
