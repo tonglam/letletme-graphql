@@ -42,8 +42,10 @@ the verified web account.
 ## Public GraphQL boundary
 
 `me`, public `entryLookup`, and public live calculation remain available behind the
-trusted ingress where documented by the schema. History, transfers, league,
-My FPL, and tournament fields are authorized against the resolved principal.
+trusted ingress where documented by the schema. Entry history, league, My FPL,
+and tournament fields are authorized against the resolved principal. Synced
+entry transfer history is public, matching the public FPL entry feed used by
+Live Points pages.
 Removed fields include `myDevices`, `revokeDevice`,
 `identifyWechatUser`, and `bindFplEntry`.
 

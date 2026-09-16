@@ -85,6 +85,12 @@ describe("GraphQL domain manifest", () => {
 			homePublicBootstrap: ["public"],
 			homePersonalDesk: ["viewerEntry"],
 		});
+		expect(
+			GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entries")?.authByRootField
+		).toMatchObject({
+			entryTransferHistory: ["public"],
+			entryHistory: ["viewerEntryArg"],
+		});
 		expect(trends?.authByRootField).toMatchObject({
 			trendCohorts: ["public", "viewerEntry"],
 			trendCohortSnapshot: ["public", "viewerEntry"],

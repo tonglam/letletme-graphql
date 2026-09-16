@@ -151,6 +151,15 @@ describe("authorizeGraphQLRequest", () => {
 		expect(result.ok).toBe(true);
 	});
 
+	it("allows public entry transfer history without a principal", async () => {
+		const result = await authorize(
+			`query EntryTransfers($entryId: Int!) { entryTransferHistory(entryId: $entryId) { eventId } }`,
+			{ entryId: 123 }
+		);
+
+		expect(result.ok).toBe(true);
+	});
+
 	it("rejects protected root fields without a principal", async () => {
 		const result = await authorize(
 			`query EntryHistory($entryId: Int!) { entryHistory(entryId: $entryId) { totalPoints } }`,

@@ -102,6 +102,7 @@ add(
 		"entrySnapshot",
 		"entryNameUsage",
 		"searchEntries",
+		"entryTransferHistory",
 		"calcLivePointsByEntry",
 	],
 	"public"
@@ -111,7 +112,6 @@ add(
 	[
 		"entryHistory",
 		"entryEventResult",
-		"entryTransferHistory",
 		"entryLeagues",
 		"entryH2HMatchResults",
 		"entryParticipatingTournaments",
