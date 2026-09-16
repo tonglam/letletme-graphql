@@ -76,7 +76,7 @@ describe("GraphQL domain manifest", () => {
 		const entryLiveDomain = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entry-live");
 		expect(entryLiveDomain?.rateLimitBudget.calcLivePointsForEntries).toBe(10);
 		const entries = GRAPHQL_DOMAIN_MANIFEST.find((entry) => entry.name === "entries");
-		expect(entries?.rateLimitBudget.entryTransferHistory).toBe(20);
+		expect(entries?.rateLimitBudget.entryTransferHistory).toBe(215);
 		expect(players?.authByRootField).toMatchObject({
 			players: ["public"],
 			teams: ["public"],

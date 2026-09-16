@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { EntryEventResult } from "../../../src/domains/entries/repository";
 import { entriesRepository } from "../../../src/domains/entries/repository";
-import { entriesService } from "../../../src/domains/entries/service";
+import {
+	entriesService,
+	MAX_ENTRY_TRANSFER_HISTORY_EVENTS,
+} from "../../../src/domains/entries/service";
 import {
 	type EntryEventTransferRow,
 	entryLiveRepository,
@@ -154,6 +157,33 @@ describe("entriesService.getEntryTransferHistory", () => {
 				elementOutTeamShortName: "LIV",
 				elementOutPoints: 2,
 			});
+		} finally {
+			entryLiveRepository.getEntryTransferHistory = originalGetEntryTransferHistory;
+		}
+	});
+
+	it("fails closed when transfer history exceeds the FPL season event bound", async () => {
+		const originalGetEntryTransferHistory = entryLiveRepository.getEntryTransferHistory;
+		const transferRows: EntryEventTransferRow[] = Array.from(
+			{ length: MAX_ENTRY_TRANSFER_HISTORY_EVENTS + 1 },
+			(_, index) => ({
+				entryId: 84885,
+				eventId: index + 1,
+				elementIn: 1,
+				elementInCost: 85,
+				elementOut: 12,
+				elementOutCost: 125,
+				time: "2026-01-01T00:00:00Z",
+			})
+		);
+		entryLiveRepository.getEntryTransferHistory = async (): Promise<EntryEventTransferRow[]> =>
+			transferRows;
+
+		try {
+			const context = makeContext(buildTestCoreData(1), []);
+			await expect(entriesService.getEntryTransferHistory(context, 84885, true)).rejects.toThrow(
+				/current season event bound/
+			);
 		} finally {
 			entryLiveRepository.getEntryTransferHistory = originalGetEntryTransferHistory;
 		}

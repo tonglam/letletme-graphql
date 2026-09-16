@@ -1,7 +1,7 @@
 # Public entry transfer-history rate-limit evidence
 
 This note records the read-only workload evidence used to set the
-`entryTransferHistory` root-field floor to 20 units. It supports the executable
+`entryTransferHistory` root-field floor to 215 units. It supports the executable
 registry in `src/graphql/limits.ts`; it is not a sustained capacity claim.
 
 ## Run identity and method
@@ -10,6 +10,8 @@ registry in `src/graphql/limits.ts`; it is not a sustained capacity claim.
 - Dataset revision: `7808`.
 - High-fanout public entry: `702902`, selected with a read-only Data Platform
   query. It had 94 transfer rows spanning three events (events 2 through 4).
+  The current dataset is at GW4, so no mature-season entry is available for a
+  direct 38-event measurement.
 - Operations: `entryTransferHistory` (the normal history projection) and
   `entryTransferHistory_live` (`live: true`, including live transfer fields).
 - Samples: 20 per operation, each on a fresh revisioned cache namespace, with a
@@ -34,28 +36,33 @@ repository during the run:
 | `entryTransferHistory` | 20 | 370.1 | 380.4 | 380.6 | 20/20 |
 | `entryTransferHistory_live` | 20 | 1,063.1 | 1,123.3 | 1,323.5 | 20/20 |
 
-The live projection is the dominant path and is the value used for the floor
-derivation. This is an interim `n=20` measurement for admission sizing; a
+The live projection is the dominant path. The resolver now fails closed when
+source data contains more than 38 distinct events, the FPL regular-season
+bound. This explicit bound prevents a malformed or cross-season read from
+turning the live enrichment loop into an unbounded workload. The current
+three-event run is an interim `n=20` measurement for admission sizing; a
 formal p95 capacity profile still requires the separate 100-sample production
 environment run.
 
 ## Floor derivation
 
 The current Mini public weighted buckets refill at 10 units/second for an
-anonymous device and 15 units/second for a session. The measured live p95 is
-1.1233 seconds. The next existing five-unit tier that covers the longer
-session bucket during that observed service time is:
+anonymous device and 15 units/second for a session. The measured three-event
+live p95 is 1.1233 seconds. Pricing the measured path across the explicit
+38-event season bound gives this conservative upper-bound tier:
 
 ```text
-ceil(max(10, 15) * 1.1233 / 5) * 5 = 20 units
+ceil(max(10, 15) * 1.1233 * (38 / 3) / 5) * 5 = 215 units
 ```
 
-This makes one high-fanout `live=true` read consume the measured heavy path's
-admission budget instead of allowing it to be repeated at the ordinary
-one-request cost. The value is asserted by the GraphQL limit and governance
-manifest tests, and the generated domain manifest records the same 20-unit
-budget. Re-run this benchmark and update the registry and this note together
-when the transfer query shape, dataset fan-out, or public bucket policy changes.
+This uses the observed worst path as a per-event upper-bound proxy and rounds
+up to the next existing five-unit tier. One season-sized `live=true` read can
+therefore consume the measured heavy path's admission budget instead of being
+repeated at the ordinary one-request cost. The value is asserted by the
+GraphQL limit and governance manifest tests, and the generated domain manifest
+records the same 215-unit budget. Re-run the benchmark with mature-season data
+and update the bound, registry, and this note together when the transfer query
+shape, dataset fan-out, or public bucket policy changes.
 
 ## Boundaries
 

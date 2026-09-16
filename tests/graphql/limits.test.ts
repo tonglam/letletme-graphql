@@ -623,7 +623,7 @@ describe("GraphQL request limits", () => {
 		expect(result).toMatchObject({
 			ok: true,
 			rootFields: ["entryTransferHistory"],
-			rateLimitCostUnits: 20,
+			rateLimitCostUnits: 215,
 		});
 	});
 
