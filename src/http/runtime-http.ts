@@ -39,8 +39,11 @@ export const jsonError = (
 	message: string,
 	corsHeaders: Record<string, string>,
 	extraHeaders: Record<string, string> = {}
-): Response =>
-	new Response(
+): Response => {
+	const hasRetryAfter = Object.keys(extraHeaders).some(
+		(name) => name.toLowerCase() === "retry-after"
+	);
+	return new Response(
 		JSON.stringify({
 			errors: [
 				{
@@ -56,11 +59,13 @@ export const jsonError = (
 			status,
 			headers: {
 				"Content-Type": "application/json",
+				...(status === 503 && !hasRetryAfter ? { "Retry-After": "30" } : {}),
 				...extraHeaders,
 				...corsHeaders,
 			},
 		}
 	);
+};
 
 export const graphQLMetricResult = (response: Response, outcome: string): GraphQLMetricResult => {
 	if (response.status === 429) return "rate_limited";
