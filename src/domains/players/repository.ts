@@ -278,7 +278,34 @@ export const buildPlayerPickerSql = (sort: Exclude<PlayerPickerSort, "AUTO">): s
 	LIMIT $9 OFFSET $10
 `;
 
+// Count the same filtered population without pagination. Removing LIMIT/OFFSET
+// also requires removing their parameter slots: PostgreSQL cannot infer unused
+// $9/$10 types when later revision parameters remain in the query.
+const pickerCountSource = buildPlayerPickerSql("NAME_ASC");
+export const PLAYER_PICKER_COUNT_SQL = (
+	pickerCountSource.slice(0, pickerCountSource.lastIndexOf("SELECT filtered.*")) +
+	"SELECT count(*)::integer AS total_count FROM filtered"
+).replace(/\$(1[1-4])\b/g, (_, index: string) => `$${Number(index) - 2}`);
+
 export const PLAYERS_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "players.picker-empty-count",
+		sql: PLAYER_PICKER_COUNT_SQL,
+		values: [
+			2026,
+			1,
+			"no-matching-player",
+			null,
+			null,
+			null,
+			null,
+			null,
+			"7",
+			"2026-08-10",
+			"2026-08-10T00:00:00.000Z",
+			"1",
+		],
+	},
 	{
 		name: "players.market-snapshot-pin",
 		sql: MARKET_SNAPSHOT_PIN_EXISTS_SQL,
@@ -985,11 +1012,9 @@ export const playersRepository: PlayersRepository = {
 		let totalCount = Number(result.rows[0]?.total_count ?? NaN);
 		if (!Number.isFinite(totalCount)) {
 			const countResult = await context.database.query<{ total_count: number | string }>(
-				`${sql.slice(0, sql.lastIndexOf("SELECT filtered.*"))}SELECT count(*)::integer AS total_count FROM filtered`,
+				PLAYER_PICKER_COUNT_SQL,
 				[
 					...pickerParams.slice(0, 8),
-					null,
-					null,
 					pinnedCoreRevision,
 					marketContext?.snapshotDate ?? null,
 					marketContext?.capturedAt ?? null,
