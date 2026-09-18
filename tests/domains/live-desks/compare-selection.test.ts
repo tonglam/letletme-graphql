@@ -20,6 +20,9 @@ describe("tournament comparison selection", () => {
 			{} as NonNullable<Awaited<ReturnType<typeof tournamentsService.getTournamentForMember>>>
 		);
 		spyOn(live, "readLivePublicationV2").mockResolvedValue(publication);
+		spyOn(tournamentsService, "getTournamentParticipants").mockResolvedValue(
+			[6953, 31056, 6733550].map((entryId) => ({ entryId, entryName: null, playerName: null }))
+		);
 		spyOn(live, "calcLivePointsForEntriesV2").mockImplementation(
 			async (_context, _event, ids) =>
 				({
@@ -51,6 +54,17 @@ describe("tournament comparison selection", () => {
 			liveDesksResolvers.Query.tournamentEntrySquads(
 				null,
 				{ entryId: 6953, tournamentId: 3, comparedEntryIds: [31056, 6733550], ref },
+				context
+			)
+		).rejects.toMatchObject({ extensions: { code: "FORBIDDEN" } });
+		expect(live.calcLivePointsForEntriesV2).not.toHaveBeenCalled();
+	});
+
+	it("rejects a selected team outside the tournament before calculating any scores", async () => {
+		await expect(
+			liveDesksResolvers.Query.tournamentEntrySquads(
+				null,
+				{ entryId: 6953, tournamentId: 3, comparedEntryIds: [31056, 99999], ref },
 				context
 			)
 		).rejects.toMatchObject({ extensions: { code: "FORBIDDEN" } });
