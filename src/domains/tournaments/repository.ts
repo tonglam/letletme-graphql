@@ -1712,6 +1712,12 @@ interface TournamentsRepository {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null>;
+	getTournamentMemberEntryIds(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryIds: number[]
+	): Promise<number[]>;
+
 	getManagedTournament(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -2137,6 +2143,35 @@ export const tournamentsRepository: TournamentsRepository = {
 			}
 		}
 		return getTournamentInfoUncached(context, tournamentId);
+	},
+
+	async getTournamentMemberEntryIds(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryIds: number[]
+	): Promise<number[]> {
+		if (entryIds.length === 0) return [];
+		const roster = await context.data
+			.read("competition.tournament_entries")
+			.select("entry_id")
+			.eq("tournament_id", tournamentId)
+			.in("entry_id", entryIds);
+		if (roster.error) throw new Error("Failed to verify tournament membership");
+		const members = new Set(
+			((roster.data as { entry_id: number }[] | null) ?? []).map((row) => row.entry_id)
+		);
+		const missing = entryIds.filter((id) => !members.has(id));
+		if (missing.length > 0) {
+			const official = await context.data
+				.read("competition.entry_leagues_with_tournament")
+				.select("entry_id")
+				.eq("tournament_id", tournamentId)
+				.in("entry_id", missing);
+			if (official.error) throw new Error("Failed to verify official league membership");
+			for (const row of (official.data as { entry_id: number }[] | null) ?? [])
+				members.add(row.entry_id);
+		}
+		return entryIds.filter((id) => members.has(id));
 	},
 
 	async getManagedTournament(

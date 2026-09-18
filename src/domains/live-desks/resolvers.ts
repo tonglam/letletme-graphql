@@ -586,11 +586,9 @@ export const liveDesksResolvers = {
 					extensions: { code: "LIVE_POINTS_UNAVAILABLE" },
 				});
 			const ids = [...new Set(args.comparedEntryIds)].slice(0, 2);
-			const participants = await tournamentsService.getTournamentParticipants(
-				context,
-				args.tournamentId
+			const participantIds = new Set(
+				await tournamentsService.getTournamentMemberEntryIds(context, args.tournamentId, ids)
 			);
-			const participantIds = new Set(participants.map((participant) => participant.entryId));
 			if (ids.some((entryId) => !participantIds.has(entryId))) {
 				throw new GraphQLError("Selected entry is not a tournament participant", {
 					extensions: { code: "FORBIDDEN" },
