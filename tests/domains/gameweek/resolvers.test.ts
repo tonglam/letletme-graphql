@@ -59,6 +59,45 @@ const withDurableBoardRows = (
 describe("gameweekDesk", () => {
 	beforeEach(() => clearLivePointsV2Lkg());
 
+	it("excludes nine points and retains both tied ten-point hauls in descending score order", async () => {
+		const baseCore = buildTestCoreData(1);
+		const core = buildTestCoreData(1, {
+			fixtures: baseCore.fixtures.map((fixture, index) =>
+				index === 0 ? { ...fixture, started: true } : fixture
+			),
+		});
+		const points = [9, 10, 14, 10];
+		const eventLives = buildTestEventLives(core, 1).map((row, index) => ({
+			...row,
+			inDreamTeam: index === 0,
+			totalPoints: points[index] ?? 0,
+		}));
+		const result = await graphql({
+			schema,
+			source: deskQuery,
+			variableValues: { eventId: 1 },
+			contextValue: buildSnapshotContext(
+				new TestRedis(
+					buildCorePublication("2627", 7, core),
+					buildLivePublication(core, 1, "2627", 8, { state: "live", eventLives })
+				),
+				{ databaseQuery: async () => ({ rows: [] }) }
+			),
+		});
+		expect(result.errors).toBeUndefined();
+		const desk = result.data?.gameweekDesk as {
+			boardsState: string;
+			hauls: Array<{ id: number; totalPoints: number }>;
+			dreamTeam: Array<{ id: number }>;
+		};
+		expect(desk.boardsState).toBe("AVAILABLE");
+		expect(desk.hauls.map((row) => row.totalPoints)).toEqual([14, 10, 10]);
+		expect(desk.hauls.map((row) => row.id).sort((a, b) => a - b)).toEqual(
+			[core.players[1]!.id, core.players[2]!.id, core.players[3]!.id].sort((a, b) => a - b)
+		);
+		expect(desk.dreamTeam.map((row) => row.id)).toEqual([core.players[0]!.id]);
+	});
+
 	it("keeps the current gameweek scheduled until a fixture starts", async () => {
 		const core = buildTestCoreData(1);
 		const redis = new TestRedis(buildCorePublication("2627", 7, core));
