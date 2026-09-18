@@ -60,6 +60,14 @@ export const tournamentsService = {
 		return tournamentsRepository.getTournamentForMember(context, tournamentId, entryId);
 	},
 
+	getTournamentMemberEntryIds(
+		context: GraphQLContext,
+		tournamentId: number,
+		entryIds: number[]
+	): Promise<number[]> {
+		return tournamentsRepository.getTournamentMemberEntryIds(context, tournamentId, entryIds);
+	},
+
 	getManagedTournament(
 		context: GraphQLContext,
 		tournamentId: number,
