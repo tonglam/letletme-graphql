@@ -585,7 +585,7 @@ export const liveDesksResolvers = {
 				throw new GraphQLError("Live Points V2 publication is unavailable", {
 					extensions: { code: "LIVE_POINTS_UNAVAILABLE" },
 				});
-			const ids = [...new Set([args.entryId, ...args.comparedEntryIds])].slice(0, 2);
+			const ids = [...new Set(args.comparedEntryIds)].slice(0, 2);
 			const result = await calcLivePointsForEntriesV2(context, args.ref.eventId, ids);
 			return {
 				tournamentId: args.tournamentId,
