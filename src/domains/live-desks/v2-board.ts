@@ -468,7 +468,8 @@ export const withBoardReadDelivery = (
 	freshnessPublication?: Pick<
 		LivePublicationReadV2["publication"],
 		"sourceCheckedAt" | "expectedNextCheckAt"
-	>
+	>,
+	observedLeaguePublication?: LeagueLiveManifestV2
 ): EntryLiveCompetitionBoardV2 => {
 	// The cache key pins the immutable league publication. Its recorded source
 	// is only the provenance of the request that built the projection, not an
@@ -479,6 +480,20 @@ export const withBoardReadDelivery = (
 	const effectiveServedFrom = servedFrom;
 	return {
 		...board,
+		// Refresh only mutable cadence metadata. The cached projection retains its
+		// content revision, scope, references and content/publication timestamps.
+		// Process-LKG callers have no validated observation and keep old cadence.
+		publication: observedLeaguePublication
+			? {
+					...board.publication,
+					times: {
+						...board.publication.times,
+						sourceCheckedAt: observedLeaguePublication.times.sourceCheckedAt,
+						expectedNextCheckAt: observedLeaguePublication.times.expectedNextCheckAt,
+						checkpointedAt: observedLeaguePublication.times.checkpointedAt,
+					},
+				}
+			: board.publication,
 		servedFrom: effectiveServedFrom,
 		// Rebase even when the authority source is unchanged. A projection can be
 		// served from the cache after its cadence boundary, so returning the object
@@ -885,7 +900,8 @@ const projectBoardRead = async (
 		return withBoardReadDelivery(
 			cached.value,
 			worstServedFrom(read.servedFrom, global.servedFrom),
-			global.publication
+			global.publication,
+			read.publication
 		);
 	}
 	const existing = projectionInFlight.get(key);
@@ -894,7 +910,8 @@ const projectBoardRead = async (
 			withBoardReadDelivery(
 				value,
 				worstServedFrom(read.servedFrom, global.servedFrom),
-				global.publication
+				global.publication,
+				read.publication
 			)
 		);
 	const load = projectCompleteBoard(context, read, global)
