@@ -254,6 +254,31 @@ describe("My Tournament Review V2 repository", () => {
 		);
 	});
 
+	it("selects the latest previous head only after revision and content validation", () => {
+		const start = MY_TOURNAMENT_REVIEW_CATALOG_SQL.indexOf(
+			"SELECT review_head.event_id::integer AS previous_ready_event_id"
+		);
+		expect(start).toBeGreaterThan(-1);
+		const end = MY_TOURNAMENT_REVIEW_CATALOG_SQL.indexOf(") previous_ready ON true", start);
+		const previous = MY_TOURNAMENT_REVIEW_CATALOG_SQL.slice(start, end);
+		const orderedLimit = previous.indexOf("ORDER BY review_head.event_id DESC");
+		expect(orderedLimit).toBeGreaterThan(-1);
+		expect(previous.slice(orderedLimit)).toMatch(
+			/ORDER BY review_head.event_id DESC\s+LIMIT 1\s*$/
+		);
+		for (const predicate of [
+			"publication.content_sha256 = review_head.content_sha256",
+			"ready_obligation.state = 'READY'",
+			"ready_obligation.ready_revision = review_head.revision",
+			"review_head.event_id < finalized.latest_finalized_event_id",
+			"date_trunc('milliseconds', previous_event.data_checked_at)",
+			"jsonb_array_elements",
+		]) {
+			expect(previous.indexOf(predicate)).toBeGreaterThan(-1);
+			expect(previous.indexOf(predicate)).toBeLessThan(orderedLimit);
+		}
+	});
+
 	it("normalizes PostgreSQL checkpoint precision on every publication read path", () => {
 		const readQueries = [
 			MY_TOURNAMENT_REVIEW_CATALOG_SQL,
