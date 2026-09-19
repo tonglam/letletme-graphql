@@ -158,6 +158,18 @@ jobs:
         working-directory: data-platform
         run: bun install --frozen-lockfile
 
+      - name: Verify previous ready publication selection in isolated PostgreSQL
+        env:
+          PGPASSWORD: postgres
+          CATALOG_FIXTURE_URL: postgresql://postgres:postgres@127.0.0.1:5432/catalog_regression
+        run: |
+          createdb -h 127.0.0.1 -U postgres catalog_regression
+          psql "$CATALOG_FIXTURE_URL" -v ON_ERROR_STOP=1 -f tests/fixtures/catalog-previous-ready.sql
+          sed -n '/^CREATE OR REPLACE FUNCTION extensions.strip_review_operational_metadata/,/^\$function\$;/p' \
+            data-platform/migrations/0090_my_tournament_review_v2_1_hard_cut.sql \
+            | psql "$CATALOG_FIXTURE_URL" -v ON_ERROR_STOP=1
+          bun test tests/domains/my-fpl/catalog-previous-ready.integration.test.ts
+
       - name: Apply current Data Platform baseline
         working-directory: data-platform
         env:

@@ -1848,7 +1848,7 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		LIMIT 1
 	) head ON true
 	LEFT JOIN LATERAL (
-		SELECT max(review_head.event_id)::integer AS previous_ready_event_id
+		SELECT review_head.event_id::integer AS previous_ready_event_id
 		FROM competition.tournament_review_heads review_head
 		JOIN competition.tournament_review_publications publication
 		  ON publication.season_id = review_head.season_id
@@ -1870,6 +1870,8 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		  AND review_head.tournament_id = tournament.tournament_id
 		  AND (finalized.latest_finalized_event_id IS NULL OR review_head.event_id < finalized.latest_finalized_event_id)
 		  ${reviewPublicationCoherenceSql("publication", "previous_event")}
+		ORDER BY review_head.event_id DESC
+		LIMIT 1
 	) previous_ready ON true
 	LEFT JOIN LATERAL (
 			SELECT state AS latest_state, format, eligible_at, ready_at, last_observed_at,
