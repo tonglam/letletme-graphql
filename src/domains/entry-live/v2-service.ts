@@ -2879,7 +2879,7 @@ const legalFormation = (
 	);
 };
 
-const calculateLineup = (
+export const calculateLineup = (
 	picks: readonly Pick[],
 	players: ReadonlyMap<number, CorePlayerData>,
 	liveByElement: ReadonlyMap<number, EventLiveRow>,
@@ -2923,7 +2923,6 @@ const calculateLineup = (
 				if (
 					current.has(candidate.element) ||
 					substitutions.has(candidate.element) ||
-					!played(liveByElement.get(candidate.element)) ||
 					playerHasCompletedEvent(
 						players.get(candidate.element)!,
 						liveByElement.get(candidate.element),
@@ -2931,6 +2930,9 @@ const calculateLineup = (
 					)
 				)
 					continue;
+				// A pending first-choice substitute still owns this bench slot. Do
+				// not fall through to a later player who has already appeared until
+				// the higher-priority substitute is confirmed as a no-show.
 				const missingType = players.get(missingPick.element)?.type;
 				const candidateType = players.get(candidate.element)?.type;
 				if (candidateType === 1 ? missingType !== 1 : missingType === 1) continue;

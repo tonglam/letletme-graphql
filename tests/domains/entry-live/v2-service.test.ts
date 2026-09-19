@@ -5,13 +5,16 @@ import { schema } from "../../../src/graphql/schema";
 import {
 	calcLivePointsForEntriesV2,
 	calcLivePointsByEntryV2,
+	calculateLineup,
 	clearLivePointsV2Lkg,
 	EVENT_PLAYER_IDENTITY_SQL,
 	isValidEventLiveCheckpointPayload,
 	loadLiveSnapshotMetaV2,
 	readLivePublicationV2,
 	readLivePublicationByRefV2,
+	type EventLiveRow,
 } from "../../../src/domains/entry-live/v2-service";
+import type { CorePlayerData } from "../../../src/infra/data-snapshot";
 import {
 	buildCorePublication,
 	buildSnapshotContext,
@@ -215,6 +218,105 @@ const buildV2Redis = (
 };
 
 describe("Live Points V2 projection", () => {
+	it("keeps a pending first bench player ahead of a later played substitute", () => {
+		const playerTypes = [1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 1, 3, 2, 2] as const;
+		const teamIds = playerTypes.map((_, index) => index + 1);
+		const picks = playerTypes.map((_, index) => {
+			const position = index + 1;
+			return {
+				element: 100 + position,
+				position,
+				multiplier: position <= 11 ? 1 : 0,
+				isCaptain: position === 1,
+				isViceCaptain: position === 2,
+			};
+		}) as Parameters<typeof calculateLineup>[0];
+		const players = new Map<number, CorePlayerData>(
+			playerTypes.map((type, index) => {
+				const id = 101 + index;
+				const teamId = teamIds[index]!;
+				return [
+					id,
+					{
+						id,
+						code: id,
+						type,
+						teamId,
+						price: 0,
+						startPrice: 0,
+						firstName: null,
+						secondName: null,
+						webName: `Player ${id}`,
+						totalPoints: 0,
+						selectedByPercent: null,
+					},
+				] as const;
+			})
+		);
+		const live = (elementId: number, minutes: number): EventLiveRow => ({
+			eventId: 1,
+			elementId,
+			minutes,
+			goalsScored: 0,
+			assists: 0,
+			cleanSheets: 0,
+			goalsConceded: 0,
+			ownGoals: 0,
+			penaltiesSaved: 0,
+			penaltiesMissed: 0,
+			yellowCards: 0,
+			redCards: 0,
+			saves: 0,
+			bonus: 0,
+			bps: 0,
+			defensiveContribution: 0,
+			starts: minutes > 0,
+			expectedGoals: null,
+			expectedAssists: null,
+			expectedGoalInvolvements: null,
+			expectedGoalsConceded: null,
+			inDreamTeam: false,
+			totalPoints: 0,
+			fixtureBreakdown: [],
+		});
+		const liveByElement = new Map<number, EventLiveRow>(
+			picks.map((pick) => [pick.element, live(pick.element, 90)])
+		);
+		// Three starting defenders are still pending. João Pedro is a confirmed
+		// no-show, while Groß is the pending first outfield substitute and Ajer
+		// is the later substitute who has already played.
+		for (const position of [2, 3, 4]) liveByElement.set(100 + position, live(100 + position, 0));
+		liveByElement.set(111, live(111, 0));
+		liveByElement.set(112, live(112, 0));
+		liveByElement.set(113, live(113, 0));
+		liveByElement.set(115, live(115, 0));
+		const fixture = (teamH: number, teamA: number, finished: boolean) => ({
+			id: teamH * 100 + teamA,
+			code: teamH * 100 + teamA,
+			event: 1,
+			finished,
+			finishedProvisional: false,
+			kickoffTime: "2026-08-25T10:00:00.000Z",
+			minutes: finished ? 90 : 0,
+			started: finished,
+			teamH,
+			teamA,
+			teamHScore: finished ? 1 : null,
+			teamAScore: finished ? 1 : null,
+			teamHDifficulty: 3,
+			teamADifficulty: 3,
+		});
+		const fixtures = teamIds.map((teamId) =>
+			fixture(teamId, 1000 + teamId, ![2, 3, 4, 12, 13].includes(teamId))
+		) as Parameters<typeof calculateLineup>[4];
+
+		const result = calculateLineup(picks, players, liveByElement, "NONE", fixtures);
+
+		expect(result.autoSubs.get(113)).toBe(111);
+		expect(result.active.has(113)).toBe(true);
+		expect(result.active.has(114)).toBe(false);
+	});
+
 	it("requires event-live checkpoint payload evidence to match its metadata", () => {
 		const eventLives = buildTestEventLives(buildTestCoreData(1), 1);
 		const payload = canonicalJson(eventLives);
