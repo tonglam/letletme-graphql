@@ -480,10 +480,20 @@ export const withBoardReadDelivery = (
 	const effectiveServedFrom = servedFrom;
 	return {
 		...board,
-		// Same-generation source checks refresh cadence without changing scores.
-		// Only a validated read for this projection key supplies the new manifest;
-		// process-LKG callers retain the cached publication and its old timestamps.
-		publication: observedLeaguePublication ?? board.publication,
+		// Refresh only mutable cadence metadata. The cached projection retains its
+		// content revision, scope, references and content/publication timestamps.
+		// Process-LKG callers have no validated observation and keep old cadence.
+		publication: observedLeaguePublication
+			? {
+					...board.publication,
+					times: {
+						...board.publication.times,
+						sourceCheckedAt: observedLeaguePublication.times.sourceCheckedAt,
+						expectedNextCheckAt: observedLeaguePublication.times.expectedNextCheckAt,
+						checkpointedAt: observedLeaguePublication.times.checkpointedAt,
+					},
+				}
+			: board.publication,
 		servedFrom: effectiveServedFrom,
 		// Rebase even when the authority source is unchanged. A projection can be
 		// served from the cache after its cadence boundary, so returning the object

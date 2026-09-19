@@ -369,6 +369,31 @@ describe("live competition board cached delivery provenance", () => {
 			freshnessPublication,
 			observedPublication
 		);
+		const alteredPublication: LeagueLiveManifestV2 = {
+			...observedPublication,
+			state: "FINALIZED",
+			revisions: { ...observedPublication.revisions, content: "x".repeat(64) },
+			counts: { ...observedPublication.counts, expected: 999 },
+			items: {
+				...observedPublication.items,
+				index: { ...observedPublication.items.index, key: "other-index" },
+			},
+			times: {
+				...observedPublication.times,
+				contentUpdatedAt: "2099-08-30T00:01:00.000Z",
+				publishedAt: "2099-08-30T00:02:00.000Z",
+			},
+		};
+		const cadenceOnly = withBoardReadDelivery(
+			cached,
+			"REDIS_CURRENT",
+			freshnessPublication,
+			alteredPublication
+		);
+		expect(cadenceOnly.publication).toEqual({
+			...cached.publication,
+			times: observedPublication.times,
+		});
 		expect(refreshed.publication.times).toEqual(observedPublication.times);
 		expect(refreshed.publication.publicationId).toBe(cached.publication.publicationId);
 		expect(refreshed.publication.generation).toBe(cached.publication.generation);
