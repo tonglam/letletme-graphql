@@ -677,6 +677,54 @@ describe("Live Points V2 projection", () => {
 		expect(result).toBeNull();
 	});
 
+	it("retains validated exact LKG when current fixture coverage fails", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const warm = await readLivePublicationV2(buildSnapshotContext(redis), 1);
+		expect(warm?.servedFrom).toBe("REDIS_CURRENT");
+		const core = buildTestCoreData(1);
+		core.fixtures.push({ ...core.fixtures[0]!, id: 999, eventId: 1 });
+		for (const [key, value] of buildCorePublication("2627", 8, core).store)
+			redis.values.set(key, value);
+		const result = await readLivePublicationByRefV2(
+			buildSnapshotContext(redis, { dataRevision: "core-8" }),
+			1,
+			{
+				publicationId: warm!.publication.publicationId,
+				generation: warm!.publication.generation,
+			}
+		);
+		expect(result?.servedFrom).toBe("PROCESS_LKG");
+		expect(result?.publication.revisions).toEqual(warm?.publication.revisions);
+	});
+
+	it("does not load unrelated payloads when an exact reference survives only in LKG", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const warm = await readLivePublicationV2(buildSnapshotContext(redis), 1);
+		expect(warm?.servedFrom).toBe("REDIS_CURRENT");
+		for (const pointer of ["active", "previous"]) {
+			const key = `llm:data:v2:fpl:live:2627:1:${pointer}`;
+			const raw = redis.values.get(key);
+			if (!raw) continue;
+			const manifest = JSON.parse(raw) as { publicationId: string };
+			manifest.publicationId = "00000000-0000-4000-8000-000000000999";
+			redis.values.set(key, JSON.stringify(manifest));
+		}
+		let payloadReads = 0;
+		const originalMget = redis.mget.bind(redis);
+		redis.mget = async (...keys) => {
+			payloadReads++;
+			return originalMget(...keys);
+		};
+		const result = await readLivePublicationByRefV2(buildSnapshotContext(redis), 1, {
+			publicationId: warm!.publication.publicationId,
+			generation: warm!.publication.generation,
+		});
+		expect(result?.servedFrom).toBe("PROCESS_LKG");
+		expect(payloadReads).toBe(0);
+	});
+
 	it("keeps repeated healthy exact-reference reads current instead of reporting fallback", async () => {
 		clearLivePointsV2Lkg();
 		const redis = buildV2Redis();

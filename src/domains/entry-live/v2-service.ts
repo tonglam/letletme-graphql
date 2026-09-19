@@ -1121,11 +1121,12 @@ const readRedisGlobalCandidate = async (
 	eventId: number,
 	pointer: "active" | "previous",
 	expectedPlayerIds?: ReadonlySet<number>,
-	expectedFixtureIds?: ReadonlySet<number> | null
+	expectedFixtureIds?: ReadonlySet<number> | null,
+	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
 	const raw = await redis.get(liveKey(season, eventId, pointer));
 	const publication = parseLivePublication(raw, season, eventId);
-	if (!publication) return null;
+	if (!publication || !matchesPublicationRef(publication, expectedPublicationRef)) return null;
 	const values = await redis.mget(
 		publication.items.eventLive.key,
 		publication.items.fixtures.key,
@@ -1957,7 +1958,8 @@ const readRedisGlobal = (
 				eventId,
 				"active",
 				expectedPlayerIds,
-				expectedFixtureIds
+				expectedFixtureIds,
+				expectedPublicationRef
 			);
 			if (
 				redisValue &&
@@ -1972,7 +1974,8 @@ const readRedisGlobal = (
 				eventId,
 				"previous",
 				expectedPlayerIds,
-				expectedFixtureIds
+				expectedFixtureIds,
+				expectedPublicationRef
 			);
 			if (
 				previous &&
@@ -2152,7 +2155,7 @@ const readGlobal = async (
 			expectedFixtureIds
 		);
 		if (completeDatabaseGlobal) rememberGlobalLkg(context, eventId, completeDatabaseGlobal);
-		return completeDatabaseGlobal;
+		return completeDatabaseGlobal ?? exactLkg;
 	}
 
 	// Probe Redis before consulting process LKG.  A warmed LKG is a fallback, not
