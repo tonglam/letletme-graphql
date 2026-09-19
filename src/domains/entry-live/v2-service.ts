@@ -2090,9 +2090,10 @@ const readGlobal = async (
 	expectedScoreCoreRevision?: string,
 	expectedPublicationRef?: LivePublicationRefV2
 ): Promise<GlobalRead | null> => {
-	// A process LKG is only populated after the complete publication boundary
-	// below has accepted the payload.  An exact retained reference can use that
-	// immutable, already-validated value without reacquiring mutable Core.
+	// An exact publication reference is already a producer-side coherence
+	// decision. Read that Redis snapshot before consulting the mutable Core read
+	// model, but do not return it until the event roster and fixture sets have
+	// been checked. A checksum-valid partial payload must never become READY.
 	if (expectedPublicationRef) {
 		const exactLkg = readGlobalLkg(
 			context,
@@ -2100,14 +2101,6 @@ const readGlobal = async (
 			expectedScoreCoreRevision,
 			expectedPublicationRef
 		);
-		if (exactLkg) return exactLkg;
-	}
-
-	// An exact publication reference is already a producer-side coherence
-	// decision. Read that Redis snapshot before consulting the mutable Core read
-	// model, but do not return it until the event roster and fixture sets have
-	// been checked. A checksum-valid partial payload must never become READY.
-	if (expectedPublicationRef) {
 		const exactRedisCandidate = await readRedisGlobal(
 			context,
 			eventId,
@@ -2116,8 +2109,11 @@ const readGlobal = async (
 			expectedScoreCoreRevision,
 			expectedPublicationRef
 		);
+		// A warmed exact-reference cache is a fallback, not current-source proof.
+		// Probe Redis first; preserve the no-database outage path for valid LKG.
+		if (!exactRedisCandidate && exactLkg) return exactLkg;
 		const core = await readCore(context);
-		if (!core) return null;
+		if (!core) return exactLkg;
 		const expectedPlayerIds = await expectedPlayerIdsForEvent(context, eventId, core);
 		const expectedFixtureIds = await expectedFixtureIdsForEvent(context, eventId);
 		const exactRedis = requireCompleteGlobalPublication(

@@ -677,6 +677,22 @@ describe("Live Points V2 projection", () => {
 		expect(result).toBeNull();
 	});
 
+	it("keeps repeated healthy exact-reference reads current instead of reporting fallback", async () => {
+		clearLivePointsV2Lkg();
+		const redis = buildV2Redis();
+		const active = JSON.parse(redis.values.get("llm:data:v2:fpl:live:2627:1:active")!) as {
+			publicationId: string;
+			generation: number;
+		};
+		const ref = { publicationId: active.publicationId, generation: active.generation };
+		const first = await readLivePublicationByRefV2(buildSnapshotContext(redis), 1, ref);
+		const second = await readLivePublicationByRefV2(buildSnapshotContext(redis), 1, ref);
+		expect(first?.servedFrom).toBe("REDIS_CURRENT");
+		expect(second?.servedFrom).toBe("REDIS_CURRENT");
+		expect(second?.publication.publicationId).toBe(first?.publication.publicationId);
+		expect(second?.publication.revisions).toEqual(first?.publication.revisions);
+	});
+
 	it("serves an exact league publication from process LKG before PostgreSQL", async () => {
 		clearLivePointsV2Lkg();
 		const warmRedis = buildV2Redis();
@@ -708,6 +724,21 @@ describe("Live Points V2 projection", () => {
 
 		expect(result?.servedFrom).toBe("PROCESS_LKG");
 		expect(databaseCalls).toBe(0);
+		const recovered = await readLivePublicationByRefV2(buildSnapshotContext(warmRedis), 1, {
+			publicationId: active.publicationId,
+			generation: active.generation,
+		});
+		expect(recovered?.servedFrom).toBe("REDIS_CURRENT");
+		expect(recovered?.publication.revisions).toEqual(result?.publication.revisions);
+
+		// A warmed projection cannot make a corrupt current payload authoritative.
+		warmRedis.values.set("llm:data:v2:fpl:live:2627:1:1:eventLive", "[]");
+		const corrupt = await readLivePublicationByRefV2(buildSnapshotContext(warmRedis), 1, {
+			publicationId: active.publicationId,
+			generation: active.generation,
+		});
+		expect(corrupt?.servedFrom).toBe("PROCESS_LKG");
+		expect(corrupt?.publication.revisions).toEqual(result?.publication.revisions);
 	});
 
 	it("does not reuse an entry LKG against a changed global revision vector", async () => {
