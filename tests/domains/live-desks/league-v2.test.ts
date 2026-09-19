@@ -2,11 +2,19 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "bun:test";
 
 import {
+	type LeagueLiveManifestV2,
 	liveDeliveryFreshnessStateV2,
 	readLeagueLiveHeadV2,
 	readLeagueLivePublicationV2,
 } from "../../../src/domains/live-desks/league-v2";
-import { buildSnapshotContext, TestRedis } from "../../helpers/data-publication";
+import { readEntryLiveCompetitionBoardV2 } from "../../../src/domains/live-desks/v2-board";
+import type { LivePublicationReadV2 } from "../../../src/domains/entry-live/v2-service";
+import {
+	buildSnapshotContext,
+	buildLivePublication,
+	buildTestCoreData,
+	TestRedis,
+} from "../../helpers/data-publication";
 
 const canonicalize = (value: unknown): unknown => {
 	if (Array.isArray(value)) return value.map(canonicalize);
@@ -278,5 +286,54 @@ describe("live league freshness state", () => {
 		expect(liveDeliveryFreshnessStateV2(times, Date.parse("2026-08-30T00:01:01.000Z"))).toBe(
 			"DEGRADED"
 		);
+	});
+});
+
+describe("cached board same-generation cadence", () => {
+	it("uses the newly validated manifest on a second complete-board read", async () => {
+		const fixture = buildRedis(901, "LIVE_ACTIVE", false, []);
+		const scope = {
+			season: fixture.season,
+			eventId: fixture.eventId,
+			tournamentId: fixture.tournamentId,
+			mode: "CLASSIC" as const,
+		};
+		const key = `llm:data:v2:fpl:league-live:2627:1:901:classic:active`;
+		const publication = JSON.parse(fixture.redis.values.get(key)!) as LeagueLiveManifestV2;
+		const globalManifest = buildLivePublication(buildTestCoreData())
+			.manifest as LivePublicationReadV2["publication"];
+		publication.globalRef = {
+			publicationId: globalManifest.publicationId,
+			generation: globalManifest.generation,
+		};
+		publication.revisions.scoreCore = globalManifest.revisions.scoreCore.revision;
+		publication.revisions.fixtureIdentity = globalManifest.revisions.fixtureIdentity.revision;
+		publication.revisions.rules = globalManifest.revisions.rules.revision;
+		publication.revisions.algorithm = hash("live-league-v2:classic:1");
+		fixture.redis.values.set(key, JSON.stringify(publication));
+		const global: LivePublicationReadV2 = {
+			publication: globalManifest,
+			eventLives: [],
+			fixtures: [],
+			servedFrom: "REDIS_CURRENT",
+		};
+		const first = await readEntryLiveCompetitionBoardV2(
+			buildSnapshotContext(fixture.redis),
+			scope,
+			global
+		);
+		expect(first).not.toBeNull();
+		publication.times.sourceCheckedAt = "2099-08-30T00:00:00.000Z";
+		publication.times.expectedNextCheckAt = "2099-08-30T00:05:00.000Z";
+		fixture.redis.values.set(key, JSON.stringify(publication));
+		const second = await readEntryLiveCompetitionBoardV2(
+			buildSnapshotContext(fixture.redis),
+			scope,
+			global
+		);
+		expect(second?.publication.times).toEqual(publication.times);
+		expect(second?.publication.generation).toBe(first?.publication.generation);
+		expect(second?.boardRevision).toBe(first?.boardRevision);
+		expect(first?.publication.times.sourceCheckedAt).toBe("2026-08-30T00:00:00.000Z");
 	});
 });
