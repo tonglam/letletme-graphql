@@ -342,6 +342,44 @@ describe("live competition board cached delivery provenance", () => {
 		expectedNextCheckAt: "2099-08-30T00:00:30.000Z",
 	};
 
+	it("refreshes same-generation league cadence without changing cached scores or publication identity", () => {
+		const cached: EntryLiveCompetitionBoardV2 = {
+			publication: manifest,
+			servedFrom: "REDIS_CURRENT",
+			boardRevision: "board",
+			scoreCoreRevision: "score-core",
+			rows: [row(1, 10, 10)],
+			totalEntries: 1,
+			highestEventPoints: 10,
+			averageEventPoints: 10,
+		};
+		const oldTimes = { ...cached.publication.times };
+		const observedPublication = {
+			...cached.publication,
+			times: {
+				...cached.publication.times,
+				sourceCheckedAt: "2099-08-30T00:00:00.000Z",
+				expectedNextCheckAt: "2099-08-30T00:05:00.000Z",
+				checkpointedAt: "2099-08-30T00:00:01.000Z",
+			},
+		};
+		const refreshed = withBoardReadDelivery(
+			cached,
+			"REDIS_CURRENT",
+			freshnessPublication,
+			observedPublication
+		);
+		expect(refreshed.publication.times).toEqual(observedPublication.times);
+		expect(refreshed.publication.publicationId).toBe(cached.publication.publicationId);
+		expect(refreshed.publication.generation).toBe(cached.publication.generation);
+		expect(refreshed.boardRevision).toBe(cached.boardRevision);
+		expect(
+			refreshed.rows.map((item) => [item.entry, item.liveRank, item.score?.eventPoints])
+		).toEqual(cached.rows.map((item) => [item.entry, item.liveRank, item.score?.eventPoints]));
+		expect(cached.publication.times).toEqual(oldTimes);
+		expect(withBoardReadDelivery(cached, "PROCESS_LKG").publication).toBe(cached.publication);
+	});
+
 	it("recovers an exact cached projection after Redis current becomes readable again", () => {
 		const cachedRow = row(1, 10, 10);
 		cachedRow.score = {
