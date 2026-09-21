@@ -25,6 +25,7 @@ import {
 	canUseCurrentLiveH2HFallback,
 	officialH2HStandingsStateV2,
 	projectH2HSide,
+	selectH2HLiveFallbackEntryWindow,
 	tournamentResultChipToEnum,
 	tournamentStateToEnum,
 	tournamentsResolvers,
@@ -148,6 +149,19 @@ describe("official H2H live score projection", () => {
 				],
 			} as never)
 		).toBe(false);
+		expect(
+			cacheableH2HProjection({
+				matches: [
+					{
+						availability: "READY",
+						delivery: {
+							servedFrom: "REDIS_CURRENT",
+							reasonCodes: ["MATCH_LIVE_SCORE_FALLBACK_UNAVAILABLE"],
+						},
+					},
+				],
+			} as never)
+		).toBe(false);
 	});
 
 	it("uses the current provisional live score when the H2H snapshot is pending", async () => {
@@ -213,6 +227,38 @@ describe("official H2H live score projection", () => {
 				])
 			)
 		).toBe(true);
+		expect(
+			canUseCurrentLiveH2HFallback(
+				match,
+				new Map([
+					[101, live],
+					[
+						202,
+						{
+							...live,
+							entry: 202,
+							score: {
+								...live.score,
+								revisions: { ...live.score.revisions, generation: 6 },
+							},
+						},
+					],
+				])
+			)
+		).toBe(false);
+	});
+
+	it("selects complete H2H matches within the bounded live fallback window", () => {
+		expect(
+			selectH2HLiveFallbackEntryWindow(
+				[
+					{ entryIds: [1, 2], viewerMatch: false },
+					{ entryIds: [3, 4], viewerMatch: true },
+					{ entryIds: [5, 6], viewerMatch: false },
+				],
+				4
+			)
+		).toEqual({ entryIds: [3, 4, 1, 2], deferredEntryIds: [5, 6] });
 	});
 });
 

@@ -20,10 +20,7 @@ import {
 } from "../live-desks/h2h-v2";
 import { assertLiveTournamentAccessV2 } from "../live-desks/access-v2";
 import { liveDeliveryFreshnessStateV2 } from "../live-desks/league-v2";
-import {
-	MAX_TOURNAMENT_DESK_ENTRIES,
-	selectTournamentDeskEntryWindow,
-} from "../live-desks/tournament-entry-window";
+import { MAX_TOURNAMENT_DESK_ENTRIES } from "../live-desks/tournament-entry-window";
 import {
 	LIVE_POINTS_ALGORITHM_VERSION,
 	calcLivePointsForEntriesV2,
@@ -501,6 +498,13 @@ const h2hScoreReferenceFromProjectedSide = (
 	return isH2HScoreReference(reference) ? reference : null;
 };
 
+const sameH2HScoreCoreReference = (left: H2HScoreReference, right: H2HScoreReference): boolean =>
+	left.publicationId === right.publicationId &&
+	left.generation === right.generation &&
+	left.scoreCore === right.scoreCore &&
+	left.fixtureIdentity === right.fixtureIdentity &&
+	left.rules === right.rules;
+
 export const canUseCurrentLiveH2HFallback = (
 	match: H2HMatchPayloadV2,
 	currentLiveFallbacks: ReadonlyMap<number, LiveCalcDataV2>
@@ -508,12 +512,53 @@ export const canUseCurrentLiveH2HFallback = (
 	const realSides = [match.home, match.away].filter(
 		(side): side is H2HMatchSideV2 & { entryId: number } => side.entryId !== null && !side.isAverage
 	);
+	if (realSides.length === 0) return false;
+	const references = realSides.map((side) => {
+		const projected = projectH2HSideFromCurrentLive(side, currentLiveFallbacks.get(side.entryId));
+		return projected ? h2hScoreReferenceFromProjectedSide(projected) : null;
+	});
+	const first = references[0];
 	return (
-		realSides.length > 0 &&
-		realSides.every(
-			(side) => projectH2HSideFromCurrentLive(side, currentLiveFallbacks.get(side.entryId)) !== null
+		first !== null &&
+		first !== undefined &&
+		references.every(
+			(reference): reference is H2HScoreReference =>
+				reference !== null && sameH2HScoreCoreReference(first, reference)
 		)
 	);
+};
+
+type H2HLiveFallbackCandidate = {
+	entryIds: readonly number[];
+	viewerMatch: boolean;
+};
+
+export const selectH2HLiveFallbackEntryWindow = (
+	candidates: readonly H2HLiveFallbackCandidate[],
+	limit = MAX_TOURNAMENT_DESK_ENTRIES
+): { entryIds: number[]; deferredEntryIds: number[] } => {
+	if (!Number.isSafeInteger(limit) || limit <= 0) {
+		throw new RangeError("H2H live fallback entry limit must be a positive integer");
+	}
+	const normalized = candidates.map((candidate) => ({
+		entryIds: [...new Set(candidate.entryIds)],
+		viewerMatch: candidate.viewerMatch,
+	}));
+	const ordered = [
+		...normalized.filter((candidate) => candidate.viewerMatch),
+		...normalized.filter((candidate) => !candidate.viewerMatch),
+	];
+	const selected = new Set<number>();
+	for (const candidate of ordered) {
+		const newEntryIds = candidate.entryIds.filter((entryId) => !selected.has(entryId));
+		if (selected.size + newEntryIds.length > limit) continue;
+		for (const entryId of newEntryIds) selected.add(entryId);
+	}
+	const allEntryIds = new Set(normalized.flatMap((candidate) => candidate.entryIds));
+	return {
+		entryIds: [...selected],
+		deferredEntryIds: [...allEntryIds].filter((entryId) => !selected.has(entryId)),
+	};
 };
 
 const unavailableH2HDelivery = () => ({
@@ -670,14 +715,17 @@ const h2hMatchDelivery = (
 	base: ReturnType<typeof h2hLeagueDeliveryV2>,
 	global: LivePublicationReadV2 | null,
 	sideSources: readonly string[] = [],
-	extraReasonCodes: readonly string[] = []
+	extraReasonCodes: readonly string[] = [],
+	ignoreGlobal = false
 ) => {
-	const globalSource = global?.servedFrom ?? "UNAVAILABLE";
+	const globalSource = ignoreGlobal ? "REDIS_CURRENT" : (global?.servedFrom ?? "UNAVAILABLE");
 	const servedFrom = worstDeliverySource([base.servedFrom, globalSource, ...sideSources]);
 	const fallback = servedFrom !== "REDIS_CURRENT" && servedFrom !== "FINAL_RESULT";
 	const reasonCodes = new Set([...base.reasonCodes, ...extraReasonCodes]);
-	if (!global) reasonCodes.add("MATCH_GLOBAL_UNAVAILABLE");
-	else if (global.servedFrom !== "REDIS_CURRENT") reasonCodes.add("MATCH_GLOBAL_FALLBACK");
+	if (!ignoreGlobal) {
+		if (!global) reasonCodes.add("MATCH_GLOBAL_UNAVAILABLE");
+		else if (global.servedFrom !== "REDIS_CURRENT") reasonCodes.add("MATCH_GLOBAL_FALLBACK");
+	}
 	if (sideSources.some((source) => source !== "REDIS_CURRENT" && source !== "FINAL_RESULT"))
 		reasonCodes.add("MATCH_SIDE_FALLBACK");
 	return {
@@ -790,7 +838,8 @@ const h2hProjectionKey = (
 	tournamentId: number,
 	eventId: number,
 	head: H2HLeaguePublicationReadV2["publication"],
-	standings: H2HLeaguePublicationReadV2["publication"] | null
+	standings: H2HLeaguePublicationReadV2["publication"] | null,
+	viewerEntryId: number | null
 ): string =>
 	[
 		context.currentSeason.seasonCode,
@@ -800,6 +849,7 @@ const h2hProjectionKey = (
 		head.generation,
 		standings?.publicationId ?? "none",
 		standings?.generation ?? "none",
+		viewerEntryId ?? "none",
 	].join(":");
 
 const rememberH2HProjection = (key: string, value: TournamentOfficialH2HProjectionV2): void => {
@@ -834,6 +884,7 @@ export const cacheableH2HProjection = (value: TournamentOfficialH2HProjectionV2)
 			match.delivery.servedFrom !== "UNAVAILABLE" &&
 			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK") &&
 			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK_DEFERRED") &&
+			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK_UNAVAILABLE") &&
 			!match.delivery.reasonCodes.includes("MATCH_SOURCE_PENDING") &&
 			!match.delivery.reasonCodes.includes("MATCH_SOURCE_ERROR")
 	);
@@ -955,7 +1006,8 @@ const readTournamentOfficialH2HV2 = async (
 		tournamentId,
 		eventId,
 		headRead.publication,
-		standingsRead?.publication ?? null
+		standingsRead?.publication ?? null,
+		viewerEntryId
 	);
 	const headGlobalRead = await readLivePublicationByRefV2(
 		context,
@@ -966,8 +1018,22 @@ const readTournamentOfficialH2HV2 = async (
 		headGlobalRead && h2hPublicationMatchesGlobal(headRead.publication, headGlobalRead)
 			? headGlobalRead
 			: null;
+	const headMayNeedCurrentLive =
+		headGlobal === null ||
+		headRead.index.some((indexRow) => {
+			if (!("matchId" in indexRow)) return false;
+			const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
+			return (
+				match !== undefined &&
+				(match.state !== "READY" ||
+					!samePublicationRef(match.globalRef, headRead.publication.globalRef) ||
+					[match.home, match.away].some(
+						(side) => side.entryId !== null && !side.isAverage && side.input === null
+					))
+			);
+		});
 	const cached = readH2HProjection(projectionKey);
-	if (cached)
+	if (cached && !headMayNeedCurrentLive)
 		return rebaseH2HProjection(
 			cached,
 			headRead,
@@ -1036,28 +1102,26 @@ const readTournamentOfficialH2HV2 = async (
 			[match.home, match.away].some(
 				(side) => side.entryId !== null && !side.isAverage && side.input === null
 			);
-		const allCurrentLiveFallbackEntryIds = [
-			...new Set(
-				matchRows
-					.filter(({ match }) => matchMayNeedCurrentLive(match))
-					.flatMap(({ match }) => [match.home, match.away])
+		const fallbackCandidates = matchRows
+			.filter(({ match }) => matchMayNeedCurrentLive(match))
+			.map(({ match }) => {
+				const entryIds = [match.home, match.away]
 					.filter(
 						(side): side is H2HMatchSideV2 & { entryId: number } =>
 							side.entryId !== null && !side.isAverage
 					)
-					.map((side) => side.entryId)
-			),
-		];
-		const currentLiveFallbackEntryIds = selectTournamentDeskEntryWindow(
-			allCurrentLiveFallbackEntryIds,
-			viewerEntryId ?? -1,
+					.map((side) => side.entryId);
+				return {
+					entryIds,
+					viewerMatch: viewerEntryId !== null && entryIds.includes(viewerEntryId),
+				};
+			});
+		const fallbackWindow = selectH2HLiveFallbackEntryWindow(
+			fallbackCandidates,
 			MAX_TOURNAMENT_DESK_ENTRIES
-		).entryIds;
-		const deferredCurrentLiveFallbackEntryIds = new Set(
-			allCurrentLiveFallbackEntryIds.filter(
-				(entryId) => !currentLiveFallbackEntryIds.includes(entryId)
-			)
 		);
+		const currentLiveFallbackEntryIds = fallbackWindow.entryIds;
+		const deferredCurrentLiveFallbackEntryIds = new Set(fallbackWindow.deferredEntryIds);
 		let currentLiveFallbacks = new Map<number, LiveCalcDataV2>();
 		if (currentLiveFallbackEntryIds.length > 0) {
 			try {
@@ -1141,6 +1205,9 @@ const readTournamentOfficialH2HV2 = async (
 				});
 				const sourceReasonCodes = [
 					...(match.state !== "READY" ? [`MATCH_SOURCE_${match.state}`] : []),
+					...(matchMayNeedCurrentLive(match) && !useCurrentLive
+						? ["MATCH_LIVE_SCORE_FALLBACK_UNAVAILABLE"]
+						: []),
 					...(matchMayNeedCurrentLive(match) &&
 					[match.home, match.away].some(
 						(side) =>
@@ -1162,7 +1229,8 @@ const readTournamentOfficialH2HV2 = async (
 					[home, away].flatMap((side) =>
 						"servedFrom" in side && typeof side.servedFrom === "string" ? [side.servedFrom] : []
 					),
-					sourceReasonCodes
+					sourceReasonCodes,
+					useCurrentLive
 				);
 				matchResults[index] = {
 					officialMatchId: match.officialMatchId,
