@@ -511,6 +511,16 @@ const sameH2HScoreCoreReference = (left: H2HScoreReference, right: H2HScoreRefer
 	left.fixtureIdentity === right.fixtureIdentity &&
 	left.rules === right.rules;
 
+const h2hLiveFallbackShapeEligible = (match: H2HMatchPayloadV2): boolean => {
+	const realSideCount = [match.home, match.away].filter(
+		(side) => side.entryId !== null && !side.isAverage
+	).length;
+	const hasByePlaceholder = [match.home, match.away].some(
+		(side) => side.entryId === null && !side.isAverage && side.entryName === "Bye"
+	);
+	return match.isBye ? realSideCount === 1 && hasByePlaceholder : realSideCount === 2;
+};
+
 export const canUseCurrentLiveH2HFallback = (
 	match: H2HMatchPayloadV2,
 	currentLiveFallbacks: ReadonlyMap<number, LiveCalcDataV2>
@@ -518,11 +528,7 @@ export const canUseCurrentLiveH2HFallback = (
 	const realSides = [match.home, match.away].filter(
 		(side): side is H2HMatchSideV2 & { entryId: number } => side.entryId !== null && !side.isAverage
 	);
-	const hasByePlaceholder = [match.home, match.away].some(
-		(side) => side.entryId === null && !side.isAverage && side.entryName === "Bye"
-	);
-	if (realSides.length === 0 || (realSides.length === 1 && !(match.isBye && hasByePlaceholder)))
-		return false;
+	if (!h2hLiveFallbackShapeEligible(match)) return false;
 	const references = realSides.map((side) => {
 		const projected = projectH2HSideFromCurrentLive(side, currentLiveFallbacks.get(side.entryId));
 		return projected ? h2hScoreReferenceFromProjectedSide(projected) : null;
@@ -912,11 +918,20 @@ const rebaseH2HProjection = (
 			matchServedFrom,
 			match.delivery.state === "FINAL"
 		);
+		const preservedDegraded =
+			match.delivery.state === "DEGRADED" || match.delivery.state === "UNAVAILABLE";
+		const preservedStale = match.delivery.state === "STALE";
 		return {
 			...match,
 			delivery: {
 				...match.delivery,
-				state: matchFallback ? "DEGRADED" : deliveryState,
+				state: matchFallback
+					? "DEGRADED"
+					: preservedDegraded
+						? "DEGRADED"
+						: preservedStale && deliveryState === "FRESH"
+							? "STALE"
+							: deliveryState,
 				servedFrom: matchServedFrom,
 				reasonCodes: [
 					...new Set([
@@ -1037,7 +1052,8 @@ const readTournamentOfficialH2HV2 = async (
 			standingsGlobalValidated,
 			headGlobal === null
 		);
-	const existing = h2hProjectionInFlight.get(projectionKey);
+	const shouldCoalesceInFlight = !headMayNeedCurrentLive;
+	const existing = shouldCoalesceInFlight ? h2hProjectionInFlight.get(projectionKey) : undefined;
 	if (existing)
 		return rebaseH2HProjection(
 			await existing,
@@ -1095,7 +1111,7 @@ const readTournamentOfficialH2HV2 = async (
 				(side) => side.entryId !== null && !side.isAverage && side.input === null
 			);
 		const fallbackCandidates = matchRows
-			.filter(({ match }) => matchMayNeedCurrentLive(match))
+			.filter(({ match }) => matchMayNeedCurrentLive(match) && h2hLiveFallbackShapeEligible(match))
 			.map(({ match }) => {
 				const entryIds = [match.home, match.away]
 					.filter(
@@ -1284,13 +1300,23 @@ const readTournamentOfficialH2HV2 = async (
 			matches,
 		};
 	};
-	const load = project()
-		.then((value) => {
-			if (cacheableH2HProjection(value)) rememberH2HProjection(projectionKey, value);
-			return value;
-		})
-		.finally(() => h2hProjectionInFlight.delete(projectionKey));
-	h2hProjectionInFlight.set(projectionKey, load);
+	const load = project().then((value) => {
+		if (cacheableH2HProjection(value)) rememberH2HProjection(projectionKey, value);
+		return value;
+	});
+	if (shouldCoalesceInFlight) {
+		const trackedLoad = load.finally(() => {
+			if (h2hProjectionInFlight.get(projectionKey) === trackedLoad)
+				h2hProjectionInFlight.delete(projectionKey);
+		});
+		h2hProjectionInFlight.set(projectionKey, trackedLoad);
+		return rebaseH2HProjection(
+			await trackedLoad,
+			headRead,
+			standingsRead,
+			standingsGlobalValidated
+		);
+	}
 	return rebaseH2HProjection(await load, headRead, standingsRead, standingsGlobalValidated);
 };
 
