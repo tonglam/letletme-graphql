@@ -21,13 +21,20 @@ import {
 	h2hMatchRevisionVectorV2,
 	knockoutModeToEnum,
 	leagueTypeToEnum,
+	cacheableH2HProjection,
 	officialH2HStandingsStateV2,
+	projectH2HSide,
 	tournamentResultChipToEnum,
 	tournamentStateToEnum,
 	tournamentsResolvers,
 } from "../../../src/domains/tournaments/resolvers";
 import { tournamentsService } from "../../../src/domains/tournaments/service";
-import { h2hPublicationMatchesGlobal } from "../../../src/domains/live-desks/h2h-v2";
+import {
+	h2hPublicationMatchesGlobal,
+	type H2HMatchPayloadV2,
+	type H2HMatchSideV2,
+} from "../../../src/domains/live-desks/h2h-v2";
+import type { LiveCalcDataV2 } from "../../../src/domains/entry-live/v2-service";
 import type { GraphQLContext } from "../../../src/graphql/context";
 
 const h2hAlgorithmRevision = createHash("sha256")
@@ -99,6 +106,88 @@ describe("official H2H standings overlay state", () => {
 			)
 		).toBe("UPDATING");
 		expect(officialH2HStandingsStateV2(null)).toBe("UNAVAILABLE");
+	});
+});
+
+describe("official H2H live score projection", () => {
+	it("does not cache incomplete or live-fallback match projections", () => {
+		expect(
+			cacheableH2HProjection({
+				matches: [
+					{
+						availability: "PENDING",
+						delivery: { servedFrom: "REDIS_CURRENT", reasonCodes: [] },
+					},
+				],
+			} as never)
+		).toBe(false);
+		expect(
+			cacheableH2HProjection({
+				matches: [
+					{
+						availability: "READY",
+						delivery: {
+							servedFrom: "REDIS_CURRENT",
+							reasonCodes: ["MATCH_LIVE_SCORE_FALLBACK"],
+						},
+					},
+				],
+			} as never)
+		).toBe(false);
+	});
+
+	it("uses the current provisional live score when the H2H snapshot is pending", async () => {
+		const publicationId = "00000000-0000-4000-8000-000000000001";
+		const side = {
+			entryId: 101,
+			entryName: "Entry 101",
+			playerName: "Manager",
+			isAverage: false,
+			officialNetPoints: null,
+			inputPublicationId: null,
+			inputGeneration: null,
+			inputRevision: null,
+			inputContentUpdatedAt: null,
+			input: null,
+		} as H2HMatchSideV2;
+		const match = {
+			eventId: 1,
+			tournamentId: 7,
+			officialMatchId: 9,
+			state: "PENDING",
+			isBye: false,
+			globalRef: { publicationId, generation: 4 },
+			home: side,
+			away: { ...side, entryId: 202, entryName: "Entry 202" },
+		} as H2HMatchPayloadV2;
+		const live = {
+			availability: "READY",
+			entry: 101,
+			provisional: true,
+			score: {
+				eventPoints: 54,
+				netEventPoints: 52,
+				source: "FPL_EVENT_LIVE",
+				revisions: {
+					publicationId,
+					generation: 5,
+					scoreCore: "1".repeat(64),
+					fixtureIdentity: "2".repeat(64),
+					rules: "3".repeat(64),
+				},
+				times: { sourceCheckedAt: "2026-09-21T05:00:00.000Z" },
+			},
+			delivery: { servedFrom: "REDIS_CURRENT" },
+		} as unknown as LiveCalcDataV2;
+
+		const result = await projectH2HSide({} as GraphQLContext, null, match, side, live, true);
+
+		expect(result.availability).toBe("READY");
+		expect(result.points).toBe(54);
+		expect(result.netPoints).toBe(52);
+		expect("reasonCodes" in result ? result.reasonCodes : null).toEqual([
+			"MATCH_LIVE_SCORE_FALLBACK",
+		]);
 	});
 });
 
