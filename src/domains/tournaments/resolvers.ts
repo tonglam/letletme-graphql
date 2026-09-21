@@ -21,6 +21,10 @@ import {
 import { assertLiveTournamentAccessV2 } from "../live-desks/access-v2";
 import { liveDeliveryFreshnessStateV2 } from "../live-desks/league-v2";
 import {
+	MAX_TOURNAMENT_DESK_ENTRIES,
+	selectTournamentDeskEntryWindow,
+} from "../live-desks/tournament-entry-window";
+import {
 	LIVE_POINTS_ALGORITHM_VERSION,
 	calcLivePointsForEntriesV2,
 	projectLivePointsFromPublishedEntryV2,
@@ -39,6 +43,12 @@ type H2HScoreReference = {
 	scoreCore: string;
 	fixtureIdentity: string;
 	rules: string;
+	input: string;
+};
+
+type H2HLiveInputRevision = {
+	entryId: number;
+	revision: string;
 };
 
 const h2hScoreReference = (score: LiveCalcDataV2["score"]): H2HScoreReference => ({
@@ -47,6 +57,7 @@ const h2hScoreReference = (score: LiveCalcDataV2["score"]): H2HScoreReference =>
 	scoreCore: score.revisions.scoreCore,
 	fixtureIdentity: score.revisions.fixtureIdentity,
 	rules: score.revisions.rules,
+	input: score.revisions.input,
 });
 
 /**
@@ -392,6 +403,9 @@ export const projectH2HSide = async (
 	currentLive: LiveCalcDataV2 | null | undefined = null,
 	preferCurrentLive = false
 ) => {
+	const currentLiveFallback = preferCurrentLive
+		? projectH2HSideFromCurrentLive(side, currentLive)
+		: null;
 	if (match.isBye && side.entryId === null && !side.isAverage) {
 		return {
 			availability: "READY",
@@ -417,12 +431,10 @@ export const projectH2HSide = async (
 				};
 	}
 	if (preferCurrentLive) {
-		const fallback = projectH2HSideFromCurrentLive(side, currentLive);
-		if (fallback) return fallback;
+		if (currentLiveFallback) return currentLiveFallback;
 	}
 	if (match.state !== "READY") {
-		const fallback = projectH2HSideFromCurrentLive(side, currentLive);
-		if (fallback) return fallback;
+		if (currentLiveFallback) return currentLiveFallback;
 		return unavailableH2HSide(side, match.state);
 	}
 	if (
@@ -431,8 +443,7 @@ export const projectH2HSide = async (
 		global.publication.generation !== match.globalRef.generation ||
 		side.input === null
 	) {
-		const fallback = projectH2HSideFromCurrentLive(side, currentLive);
-		if (fallback) return fallback;
+		if (currentLiveFallback) return currentLiveFallback;
 		return unavailableH2HSide(side, "ERROR");
 	}
 	try {
@@ -461,14 +472,48 @@ export const projectH2HSide = async (
 			servedFrom: projected.delivery.servedFrom,
 		};
 	} catch (error) {
-		const fallback = projectH2HSideFromCurrentLive(side, currentLive);
-		if (fallback) return fallback;
+		if (currentLiveFallback) return currentLiveFallback;
 		context.logger.warn(
 			{ err: error, eventId: match.eventId, tournamentId: match.tournamentId },
 			"H2H live side projection unavailable"
 		);
 		return unavailableH2HSide(side, "ERROR");
 	}
+};
+
+const isH2HScoreReference = (value: unknown): value is H2HScoreReference => {
+	if (typeof value !== "object" || value === null) return false;
+	const reference = value as Partial<Record<keyof H2HScoreReference, unknown>>;
+	return (
+		typeof reference.publicationId === "string" &&
+		typeof reference.generation === "number" &&
+		typeof reference.scoreCore === "string" &&
+		typeof reference.fixtureIdentity === "string" &&
+		typeof reference.rules === "string" &&
+		typeof reference.input === "string"
+	);
+};
+
+const h2hScoreReferenceFromProjectedSide = (
+	side: Awaited<ReturnType<typeof projectH2HSide>>
+): H2HScoreReference | null => {
+	const reference = "scoreReference" in side ? side.scoreReference : null;
+	return isH2HScoreReference(reference) ? reference : null;
+};
+
+export const canUseCurrentLiveH2HFallback = (
+	match: H2HMatchPayloadV2,
+	currentLiveFallbacks: ReadonlyMap<number, LiveCalcDataV2>
+): boolean => {
+	const realSides = [match.home, match.away].filter(
+		(side): side is H2HMatchSideV2 & { entryId: number } => side.entryId !== null && !side.isAverage
+	);
+	return (
+		realSides.length > 0 &&
+		realSides.every(
+			(side) => projectH2HSideFromCurrentLive(side, currentLiveFallbacks.get(side.entryId)) !== null
+		)
+	);
 };
 
 const unavailableH2HDelivery = () => ({
@@ -492,7 +537,8 @@ export const h2hMatchRevisionVectorV2 = (
 	_headPublication: H2HLeaguePublicationReadV2["publication"],
 	match: H2HMatchPayloadV2,
 	global: LivePublicationReadV2 | null,
-	scoreReference: H2HScoreReference | null = null
+	scoreReference: H2HScoreReference | null = null,
+	liveInputRevisions: readonly H2HLiveInputRevision[] = []
 ) => {
 	const target =
 		global && samePublicationRef(global.publication, match.globalRef) ? global.publication : null;
@@ -500,12 +546,15 @@ export const h2hMatchRevisionVectorV2 = (
 		scoreReference?.[name] ??
 		target?.revisions[name].revision ??
 		revisionHash({ unavailable: name, globalRef: match.globalRef });
+	const liveInputRevisionByEntryId = new Map(
+		liveInputRevisions.map(({ entryId, revision }) => [entryId, revision])
+	);
 	const sides = [match.home, match.away];
 	const realSides = sides
 		.filter((side) => side.entryId !== null && !side.isAverage)
 		.map((side) => ({
 			entryId: side.entryId,
-			inputRevision: side.inputRevision,
+			inputRevision: liveInputRevisionByEntryId.get(side.entryId!) ?? side.inputRevision,
 			availability: side.input === null ? "PENDING" : "READY",
 		}))
 		.sort((left, right) => (left.entryId ?? 0) - (right.entryId ?? 0));
@@ -551,7 +600,7 @@ export const h2hMatchRevisionVectorV2 = (
 			officialNetPoints: side.officialNetPoints,
 			inputPublicationId: side.inputPublicationId,
 			inputGeneration: side.inputGeneration,
-			inputRevision: side.inputRevision,
+			inputRevision: liveInputRevisionByEntryId.get(side.entryId ?? 0) ?? side.inputRevision,
 		})),
 	};
 	return {
@@ -784,6 +833,7 @@ export const cacheableH2HProjection = (value: TournamentOfficialH2HProjectionV2)
 			match.availability === "READY" &&
 			match.delivery.servedFrom !== "UNAVAILABLE" &&
 			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK") &&
+			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK_DEFERRED") &&
 			!match.delivery.reasonCodes.includes("MATCH_SOURCE_PENDING") &&
 			!match.delivery.reasonCodes.includes("MATCH_SOURCE_ERROR")
 	);
@@ -986,7 +1036,7 @@ const readTournamentOfficialH2HV2 = async (
 			[match.home, match.away].some(
 				(side) => side.entryId !== null && !side.isAverage && side.input === null
 			);
-		const currentLiveFallbackEntryIds = [
+		const allCurrentLiveFallbackEntryIds = [
 			...new Set(
 				matchRows
 					.filter(({ match }) => matchMayNeedCurrentLive(match))
@@ -998,6 +1048,16 @@ const readTournamentOfficialH2HV2 = async (
 					.map((side) => side.entryId)
 			),
 		];
+		const currentLiveFallbackEntryIds = selectTournamentDeskEntryWindow(
+			allCurrentLiveFallbackEntryIds,
+			viewerEntryId ?? -1,
+			MAX_TOURNAMENT_DESK_ENTRIES
+		).entryIds;
+		const deferredCurrentLiveFallbackEntryIds = new Set(
+			allCurrentLiveFallbackEntryIds.filter(
+				(entryId) => !currentLiveFallbackEntryIds.includes(entryId)
+			)
+		);
 		let currentLiveFallbacks = new Map<number, LiveCalcDataV2>();
 		if (currentLiveFallbackEntryIds.length > 0) {
 			try {
@@ -1031,11 +1091,8 @@ const readTournamentOfficialH2HV2 = async (
 				const { match } = matchRows[index]!;
 				const matchGlobal = await globalForMatch(match);
 				const useCurrentLive =
-					matchMayNeedCurrentLive(match) ||
-					matchGlobal === null ||
-					[match.home, match.away].some(
-						(side) => side.entryId !== null && !side.isAverage && side.input === null
-					);
+					matchMayNeedCurrentLive(match) &&
+					canUseCurrentLiveH2HFallback(match, currentLiveFallbacks);
 				const [home, away] = await Promise.all([
 					projectH2HSide(
 						context,
@@ -1060,13 +1117,39 @@ const readTournamentOfficialH2HV2 = async (
 						: home.availability === "PENDING" || away.availability === "PENDING"
 							? "PENDING"
 							: "READY";
+				const projectedScoreReferences = [home, away].map(h2hScoreReferenceFromProjectedSide);
 				const scoreReference =
-					[home, away].find(
-						(side): side is typeof side & { scoreReference: H2HScoreReference } =>
-							"scoreReference" in side
-					)?.scoreReference ?? null;
+					projectedScoreReferences.find(
+						(reference): reference is H2HScoreReference => reference !== null
+					) ?? null;
+				const selectedScoreIndex = projectedScoreReferences.findIndex(
+					(reference) => reference !== null
+				);
+				const selectedScoreSide =
+					selectedScoreIndex === -1 ? null : [home, away][selectedScoreIndex];
+				const scoreSourceCheckedAt =
+					selectedScoreSide &&
+					"scoreSourceCheckedAt" in selectedScoreSide &&
+					typeof selectedScoreSide.scoreSourceCheckedAt === "string"
+						? selectedScoreSide.scoreSourceCheckedAt
+						: match.sourceCheckedAt;
+				const liveInputRevisions = [home, away].flatMap((side, index) => {
+					const reference = projectedScoreReferences[index];
+					return reference && side.entryId !== null
+						? [{ entryId: side.entryId, revision: reference.input }]
+						: [];
+				});
 				const sourceReasonCodes = [
 					...(match.state !== "READY" ? [`MATCH_SOURCE_${match.state}`] : []),
+					...(matchMayNeedCurrentLive(match) &&
+					[match.home, match.away].some(
+						(side) =>
+							side.entryId !== null &&
+							!side.isAverage &&
+							deferredCurrentLiveFallbackEntryIds.has(side.entryId)
+					)
+						? ["MATCH_LIVE_SCORE_FALLBACK_DEFERRED"]
+						: []),
 					...[home, away].flatMap((side) =>
 						"reasonCodes" in side && Array.isArray(side.reasonCodes)
 							? side.reasonCodes.filter((code): code is string => typeof code === "string")
@@ -1098,17 +1181,17 @@ const readTournamentOfficialH2HV2 = async (
 									...matchDelivery,
 									reasonCodes: [...matchDelivery.reasonCodes, "MATCH_PROJECTION_INCOMPLETE"],
 								},
-					revisions: h2hMatchRevisionVectorV2(publication, match, matchGlobal, scoreReference),
+					revisions: h2hMatchRevisionVectorV2(
+						publication,
+						match,
+						matchGlobal,
+						scoreReference,
+						liveInputRevisions
+					),
 					times: {
 						...times,
-						sourceCheckedAt:
-							"scoreSourceCheckedAt" in home && typeof home.scoreSourceCheckedAt === "string"
-								? home.scoreSourceCheckedAt
-								: match.sourceCheckedAt,
-						contentUpdatedAt:
-							"scoreSourceCheckedAt" in home && typeof home.scoreSourceCheckedAt === "string"
-								? home.scoreSourceCheckedAt
-								: match.sourceCheckedAt,
+						sourceCheckedAt: scoreSourceCheckedAt,
+						contentUpdatedAt: scoreSourceCheckedAt,
 					},
 					home,
 					away,

@@ -22,6 +22,7 @@ import {
 	knockoutModeToEnum,
 	leagueTypeToEnum,
 	cacheableH2HProjection,
+	canUseCurrentLiveH2HFallback,
 	officialH2HStandingsStateV2,
 	projectH2HSide,
 	tournamentResultChipToEnum,
@@ -134,6 +135,19 @@ describe("official H2H live score projection", () => {
 				],
 			} as never)
 		).toBe(false);
+		expect(
+			cacheableH2HProjection({
+				matches: [
+					{
+						availability: "READY",
+						delivery: {
+							servedFrom: "REDIS_CURRENT",
+							reasonCodes: ["MATCH_LIVE_SCORE_FALLBACK_DEFERRED"],
+						},
+					},
+				],
+			} as never)
+		).toBe(false);
 	});
 
 	it("uses the current provisional live score when the H2H snapshot is pending", async () => {
@@ -174,6 +188,7 @@ describe("official H2H live score projection", () => {
 					scoreCore: "1".repeat(64),
 					fixtureIdentity: "2".repeat(64),
 					rules: "3".repeat(64),
+					input: "4".repeat(64),
 				},
 				times: { sourceCheckedAt: "2026-09-21T05:00:00.000Z" },
 			},
@@ -188,6 +203,16 @@ describe("official H2H live score projection", () => {
 		expect("reasonCodes" in result ? result.reasonCodes : null).toEqual([
 			"MATCH_LIVE_SCORE_FALLBACK",
 		]);
+		expect(canUseCurrentLiveH2HFallback(match, new Map([[101, live]]))).toBe(false);
+		expect(
+			canUseCurrentLiveH2HFallback(
+				match,
+				new Map([
+					[101, live],
+					[202, { ...live, entry: 202 }],
+				])
+			)
+		).toBe(true);
 	});
 });
 
@@ -269,6 +294,12 @@ describe("official H2H match revision vectors", () => {
 		expect(changedScore.content).not.toBe(first.content);
 		expect(changedScore.averageSide).not.toBe(first.averageSide);
 		expect(changedScore.scoreCore).toBe(first.scoreCore);
+
+		const changedLiveInput = h2hMatchRevisionVectorV2(publication, match, global, null, [
+			{ entryId: 101, revision: "6".repeat(64) },
+		]);
+		expect(changedLiveInput.entryInputSet).not.toBe(first.entryInputSet);
+		expect(changedLiveInput.content).not.toBe(first.content);
 	});
 });
 
