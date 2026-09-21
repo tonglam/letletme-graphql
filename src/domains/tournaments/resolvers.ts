@@ -20,16 +20,43 @@ import {
 } from "../live-desks/h2h-v2";
 import { assertLiveTournamentAccessV2 } from "../live-desks/access-v2";
 import { liveDeliveryFreshnessStateV2 } from "../live-desks/league-v2";
+import { MAX_TOURNAMENT_DESK_ENTRIES } from "../live-desks/tournament-entry-window";
 import {
 	LIVE_POINTS_ALGORITHM_VERSION,
+	calcLivePointsForEntriesV2,
 	projectLivePointsFromPublishedEntryV2,
 	readLivePublicationByRefV2,
+	type LiveCalcDataV2,
+	type LiveDeliveryV2,
 	type LivePublicationReadV2,
 } from "../entry-live/v2-service";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
 
 const MAX_H2H_PROJECTION_ENTRIES = 5_000;
 const MAX_H2H_PROJECTION_MATCHES = 5_000;
+
+type H2HScoreReference = {
+	publicationId: string;
+	generation: number;
+	scoreCore: string;
+	fixtureIdentity: string;
+	rules: string;
+	input: string;
+};
+
+type H2HLiveInputRevision = {
+	entryId: number;
+	revision: string;
+};
+
+const h2hScoreReference = (score: LiveCalcDataV2["score"]): H2HScoreReference => ({
+	publicationId: score.revisions.publicationId,
+	generation: score.revisions.generation,
+	scoreCore: score.revisions.scoreCore,
+	fixtureIdentity: score.revisions.fixtureIdentity,
+	rules: score.revisions.rules,
+	input: score.revisions.input,
+});
 
 /**
  * Per-request memoization for event lookups to avoid N+1 Redis round-trips
@@ -104,6 +131,7 @@ import {
 import {
 	assertTournamentInsightsReady,
 	assertTournamentStandingsReady,
+	selectH2HLiveFallbackEntryWindow,
 	tournamentsService,
 } from "./service";
 import { normalizeTournamentEventResultsPagination } from "./repository";
@@ -338,13 +366,48 @@ const unavailableH2HSide = (side: H2HMatchSideV2, availability: string) => ({
 	netPoints: null,
 });
 
-const projectH2HSide = async (
+type H2HProjectedSideDelivery = Pick<LiveDeliveryV2, "state" | "servedFrom" | "reasonCodes">;
+
+const projectH2HSideFromCurrentLive = (
+	side: H2HMatchSideV2,
+	live: LiveCalcDataV2 | null | undefined
+) => {
+	if (
+		side.entryId === null ||
+		side.isAverage ||
+		live?.entry !== side.entryId ||
+		live.availability !== "READY" ||
+		!live.provisional ||
+		live.score.source !== "FPL_EVENT_LIVE"
+	)
+		return null;
+	return {
+		availability: "READY" as const,
+		entryId: side.entryId,
+		entryName: side.entryName,
+		playerName: side.playerName,
+		isAverage: false,
+		points: live.score.eventPoints,
+		netPoints: live.score.netEventPoints,
+		servedFrom: live.delivery.servedFrom,
+		reasonCodes: ["MATCH_LIVE_SCORE_FALLBACK"],
+		scoreDelivery: live.delivery,
+		scoreReference: h2hScoreReference(live.score),
+		scoreSourceCheckedAt: live.score.times.sourceCheckedAt,
+	};
+};
+
+export const projectH2HSide = async (
 	context: GraphQLContext,
 	global: LivePublicationReadV2 | null,
 	match: H2HMatchPayloadV2,
-	side: H2HMatchSideV2
+	side: H2HMatchSideV2,
+	currentLive: LiveCalcDataV2 | null | undefined = null,
+	preferCurrentLive = false
 ) => {
-	if (match.state !== "READY") return unavailableH2HSide(side, match.state);
+	const currentLiveFallback = preferCurrentLive
+		? projectH2HSideFromCurrentLive(side, currentLive)
+		: null;
 	if (match.isBye && side.entryId === null && !side.isAverage) {
 		return {
 			availability: "READY",
@@ -369,13 +432,22 @@ const projectH2HSide = async (
 					netPoints: side.officialNetPoints,
 				};
 	}
+	if (preferCurrentLive) {
+		if (currentLiveFallback) return currentLiveFallback;
+	}
+	if (match.state !== "READY") {
+		if (currentLiveFallback) return currentLiveFallback;
+		return unavailableH2HSide(side, match.state);
+	}
 	if (
 		!global ||
 		global.publication.publicationId !== match.globalRef.publicationId ||
 		global.publication.generation !== match.globalRef.generation ||
 		side.input === null
-	)
+	) {
+		if (currentLiveFallback) return currentLiveFallback;
 		return unavailableH2HSide(side, "ERROR");
+	}
 	try {
 		const projected = await projectLivePointsFromPublishedEntryV2(
 			context,
@@ -400,14 +472,76 @@ const projectH2HSide = async (
 			// Keep the projection source internal so the enclosing match can
 			// expose the worst source across head, global, and both sides.
 			servedFrom: projected.delivery.servedFrom,
+			scoreDelivery: projected.delivery,
 		};
 	} catch (error) {
+		if (currentLiveFallback) return currentLiveFallback;
 		context.logger.warn(
 			{ err: error, eventId: match.eventId, tournamentId: match.tournamentId },
 			"H2H live side projection unavailable"
 		);
 		return unavailableH2HSide(side, "ERROR");
 	}
+};
+
+const isH2HScoreReference = (value: unknown): value is H2HScoreReference => {
+	if (typeof value !== "object" || value === null) return false;
+	const reference = value as Partial<Record<keyof H2HScoreReference, unknown>>;
+	return (
+		typeof reference.publicationId === "string" &&
+		typeof reference.generation === "number" &&
+		typeof reference.scoreCore === "string" &&
+		typeof reference.fixtureIdentity === "string" &&
+		typeof reference.rules === "string" &&
+		typeof reference.input === "string"
+	);
+};
+
+const h2hScoreReferenceFromProjectedSide = (
+	side: Awaited<ReturnType<typeof projectH2HSide>>
+): H2HScoreReference | null => {
+	const reference = "scoreReference" in side ? side.scoreReference : null;
+	return isH2HScoreReference(reference) ? reference : null;
+};
+
+const sameH2HScoreCoreReference = (left: H2HScoreReference, right: H2HScoreReference): boolean =>
+	left.publicationId === right.publicationId &&
+	left.generation === right.generation &&
+	left.scoreCore === right.scoreCore &&
+	left.fixtureIdentity === right.fixtureIdentity &&
+	left.rules === right.rules;
+
+const h2hLiveFallbackShapeEligible = (match: H2HMatchPayloadV2): boolean => {
+	const realSideCount = [match.home, match.away].filter(
+		(side) => side.entryId !== null && !side.isAverage
+	).length;
+	const hasByePlaceholder = [match.home, match.away].some(
+		(side) => side.entryId === null && !side.isAverage && side.entryName === "Bye"
+	);
+	return match.isBye ? realSideCount === 1 && hasByePlaceholder : realSideCount === 2;
+};
+
+export const canUseCurrentLiveH2HFallback = (
+	match: H2HMatchPayloadV2,
+	currentLiveFallbacks: ReadonlyMap<number, LiveCalcDataV2>
+): boolean => {
+	const realSides = [match.home, match.away].filter(
+		(side): side is H2HMatchSideV2 & { entryId: number } => side.entryId !== null && !side.isAverage
+	);
+	if (!h2hLiveFallbackShapeEligible(match)) return false;
+	const references = realSides.map((side) => {
+		const projected = projectH2HSideFromCurrentLive(side, currentLiveFallbacks.get(side.entryId));
+		return projected ? h2hScoreReferenceFromProjectedSide(projected) : null;
+	});
+	const first = references[0];
+	return (
+		first !== null &&
+		first !== undefined &&
+		references.every(
+			(reference): reference is H2HScoreReference =>
+				reference !== null && sameH2HScoreCoreReference(first, reference)
+		)
+	);
 };
 
 const unavailableH2HDelivery = () => ({
@@ -430,19 +564,25 @@ const samePublicationRef = (
 export const h2hMatchRevisionVectorV2 = (
 	_headPublication: H2HLeaguePublicationReadV2["publication"],
 	match: H2HMatchPayloadV2,
-	global: LivePublicationReadV2 | null
+	global: LivePublicationReadV2 | null,
+	scoreReference: H2HScoreReference | null = null,
+	liveInputRevisions: readonly H2HLiveInputRevision[] = []
 ) => {
 	const target =
 		global && samePublicationRef(global.publication, match.globalRef) ? global.publication : null;
 	const targetRevision = (name: "scoreCore" | "fixtureIdentity" | "rules"): string =>
+		scoreReference?.[name] ??
 		target?.revisions[name].revision ??
 		revisionHash({ unavailable: name, globalRef: match.globalRef });
+	const liveInputRevisionByEntryId = new Map(
+		liveInputRevisions.map(({ entryId, revision }) => [entryId, revision])
+	);
 	const sides = [match.home, match.away];
 	const realSides = sides
 		.filter((side) => side.entryId !== null && !side.isAverage)
 		.map((side) => ({
 			entryId: side.entryId,
-			inputRevision: side.inputRevision,
+			inputRevision: liveInputRevisionByEntryId.get(side.entryId!) ?? side.inputRevision,
 			availability: side.input === null ? "PENDING" : "READY",
 		}))
 		.sort((left, right) => (left.entryId ?? 0) - (right.entryId ?? 0));
@@ -477,6 +617,7 @@ export const h2hMatchRevisionVectorV2 = (
 		identity,
 		state: match.state,
 		globalRef: match.globalRef,
+		...(scoreReference ? { scoreReference } : {}),
 		scoreCore: targetRevision("scoreCore"),
 		algorithm: LIVE_POINTS_ALGORITHM_VERSION,
 		sides: sides.map((side) => ({
@@ -487,12 +628,12 @@ export const h2hMatchRevisionVectorV2 = (
 			officialNetPoints: side.officialNetPoints,
 			inputPublicationId: side.inputPublicationId,
 			inputGeneration: side.inputGeneration,
-			inputRevision: side.inputRevision,
+			inputRevision: liveInputRevisionByEntryId.get(side.entryId ?? 0) ?? side.inputRevision,
 		})),
 	};
 	return {
-		publicationId: match.globalRef.publicationId,
-		generation: match.globalRef.generation,
+		publicationId: scoreReference?.publicationId ?? match.globalRef.publicationId,
+		generation: scoreReference?.generation ?? match.globalRef.generation,
 		roster: revisionHash(realSides.map(({ entryId }) => entryId)),
 		scoreCore: targetRevision("scoreCore"),
 		fixtureIdentity: targetRevision("fixtureIdentity"),
@@ -556,19 +697,32 @@ const worstDeliverySource = (sources: readonly string[]): string =>
 const h2hMatchDelivery = (
 	base: ReturnType<typeof h2hLeagueDeliveryV2>,
 	global: LivePublicationReadV2 | null,
-	sideSources: readonly string[] = []
+	sideDeliveries: readonly H2HProjectedSideDelivery[] = [],
+	extraReasonCodes: readonly string[] = [],
+	ignoreGlobal = false
 ) => {
-	const globalSource = global?.servedFrom ?? "UNAVAILABLE";
+	const sideSources = sideDeliveries.map((delivery) => delivery.servedFrom);
+	const globalSource = ignoreGlobal ? "REDIS_CURRENT" : (global?.servedFrom ?? "UNAVAILABLE");
 	const servedFrom = worstDeliverySource([base.servedFrom, globalSource, ...sideSources]);
-	const fallback = servedFrom !== "REDIS_CURRENT" && servedFrom !== "FINAL_RESULT";
-	const reasonCodes = new Set(base.reasonCodes);
-	if (!global) reasonCodes.add("MATCH_GLOBAL_UNAVAILABLE");
-	else if (global.servedFrom !== "REDIS_CURRENT") reasonCodes.add("MATCH_GLOBAL_FALLBACK");
+	const sourceFallback = servedFrom !== "REDIS_CURRENT" && servedFrom !== "FINAL_RESULT";
+	const sideFallback = sideDeliveries.some(
+		(delivery) => delivery.state === "DEGRADED" || delivery.state === "UNAVAILABLE"
+	);
+	const sideStale = sideDeliveries.some((delivery) => delivery.state === "STALE");
+	const fallback = sourceFallback || sideFallback;
+	const reasonCodes = new Set([...base.reasonCodes, ...extraReasonCodes]);
+	for (const delivery of sideDeliveries) {
+		for (const reasonCode of delivery.reasonCodes) reasonCodes.add(reasonCode);
+	}
+	if (!ignoreGlobal) {
+		if (!global) reasonCodes.add("MATCH_GLOBAL_UNAVAILABLE");
+		else if (global.servedFrom !== "REDIS_CURRENT") reasonCodes.add("MATCH_GLOBAL_FALLBACK");
+	}
 	if (sideSources.some((source) => source !== "REDIS_CURRENT" && source !== "FINAL_RESULT"))
 		reasonCodes.add("MATCH_SIDE_FALLBACK");
 	return {
 		...base,
-		state: fallback ? "DEGRADED" : base.state,
+		state: fallback ? "DEGRADED" : sideStale ? "STALE" : base.state,
 		servedFrom,
 		reasonCodes: [...reasonCodes],
 	};
@@ -676,7 +830,8 @@ const h2hProjectionKey = (
 	tournamentId: number,
 	eventId: number,
 	head: H2HLeaguePublicationReadV2["publication"],
-	standings: H2HLeaguePublicationReadV2["publication"] | null
+	standings: H2HLeaguePublicationReadV2["publication"] | null,
+	viewerEntryId: number | null
 ): string =>
 	[
 		context.currentSeason.seasonCode,
@@ -686,6 +841,7 @@ const h2hProjectionKey = (
 		head.generation,
 		standings?.publicationId ?? "none",
 		standings?.generation ?? "none",
+		viewerEntryId ?? "none",
 	].join(":");
 
 const rememberH2HProjection = (key: string, value: TournamentOfficialH2HProjectionV2): void => {
@@ -713,9 +869,16 @@ const readH2HProjection = (key: string): TournamentOfficialH2HProjectionV2 | nul
 	return cached.value;
 };
 
-const cacheableH2HProjection = (value: TournamentOfficialH2HProjectionV2): boolean =>
+export const cacheableH2HProjection = (value: TournamentOfficialH2HProjectionV2): boolean =>
 	value.matches.every(
-		(match) => match.availability !== "ERROR" && match.delivery.servedFrom !== "UNAVAILABLE"
+		(match) =>
+			match.availability === "READY" &&
+			match.delivery.servedFrom !== "UNAVAILABLE" &&
+			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK") &&
+			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK_DEFERRED") &&
+			!match.delivery.reasonCodes.includes("MATCH_LIVE_SCORE_FALLBACK_UNAVAILABLE") &&
+			!match.delivery.reasonCodes.includes("MATCH_SOURCE_PENDING") &&
+			!match.delivery.reasonCodes.includes("MATCH_SOURCE_ERROR")
 	);
 
 const rebaseH2HProjection = (
@@ -755,11 +918,20 @@ const rebaseH2HProjection = (
 			matchServedFrom,
 			match.delivery.state === "FINAL"
 		);
+		const preservedDegraded =
+			match.delivery.state === "DEGRADED" || match.delivery.state === "UNAVAILABLE";
+		const preservedStale = match.delivery.state === "STALE";
 		return {
 			...match,
 			delivery: {
 				...match.delivery,
-				state: matchFallback ? "DEGRADED" : deliveryState,
+				state: matchFallback
+					? "DEGRADED"
+					: preservedDegraded
+						? "DEGRADED"
+						: preservedStale && deliveryState === "FRESH"
+							? "STALE"
+							: deliveryState,
 				servedFrom: matchServedFrom,
 				reasonCodes: [
 					...new Set([
@@ -830,13 +1002,6 @@ const readTournamentOfficialH2HV2 = async (
 			matches: [],
 		};
 	}
-	const projectionKey = h2hProjectionKey(
-		context,
-		tournamentId,
-		eventId,
-		headRead.publication,
-		standingsRead?.publication ?? null
-	);
 	const headGlobalRead = await readLivePublicationByRefV2(
 		context,
 		eventId,
@@ -846,8 +1011,41 @@ const readTournamentOfficialH2HV2 = async (
 		headGlobalRead && h2hPublicationMatchesGlobal(headRead.publication, headGlobalRead)
 			? headGlobalRead
 			: null;
+	const headMatchRows = headRead.index.flatMap((indexRow) => {
+		if (!("matchId" in indexRow)) return [];
+		const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
+		return match ? [{ indexRow, match }] : [];
+	});
+	const headMatchMayNeedCurrentLive = (match: H2HMatchPayloadV2): boolean =>
+		headRead.servedFrom !== "REDIS_CURRENT" ||
+		headGlobal === null ||
+		match.state !== "READY" ||
+		!samePublicationRef(match.globalRef, headRead.publication.globalRef) ||
+		[match.home, match.away].some(
+			(side) => side.entryId !== null && !side.isAverage && side.input === null
+		);
+	const headLiveFallbackCandidateIds = new Set(
+		headMatchRows
+			.filter(({ match }) => headMatchMayNeedCurrentLive(match))
+			.flatMap(({ match }) => [match.home, match.away])
+			.filter(
+				(side): side is H2HMatchSideV2 & { entryId: number } =>
+					side.entryId !== null && !side.isAverage
+			)
+			.map((side) => side.entryId)
+	);
+	const headMayNeedCurrentLive =
+		headGlobal === null || headMatchRows.some(({ match }) => headMatchMayNeedCurrentLive(match));
+	const projectionKey = h2hProjectionKey(
+		context,
+		tournamentId,
+		eventId,
+		headRead.publication,
+		standingsRead?.publication ?? null,
+		headLiveFallbackCandidateIds.size > MAX_TOURNAMENT_DESK_ENTRIES ? viewerEntryId : null
+	);
 	const cached = readH2HProjection(projectionKey);
-	if (cached)
+	if (cached && !headMayNeedCurrentLive)
 		return rebaseH2HProjection(
 			cached,
 			headRead,
@@ -855,7 +1053,8 @@ const readTournamentOfficialH2HV2 = async (
 			standingsGlobalValidated,
 			headGlobal === null
 		);
-	const existing = h2hProjectionInFlight.get(projectionKey);
+	const shouldCoalesceInFlight = !headMayNeedCurrentLive;
+	const existing = shouldCoalesceInFlight ? h2hProjectionInFlight.get(projectionKey) : undefined;
 	if (existing)
 		return rebaseH2HProjection(
 			await existing,
@@ -890,11 +1089,7 @@ const readTournamentOfficialH2HV2 = async (
 			globalByRef.set(key, load);
 			return load;
 		};
-		const matchRows = headRead.index.flatMap((indexRow) => {
-			if (!("matchId" in indexRow)) return [];
-			const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
-			return match ? [{ indexRow, match }] : [];
-		});
+		const matchRows = headMatchRows;
 		const projectedEntryIds = new Set(
 			matchRows.flatMap(({ match }) =>
 				[match.home.entryId, match.away.entryId].filter(
@@ -909,6 +1104,55 @@ const readTournamentOfficialH2HV2 = async (
 			throw new GraphQLError("The live H2H publication is too large to project", {
 				extensions: { code: "LIVE_H2H_TOO_LARGE" },
 			});
+		const matchMayNeedCurrentLive = (match: H2HMatchPayloadV2): boolean =>
+			headRead.servedFrom !== "REDIS_CURRENT" ||
+			headGlobal === null ||
+			match.state !== "READY" ||
+			!samePublicationRef(match.globalRef, publication.globalRef) ||
+			[match.home, match.away].some(
+				(side) => side.entryId !== null && !side.isAverage && side.input === null
+			);
+		const fallbackCandidates = matchRows
+			.filter(({ match }) => matchMayNeedCurrentLive(match) && h2hLiveFallbackShapeEligible(match))
+			.map(({ match }) => {
+				const entryIds = [match.home, match.away]
+					.filter(
+						(side): side is H2HMatchSideV2 & { entryId: number } =>
+							side.entryId !== null && !side.isAverage
+					)
+					.map((side) => side.entryId);
+				return {
+					entryIds,
+					viewerMatch: viewerEntryId !== null && entryIds.includes(viewerEntryId),
+				};
+			});
+		const fallbackWindow = selectH2HLiveFallbackEntryWindow(
+			fallbackCandidates,
+			MAX_TOURNAMENT_DESK_ENTRIES
+		);
+		const currentLiveFallbackEntryIds = fallbackWindow.entryIds;
+		const deferredCurrentLiveFallbackEntryIds = new Set(fallbackWindow.deferredEntryIds);
+		let currentLiveFallbacks = new Map<number, LiveCalcDataV2>();
+		if (currentLiveFallbackEntryIds.length > 0) {
+			try {
+				const currentLive = await calcLivePointsForEntriesV2(
+					context,
+					eventId,
+					currentLiveFallbackEntryIds
+				);
+				currentLiveFallbacks = currentLive.results;
+			} catch (error) {
+				context.logger.warn(
+					{
+						err: error,
+						eventId,
+						tournamentId,
+						entryCount: currentLiveFallbackEntryIds.length,
+					},
+					"H2H current live score fallback unavailable"
+				);
+			}
+		}
 		let matchCursor = 0;
 		const matchResults: Array<ProjectedH2HMatchV2 | undefined> = Array.from(
 			{ length: matchRows.length },
@@ -920,24 +1164,84 @@ const readTournamentOfficialH2HV2 = async (
 				if (index >= matchRows.length) return;
 				const { match } = matchRows[index]!;
 				const matchGlobal = await globalForMatch(match);
+				const useCurrentLive =
+					matchMayNeedCurrentLive(match) &&
+					canUseCurrentLiveH2HFallback(match, currentLiveFallbacks);
 				const [home, away] = await Promise.all([
-					projectH2HSide(context, matchGlobal, match, match.home),
-					projectH2HSide(context, matchGlobal, match, match.away),
+					projectH2HSide(
+						context,
+						matchGlobal,
+						match,
+						match.home,
+						match.home.entryId === null ? null : currentLiveFallbacks.get(match.home.entryId),
+						useCurrentLive
+					),
+					projectH2HSide(
+						context,
+						matchGlobal,
+						match,
+						match.away,
+						match.away.entryId === null ? null : currentLiveFallbacks.get(match.away.entryId),
+						useCurrentLive
+					),
 				]);
 				const availability =
-					match.state !== "READY"
-						? match.state
-						: home.availability === "ERROR" || away.availability === "ERROR"
-							? "ERROR"
-							: home.availability === "PENDING" || away.availability === "PENDING"
-								? "PENDING"
-								: "READY";
+					home.availability === "ERROR" || away.availability === "ERROR"
+						? "ERROR"
+						: home.availability === "PENDING" || away.availability === "PENDING"
+							? "PENDING"
+							: "READY";
+				const projectedScoreReferences = [home, away].map(h2hScoreReferenceFromProjectedSide);
+				const scoreReference =
+					projectedScoreReferences.find(
+						(reference): reference is H2HScoreReference => reference !== null
+					) ?? null;
+				const selectedScoreIndex = projectedScoreReferences.findIndex(
+					(reference) => reference !== null
+				);
+				const selectedScoreSide =
+					selectedScoreIndex === -1 ? null : [home, away][selectedScoreIndex];
+				const scoreSourceCheckedAt =
+					selectedScoreSide &&
+					"scoreSourceCheckedAt" in selectedScoreSide &&
+					typeof selectedScoreSide.scoreSourceCheckedAt === "string"
+						? selectedScoreSide.scoreSourceCheckedAt
+						: match.sourceCheckedAt;
+				const liveInputRevisions = [home, away].flatMap((side, index) => {
+					const reference = projectedScoreReferences[index];
+					return reference && side.entryId !== null
+						? [{ entryId: side.entryId, revision: reference.input }]
+						: [];
+				});
+				const sourceReasonCodes = [
+					...(match.state !== "READY" ? [`MATCH_SOURCE_${match.state}`] : []),
+					...(matchMayNeedCurrentLive(match) && !useCurrentLive
+						? ["MATCH_LIVE_SCORE_FALLBACK_UNAVAILABLE"]
+						: []),
+					...(matchMayNeedCurrentLive(match) &&
+					[match.home, match.away].some(
+						(side) =>
+							side.entryId !== null &&
+							!side.isAverage &&
+							deferredCurrentLiveFallbackEntryIds.has(side.entryId)
+					)
+						? ["MATCH_LIVE_SCORE_FALLBACK_DEFERRED"]
+						: []),
+					...[home, away].flatMap((side) =>
+						"reasonCodes" in side && Array.isArray(side.reasonCodes)
+							? side.reasonCodes.filter((code): code is string => typeof code === "string")
+							: []
+					),
+				];
 				const matchDelivery = h2hMatchDelivery(
 					delivery,
 					matchGlobal,
-					[home, away].flatMap((side) =>
-						"servedFrom" in side && typeof side.servedFrom === "string" ? [side.servedFrom] : []
-					)
+					[home, away].flatMap((side) => {
+						if (!("scoreDelivery" in side) || !side.scoreDelivery) return [];
+						return [side.scoreDelivery];
+					}),
+					sourceReasonCodes,
+					useCurrentLive
 				);
 				matchResults[index] = {
 					officialMatchId: match.officialMatchId,
@@ -956,11 +1260,17 @@ const readTournamentOfficialH2HV2 = async (
 									...matchDelivery,
 									reasonCodes: [...matchDelivery.reasonCodes, "MATCH_PROJECTION_INCOMPLETE"],
 								},
-					revisions: h2hMatchRevisionVectorV2(publication, match, matchGlobal),
+					revisions: h2hMatchRevisionVectorV2(
+						publication,
+						match,
+						matchGlobal,
+						scoreReference,
+						liveInputRevisions
+					),
 					times: {
 						...times,
-						sourceCheckedAt: match.sourceCheckedAt,
-						contentUpdatedAt: match.sourceCheckedAt,
+						sourceCheckedAt: scoreSourceCheckedAt,
+						contentUpdatedAt: scoreSourceCheckedAt,
 					},
 					home,
 					away,
@@ -992,13 +1302,23 @@ const readTournamentOfficialH2HV2 = async (
 			matches,
 		};
 	};
-	const load = project()
-		.then((value) => {
-			if (cacheableH2HProjection(value)) rememberH2HProjection(projectionKey, value);
-			return value;
-		})
-		.finally(() => h2hProjectionInFlight.delete(projectionKey));
-	h2hProjectionInFlight.set(projectionKey, load);
+	const load = project().then((value) => {
+		if (cacheableH2HProjection(value)) rememberH2HProjection(projectionKey, value);
+		return value;
+	});
+	if (shouldCoalesceInFlight) {
+		const trackedLoad = load.finally(() => {
+			if (h2hProjectionInFlight.get(projectionKey) === trackedLoad)
+				h2hProjectionInFlight.delete(projectionKey);
+		});
+		h2hProjectionInFlight.set(projectionKey, trackedLoad);
+		return rebaseH2HProjection(
+			await trackedLoad,
+			headRead,
+			standingsRead,
+			standingsGlobalValidated
+		);
+	}
 	return rebaseH2HProjection(await load, headRead, standingsRead, standingsGlobalValidated);
 };
 
