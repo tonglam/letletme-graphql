@@ -208,7 +208,7 @@ describe("official H2H live score projection", () => {
 				},
 				times: { sourceCheckedAt: "2026-09-21T05:00:00.000Z" },
 			},
-			delivery: { servedFrom: "REDIS_CURRENT" },
+			delivery: { state: "FRESH", servedFrom: "REDIS_CURRENT", reasonCodes: [] },
 		} as unknown as LiveCalcDataV2;
 
 		const result = await projectH2HSide({} as GraphQLContext, null, match, side, live, true);
@@ -219,6 +219,7 @@ describe("official H2H live score projection", () => {
 		expect("reasonCodes" in result ? result.reasonCodes : null).toEqual([
 			"MATCH_LIVE_SCORE_FALLBACK",
 		]);
+		expect("scoreDelivery" in result ? result.scoreDelivery : null).toEqual(live.delivery);
 		expect(canUseCurrentLiveH2HFallback(match, new Map([[101, live]]))).toBe(false);
 		expect(
 			canUseCurrentLiveH2HFallback(
@@ -248,6 +249,29 @@ describe("official H2H live score projection", () => {
 				])
 			)
 		).toBe(false);
+		const averageMatch = {
+			...match,
+			away: {
+				...side,
+				entryId: null,
+				entryName: "Average",
+				isAverage: true,
+				officialNetPoints: 65,
+			},
+		} as H2HMatchPayloadV2;
+		expect(canUseCurrentLiveH2HFallback(averageMatch, new Map([[101, live]]))).toBe(false);
+		const byeMatch = {
+			...match,
+			isBye: true,
+			away: {
+				...side,
+				entryId: null,
+				entryName: "Bye",
+				isAverage: false,
+				officialNetPoints: null,
+			},
+		} as H2HMatchPayloadV2;
+		expect(canUseCurrentLiveH2HFallback(byeMatch, new Map([[101, live]]))).toBe(true);
 	});
 
 	it("selects complete H2H matches within the bounded live fallback window", () => {

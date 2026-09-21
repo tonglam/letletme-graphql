@@ -27,6 +27,7 @@ import {
 	projectLivePointsFromPublishedEntryV2,
 	readLivePublicationByRefV2,
 	type LiveCalcDataV2,
+	type LiveDeliveryV2,
 	type LivePublicationReadV2,
 } from "../entry-live/v2-service";
 import { viewerEntryIdForPrincipal } from "../../graphql/authorization";
@@ -365,6 +366,8 @@ const unavailableH2HSide = (side: H2HMatchSideV2, availability: string) => ({
 	netPoints: null,
 });
 
+type H2HProjectedSideDelivery = Pick<LiveDeliveryV2, "state" | "servedFrom" | "reasonCodes">;
+
 const projectH2HSideFromCurrentLive = (
 	side: H2HMatchSideV2,
 	live: LiveCalcDataV2 | null | undefined
@@ -388,6 +391,7 @@ const projectH2HSideFromCurrentLive = (
 		netPoints: live.score.netEventPoints,
 		servedFrom: live.delivery.servedFrom,
 		reasonCodes: ["MATCH_LIVE_SCORE_FALLBACK"],
+		scoreDelivery: live.delivery,
 		scoreReference: h2hScoreReference(live.score),
 		scoreSourceCheckedAt: live.score.times.sourceCheckedAt,
 	};
@@ -468,6 +472,7 @@ export const projectH2HSide = async (
 			// Keep the projection source internal so the enclosing match can
 			// expose the worst source across head, global, and both sides.
 			servedFrom: projected.delivery.servedFrom,
+			scoreDelivery: projected.delivery,
 		};
 	} catch (error) {
 		if (currentLiveFallback) return currentLiveFallback;
@@ -513,7 +518,11 @@ export const canUseCurrentLiveH2HFallback = (
 	const realSides = [match.home, match.away].filter(
 		(side): side is H2HMatchSideV2 & { entryId: number } => side.entryId !== null && !side.isAverage
 	);
-	if (realSides.length === 0) return false;
+	const hasByePlaceholder = [match.home, match.away].some(
+		(side) => side.entryId === null && !side.isAverage && side.entryName === "Bye"
+	);
+	if (realSides.length === 0 || (realSides.length === 1 && !(match.isBye && hasByePlaceholder)))
+		return false;
 	const references = realSides.map((side) => {
 		const projected = projectH2HSideFromCurrentLive(side, currentLiveFallbacks.get(side.entryId));
 		return projected ? h2hScoreReferenceFromProjectedSide(projected) : null;
@@ -682,14 +691,23 @@ const worstDeliverySource = (sources: readonly string[]): string =>
 const h2hMatchDelivery = (
 	base: ReturnType<typeof h2hLeagueDeliveryV2>,
 	global: LivePublicationReadV2 | null,
-	sideSources: readonly string[] = [],
+	sideDeliveries: readonly H2HProjectedSideDelivery[] = [],
 	extraReasonCodes: readonly string[] = [],
 	ignoreGlobal = false
 ) => {
+	const sideSources = sideDeliveries.map((delivery) => delivery.servedFrom);
 	const globalSource = ignoreGlobal ? "REDIS_CURRENT" : (global?.servedFrom ?? "UNAVAILABLE");
 	const servedFrom = worstDeliverySource([base.servedFrom, globalSource, ...sideSources]);
-	const fallback = servedFrom !== "REDIS_CURRENT" && servedFrom !== "FINAL_RESULT";
+	const sourceFallback = servedFrom !== "REDIS_CURRENT" && servedFrom !== "FINAL_RESULT";
+	const sideFallback = sideDeliveries.some(
+		(delivery) => delivery.state === "DEGRADED" || delivery.state === "UNAVAILABLE"
+	);
+	const sideStale = sideDeliveries.some((delivery) => delivery.state === "STALE");
+	const fallback = sourceFallback || sideFallback;
 	const reasonCodes = new Set([...base.reasonCodes, ...extraReasonCodes]);
+	for (const delivery of sideDeliveries) {
+		for (const reasonCode of delivery.reasonCodes) reasonCodes.add(reasonCode);
+	}
 	if (!ignoreGlobal) {
 		if (!global) reasonCodes.add("MATCH_GLOBAL_UNAVAILABLE");
 		else if (global.servedFrom !== "REDIS_CURRENT") reasonCodes.add("MATCH_GLOBAL_FALLBACK");
@@ -698,7 +716,7 @@ const h2hMatchDelivery = (
 		reasonCodes.add("MATCH_SIDE_FALLBACK");
 	return {
 		...base,
-		state: fallback ? "DEGRADED" : base.state,
+		state: fallback ? "DEGRADED" : sideStale ? "STALE" : base.state,
 		servedFrom,
 		reasonCodes: [...reasonCodes],
 	};
@@ -1200,9 +1218,10 @@ const readTournamentOfficialH2HV2 = async (
 				const matchDelivery = h2hMatchDelivery(
 					delivery,
 					matchGlobal,
-					[home, away].flatMap((side) =>
-						"servedFrom" in side && typeof side.servedFrom === "string" ? [side.servedFrom] : []
-					),
+					[home, away].flatMap((side) => {
+						if (!("scoreDelivery" in side) || !side.scoreDelivery) return [];
+						return [side.scoreDelivery];
+					}),
 					sourceReasonCodes,
 					useCurrentLive
 				);
