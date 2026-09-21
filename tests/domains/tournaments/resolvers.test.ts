@@ -25,12 +25,14 @@ import {
 	canUseCurrentLiveH2HFallback,
 	officialH2HStandingsStateV2,
 	projectH2HSide,
-	selectH2HLiveFallbackEntryWindow,
 	tournamentResultChipToEnum,
 	tournamentStateToEnum,
 	tournamentsResolvers,
 } from "../../../src/domains/tournaments/resolvers";
-import { tournamentsService } from "../../../src/domains/tournaments/service";
+import {
+	selectH2HLiveFallbackEntryWindow,
+	tournamentsService,
+} from "../../../src/domains/tournaments/service";
 import {
 	h2hPublicationMatchesGlobal,
 	type H2HMatchPayloadV2,

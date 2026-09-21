@@ -130,6 +130,7 @@ import {
 import {
 	assertTournamentInsightsReady,
 	assertTournamentStandingsReady,
+	selectH2HLiveFallbackEntryWindow,
 	tournamentsService,
 } from "./service";
 import { normalizeTournamentEventResultsPagination } from "./repository";
@@ -526,39 +527,6 @@ export const canUseCurrentLiveH2HFallback = (
 				reference !== null && sameH2HScoreCoreReference(first, reference)
 		)
 	);
-};
-
-type H2HLiveFallbackCandidate = {
-	entryIds: readonly number[];
-	viewerMatch: boolean;
-};
-
-export const selectH2HLiveFallbackEntryWindow = (
-	candidates: readonly H2HLiveFallbackCandidate[],
-	limit = MAX_TOURNAMENT_DESK_ENTRIES
-): { entryIds: number[]; deferredEntryIds: number[] } => {
-	if (!Number.isSafeInteger(limit) || limit <= 0) {
-		throw new RangeError("H2H live fallback entry limit must be a positive integer");
-	}
-	const normalized = candidates.map((candidate) => ({
-		entryIds: [...new Set(candidate.entryIds)],
-		viewerMatch: candidate.viewerMatch,
-	}));
-	const ordered = [
-		...normalized.filter((candidate) => candidate.viewerMatch),
-		...normalized.filter((candidate) => !candidate.viewerMatch),
-	];
-	const selected = new Set<number>();
-	for (const candidate of ordered) {
-		const newEntryIds = candidate.entryIds.filter((entryId) => !selected.has(entryId));
-		if (selected.size + newEntryIds.length > limit) continue;
-		for (const entryId of newEntryIds) selected.add(entryId);
-	}
-	const allEntryIds = new Set(normalized.flatMap((candidate) => candidate.entryIds));
-	return {
-		entryIds: [...selected],
-		deferredEntryIds: [...allEntryIds].filter((entryId) => !selected.has(entryId)),
-	};
 };
 
 const unavailableH2HDelivery = () => ({
@@ -1001,14 +969,6 @@ const readTournamentOfficialH2HV2 = async (
 			matches: [],
 		};
 	}
-	const projectionKey = h2hProjectionKey(
-		context,
-		tournamentId,
-		eventId,
-		headRead.publication,
-		standingsRead?.publication ?? null,
-		viewerEntryId
-	);
 	const headGlobalRead = await readLivePublicationByRefV2(
 		context,
 		eventId,
@@ -1018,20 +978,38 @@ const readTournamentOfficialH2HV2 = async (
 		headGlobalRead && h2hPublicationMatchesGlobal(headRead.publication, headGlobalRead)
 			? headGlobalRead
 			: null;
-	const headMayNeedCurrentLive =
+	const headMatchRows = headRead.index.flatMap((indexRow) => {
+		if (!("matchId" in indexRow)) return [];
+		const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
+		return match ? [{ indexRow, match }] : [];
+	});
+	const headMatchMayNeedCurrentLive = (match: H2HMatchPayloadV2): boolean =>
 		headGlobal === null ||
-		headRead.index.some((indexRow) => {
-			if (!("matchId" in indexRow)) return false;
-			const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
-			return (
-				match !== undefined &&
-				(match.state !== "READY" ||
-					!samePublicationRef(match.globalRef, headRead.publication.globalRef) ||
-					[match.home, match.away].some(
-						(side) => side.entryId !== null && !side.isAverage && side.input === null
-					))
-			);
-		});
+		match.state !== "READY" ||
+		!samePublicationRef(match.globalRef, headRead.publication.globalRef) ||
+		[match.home, match.away].some(
+			(side) => side.entryId !== null && !side.isAverage && side.input === null
+		);
+	const headLiveFallbackCandidateIds = new Set(
+		headMatchRows
+			.filter(({ match }) => headMatchMayNeedCurrentLive(match))
+			.flatMap(({ match }) => [match.home, match.away])
+			.filter(
+				(side): side is H2HMatchSideV2 & { entryId: number } =>
+					side.entryId !== null && !side.isAverage
+			)
+			.map((side) => side.entryId)
+	);
+	const headMayNeedCurrentLive =
+		headGlobal === null || headMatchRows.some(({ match }) => headMatchMayNeedCurrentLive(match));
+	const projectionKey = h2hProjectionKey(
+		context,
+		tournamentId,
+		eventId,
+		headRead.publication,
+		standingsRead?.publication ?? null,
+		headLiveFallbackCandidateIds.size > MAX_TOURNAMENT_DESK_ENTRIES ? viewerEntryId : null
+	);
 	const cached = readH2HProjection(projectionKey);
 	if (cached && !headMayNeedCurrentLive)
 		return rebaseH2HProjection(
@@ -1076,11 +1054,7 @@ const readTournamentOfficialH2HV2 = async (
 			globalByRef.set(key, load);
 			return load;
 		};
-		const matchRows = headRead.index.flatMap((indexRow) => {
-			if (!("matchId" in indexRow)) return [];
-			const match = headRead.payload[String(indexRow.matchId)] as H2HMatchPayloadV2 | undefined;
-			return match ? [{ indexRow, match }] : [];
-		});
+		const matchRows = headMatchRows;
 		const projectedEntryIds = new Set(
 			matchRows.flatMap(({ match }) =>
 				[match.home.entryId, match.away.entryId].filter(

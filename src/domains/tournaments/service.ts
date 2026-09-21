@@ -1,5 +1,6 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
+import { MAX_TOURNAMENT_DESK_ENTRIES } from "../live-desks/tournament-entry-window";
 import type {
 	EntryH2HMatchResult,
 	TournamentOfficialH2HHistory,
@@ -13,6 +14,39 @@ import type {
 	ManagedTournamentStatus,
 } from "./repository";
 import { tournamentsRepository } from "./repository";
+
+export type H2HLiveFallbackCandidate = {
+	entryIds: readonly number[];
+	viewerMatch: boolean;
+};
+
+export const selectH2HLiveFallbackEntryWindow = (
+	candidates: readonly H2HLiveFallbackCandidate[],
+	limit = MAX_TOURNAMENT_DESK_ENTRIES
+): { entryIds: number[]; deferredEntryIds: number[] } => {
+	if (!Number.isSafeInteger(limit) || limit <= 0) {
+		throw new RangeError("H2H live fallback entry limit must be a positive integer");
+	}
+	const normalized = candidates.map((candidate) => ({
+		entryIds: [...new Set(candidate.entryIds)],
+		viewerMatch: candidate.viewerMatch,
+	}));
+	const ordered = [
+		...normalized.filter((candidate) => candidate.viewerMatch),
+		...normalized.filter((candidate) => !candidate.viewerMatch),
+	];
+	const selected = new Set<number>();
+	for (const candidate of ordered) {
+		const newEntryIds = candidate.entryIds.filter((entryId) => !selected.has(entryId));
+		if (selected.size + newEntryIds.length > limit) continue;
+		for (const entryId of newEntryIds) selected.add(entryId);
+	}
+	const allEntryIds = new Set(normalized.flatMap((candidate) => candidate.entryIds));
+	return {
+		entryIds: [...selected],
+		deferredEntryIds: [...allEntryIds].filter((entryId) => !selected.has(entryId)),
+	};
+};
 
 export const assertTournamentStandingsReady = async (
 	context: GraphQLContext,
