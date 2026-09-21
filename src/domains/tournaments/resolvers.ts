@@ -1017,6 +1017,7 @@ const readTournamentOfficialH2HV2 = async (
 		return match ? [{ indexRow, match }] : [];
 	});
 	const headMatchMayNeedCurrentLive = (match: H2HMatchPayloadV2): boolean =>
+		headRead.servedFrom !== "REDIS_CURRENT" ||
 		headGlobal === null ||
 		match.state !== "READY" ||
 		!samePublicationRef(match.globalRef, headRead.publication.globalRef) ||
@@ -1104,6 +1105,7 @@ const readTournamentOfficialH2HV2 = async (
 				extensions: { code: "LIVE_H2H_TOO_LARGE" },
 			});
 		const matchMayNeedCurrentLive = (match: H2HMatchPayloadV2): boolean =>
+			headRead.servedFrom !== "REDIS_CURRENT" ||
 			headGlobal === null ||
 			match.state !== "READY" ||
 			!samePublicationRef(match.globalRef, publication.globalRef) ||
