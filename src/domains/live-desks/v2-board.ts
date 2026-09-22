@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { GraphQLError } from "graphql";
 
 import type { Entry } from "../../contracts/entry";
+import {
+	CANONICAL_FPL_CHIPS,
+	isCanonicalFplChip,
+	type CanonicalFplChip,
+} from "../../contracts/fpl-chip";
 import type { GraphQLContext } from "../../graphql/context";
 import {
 	readLeagueLivePublicationPointerV2,
@@ -59,7 +64,7 @@ export type EntryLiveCompetitionBoardRequest = {
 	sort: EntryLiveCompetitionBoardSort;
 	direction: EntryLiveCompetitionBoardSortDirection;
 	search: string;
-	chips: string[];
+	chips: CanonicalFplChip[];
 	captainPlayerIds: number[];
 	ownership: EntryLiveCompetitionOwnershipFilter | null;
 	teamCountRules: EntryLiveCompetitionTeamCountRule[];
@@ -76,7 +81,7 @@ export type EntryLiveCompetitionBoardRowV2 = {
 	liveRank: number | null;
 	overallRank: number | null;
 	teamValue: number | null;
-	chip: string | null;
+	chip: CanonicalFplChip | null;
 	transferCost: number | null;
 	played: number | null;
 	toPlay: number | null;
@@ -165,15 +170,6 @@ const BOARD_SORTS = new Set<EntryLiveCompetitionBoardSort>([
 	"ENTRY_NAME",
 ]);
 
-const CHIP_VALUES = new Set([
-	"NONE",
-	"TRIPLE_CAPTAIN",
-	"BENCH_BOOST",
-	"WILDCARD",
-	"FREE_HIT",
-	"MANAGER",
-]);
-
 const canonical = (value: unknown): string => {
 	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
 	if (isRecord(value))
@@ -218,10 +214,11 @@ export const normalizeEntryLiveCompetitionBoardRequestV2 = (
 	const rawChips = options.chips === undefined || options.chips === null ? [] : options.chips;
 	if (
 		!Array.isArray(rawChips) ||
-		rawChips.length > CHIP_VALUES.size ||
-		!rawChips.every((chip): chip is string => typeof chip === "string" && CHIP_VALUES.has(chip))
+		rawChips.length > CANONICAL_FPL_CHIPS.length ||
+		!rawChips.every(isCanonicalFplChip)
 	)
 		throw badInput("chips contains an invalid value");
+	const chips = rawChips as CanonicalFplChip[];
 	const captainPlayerIds = positiveIds(options.captainPlayerIds, "captainPlayerIds", 15);
 
 	let ownership: EntryLiveCompetitionOwnershipFilter | null = null;
@@ -265,7 +262,7 @@ export const normalizeEntryLiveCompetitionBoardRequestV2 = (
 		sort,
 		direction,
 		search,
-		chips: [...new Set(rawChips)],
+		chips: [...new Set(chips)],
 		captainPlayerIds,
 		ownership,
 		teamCountRules,
