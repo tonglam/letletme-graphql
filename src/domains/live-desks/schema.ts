@@ -166,7 +166,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		sort: EntryLiveCompetitionBoardSort = EVENT_POINTS
 		direction: EntryLiveCompetitionBoardSortDirection = DESC
 		search: String
-		chips: [String!]
+		chips: [Chip!]
 		captainPlayerIds: [Int!]
 		ownership: EntryLiveCompetitionOwnershipFilterInput
 		teamCountRules: [EntryLiveCompetitionTeamCountRuleInput!]
@@ -180,7 +180,7 @@ export const liveDesksTypeDefs = /* GraphQL */ `
 		liveRank: Int
 		overallRank: Int
 		teamValue: Float
-		chip: String
+		chip: Chip
 		transferCost: Int
 		played: Int
 		toPlay: Int

@@ -2,6 +2,18 @@
 export type CanonicalFplChip =
 	"NONE" | "BENCH_BOOST" | "TRIPLE_CAPTAIN" | "FREE_HIT" | "WILDCARD" | "MANAGER";
 
+export const CANONICAL_FPL_CHIPS = [
+	"NONE",
+	"BENCH_BOOST",
+	"TRIPLE_CAPTAIN",
+	"FREE_HIT",
+	"WILDCARD",
+	"MANAGER",
+] as const satisfies readonly CanonicalFplChip[];
+
+export const isCanonicalFplChip = (value: unknown): value is CanonicalFplChip =>
+	typeof value === "string" && CANONICAL_FPL_CHIPS.includes(value as CanonicalFplChip);
+
 type ChipFallback = CanonicalFplChip | null;
 
 /**
