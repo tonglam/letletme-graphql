@@ -1690,7 +1690,13 @@ function reviewPhaseStateJoinSql(
 			LIMIT 1
 		) phase_obligation ON true
 		LEFT JOIN LATERAL (
-			SELECT review_head.revision
+			-- The catalog head already passed the same publication/obligation checks.
+			-- Reuse it only for the identical phase event and format in this statement.
+			SELECT head.latest_revision AS revision
+			WHERE head.latest_ready_event_id = phase_event.event_id
+			  AND head.latest_format = '${format}'
+			UNION ALL
+			(SELECT review_head.revision
 			FROM competition.tournament_review_heads review_head
 			JOIN competition.tournament_review_publications phase_publication
 			  ON phase_publication.season_id = review_head.season_id
@@ -1712,8 +1718,10 @@ function reviewPhaseStateJoinSql(
 			  AND review_head.tournament_id = tournament.tournament_id
 			  AND review_head.event_id = phase_event.event_id
 			  AND phase_publication.format = '${format}'
+			  AND NOT COALESCE(head.latest_ready_event_id = phase_event.event_id
+			    AND head.latest_format = '${format}', false)
 			  ${reviewPublicationCoherenceSql("phase_publication", "phase_head_event")}
-			LIMIT 1
+			LIMIT 1)
 		) phase_head ON true
 	) ${alias} ON true
 `;
@@ -1801,21 +1809,6 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 			)
 		  )
 	) finalized ON true
-	${reviewPhaseStateJoinSql(
-		"POINTS",
-		"tournament.group_mode::text = 'points_races' AND tournament.group_started_event_id IS NOT NULL AND event.event_id >= tournament.group_started_event_id AND (tournament.group_ended_event_id IS NULL OR event.event_id <= tournament.group_ended_event_id)",
-		"points_phase"
-	)}
-	${reviewPhaseStateJoinSql(
-		"H2H",
-		"tournament.group_mode::text = 'battle_races' AND tournament.group_started_event_id IS NOT NULL AND event.event_id >= tournament.group_started_event_id AND (tournament.group_ended_event_id IS NULL OR event.event_id <= tournament.group_ended_event_id)",
-		"h2h_phase"
-	)}
-	${reviewPhaseStateJoinSql(
-		"KNOCKOUT",
-		"tournament.knockout_mode::text <> 'no_knockout' AND tournament.knockout_started_event_id IS NOT NULL AND event.event_id >= tournament.knockout_started_event_id AND (tournament.knockout_ended_event_id IS NULL OR event.event_id <= tournament.knockout_ended_event_id)",
-		"knockout_phase"
-	)}
 	LEFT JOIN LATERAL (
 		SELECT publication.event_id AS latest_ready_event_id,
 		       publication.revision AS latest_revision,
@@ -1847,6 +1840,21 @@ export const MY_TOURNAMENT_REVIEW_CATALOG_SQL = `
 		ORDER BY review_head.event_id DESC
 		LIMIT 1
 	) head ON true
+	${reviewPhaseStateJoinSql(
+		"POINTS",
+		"tournament.group_mode::text = 'points_races' AND tournament.group_started_event_id IS NOT NULL AND event.event_id >= tournament.group_started_event_id AND (tournament.group_ended_event_id IS NULL OR event.event_id <= tournament.group_ended_event_id)",
+		"points_phase"
+	)}
+	${reviewPhaseStateJoinSql(
+		"H2H",
+		"tournament.group_mode::text = 'battle_races' AND tournament.group_started_event_id IS NOT NULL AND event.event_id >= tournament.group_started_event_id AND (tournament.group_ended_event_id IS NULL OR event.event_id <= tournament.group_ended_event_id)",
+		"h2h_phase"
+	)}
+	${reviewPhaseStateJoinSql(
+		"KNOCKOUT",
+		"tournament.knockout_mode::text <> 'no_knockout' AND tournament.knockout_started_event_id IS NOT NULL AND event.event_id >= tournament.knockout_started_event_id AND (tournament.knockout_ended_event_id IS NULL OR event.event_id <= tournament.knockout_ended_event_id)",
+		"knockout_phase"
+	)}
 	LEFT JOIN LATERAL (
 		SELECT review_head.event_id::integer AS previous_ready_event_id
 		FROM competition.tournament_review_heads review_head
