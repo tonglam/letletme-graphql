@@ -461,6 +461,15 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 	}
 
 	"""
+	Official pairings for one event, independent of live score publications.
+	"""
+	type TournamentOfficialH2HSchedule {
+		eventId: Int!
+		availability: LeagueLiveAvailability!
+		matches: [TournamentOfficialH2HHistoryMatch!]!
+	}
+
+	"""
 	Bounded viewer-scoped official H2H history, loaded only on demand.
 	"""
 	type TournamentOfficialH2HHistory {
@@ -509,6 +518,10 @@ export const tournamentsTypeDefs = /* GraphQL */ `
 		tournamentBattleGroupResults(tournamentId: Int!, eventId: Int!): [TournamentBattleGroupResult!]!
 		entryH2HMatchResults(entryId: Int!): [EntryH2HMatchResult!]!
 		tournamentOfficialH2H(tournamentId: Int!, eventId: Int!): TournamentOfficialH2H!
+		"""
+		Official pairings for one event, without live scores or publication metadata.
+		"""
+		tournamentOfficialH2HSchedule(tournamentId: Int!, eventId: Int!): TournamentOfficialH2HSchedule!
 		tournamentOfficialH2HHistory(
 			tournamentId: Int!
 			eventId: Int!

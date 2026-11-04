@@ -134,7 +134,7 @@ import {
 	selectH2HLiveFallbackEntryWindow,
 	tournamentsService,
 } from "./service";
-import { normalizeTournamentEventResultsPagination } from "./repository";
+import { tournamentsRepository, normalizeTournamentEventResultsPagination } from "./repository";
 import { getTournamentSetupWarningSummaries } from "./repository";
 
 const warningSummaryMemo = new WeakMap<
@@ -1438,6 +1438,41 @@ export const tournamentsResolvers = {
 			args: TournamentOfficialH2HArgs,
 			context: GraphQLContext
 		) => readTournamentOfficialH2HV2(context, args.tournamentId, args.eventId),
+
+		tournamentOfficialH2HSchedule: async (
+			_parent: unknown,
+			args: TournamentOfficialH2HArgs,
+			context: GraphQLContext
+		): Promise<TournamentOfficialH2HHistory> => {
+			const viewerEntryId = context.principal
+				? (viewerEntryIdForPrincipal(context.principal) ?? 0)
+				: 0;
+			const membership =
+				context.authorizedTournamentMemberships?.has(args.tournamentId) === true ? true : null;
+			await assertLiveTournamentAccessV2(context, args.tournamentId, viewerEntryId, membership);
+			const tournament = await tournamentsService.getTournamentInfoUncached(
+				context,
+				args.tournamentId
+			);
+			if (
+				!tournament ||
+				tournament.leagueType !== LeagueType.H2H ||
+				tournament.rosterMode !== TournamentRosterMode.OFFICIAL_SYNC ||
+				tournament.groupMode !== GroupMode.BATTLE_RACES
+			) {
+				throw new GraphQLError(
+					"Official H2H schedule is only available for official H2H tournaments",
+					{
+						extensions: { code: "BAD_USER_INPUT" },
+					}
+				);
+			}
+			return tournamentsRepository.getTournamentOfficialH2HSchedule(
+				context,
+				args.tournamentId,
+				args.eventId
+			);
+		},
 
 		tournamentOfficialH2HHistory: async (
 			_parent: unknown,

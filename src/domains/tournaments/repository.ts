@@ -1000,7 +1000,78 @@ export const TOURNAMENT_OFFICIAL_H2H_HISTORY_SQL = `
 	ORDER BY matches.event_id ASC, matches.source_order ASC, matches.official_match_id ASC
 	LIMIT $5`;
 
+export const TOURNAMENT_OFFICIAL_H2H_SCHEDULE_SQL = `
+	WITH official_matches AS (
+		SELECT
+			battle.season_id,
+			battle.official_match_id,
+			battle.event_id,
+			battle.group_id,
+			battle.source_order,
+			'REGULAR'::text AS phase,
+			NULL::text AS knockout_name,
+			NULL::text AS tiebreak,
+			battle.is_bye,
+			battle.home_entry_id,
+			battle.home_is_average,
+			battle.home_net_points,
+			battle.away_entry_id,
+			battle.away_is_average,
+			battle.away_net_points
+		FROM competition.tournament_battle_group_results AS battle
+		WHERE battle.season_id = $1
+			AND battle.tournament_id = $2
+			AND battle.event_id = $3
+			AND battle.official_match_id IS NOT NULL
+			AND battle.source_order IS NOT NULL
+		UNION ALL
+		SELECT
+			knockout.season_id,
+			knockout.official_match_id,
+			knockout.event_id,
+			0 AS group_id,
+			knockout.source_order,
+			'KNOCKOUT'::text AS phase,
+			knockout.knockout_name,
+			knockout.tiebreak,
+			(knockout.home_entry_id IS NULL OR knockout.away_entry_id IS NULL) AS is_bye,
+			knockout.home_entry_id,
+			false AS home_is_average,
+			knockout.home_net_points,
+			knockout.away_entry_id,
+			false AS away_is_average,
+			knockout.away_net_points
+		FROM competition.tournament_knockout_results AS knockout
+		WHERE knockout.season_id = $1
+			AND knockout.tournament_id = $2
+			AND knockout.event_id = $3
+			AND knockout.official_match_id IS NOT NULL
+			AND knockout.source_order IS NOT NULL
+	)
+	SELECT
+		matches.*,
+		home_entry.entry_name AS home_entry_name,
+		home_entry.player_name AS home_player_name,
+		NULL::integer AS home_event_points,
+		away_entry.entry_name AS away_entry_name,
+		away_entry.player_name AS away_player_name,
+		NULL::integer AS away_event_points
+	FROM official_matches AS matches
+	LEFT JOIN competition.entries AS home_entry
+		ON home_entry.season_id = matches.season_id
+		AND home_entry.entry_id = matches.home_entry_id
+	LEFT JOIN competition.entries AS away_entry
+		ON away_entry.season_id = matches.season_id
+		AND away_entry.entry_id = matches.away_entry_id
+	ORDER BY matches.event_id ASC, matches.source_order ASC, matches.official_match_id ASC
+	LIMIT 5001`;
+
 export const TOURNAMENT_OFFICIAL_H2H_HISTORY_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
+	{
+		name: "tournaments.official-h2h-schedule",
+		sql: TOURNAMENT_OFFICIAL_H2H_SCHEDULE_SQL,
+		values: [2026, GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID, 10],
+	},
 	{
 		name: "tournaments.official-h2h-history",
 		sql: TOURNAMENT_OFFICIAL_H2H_HISTORY_SQL,
@@ -1759,6 +1830,11 @@ interface TournamentsRepository {
 		eventId: number
 	): Promise<TournamentBattleGroupResult[]>;
 	getEntryH2HMatchResults(context: GraphQLContext, entryId: number): Promise<EntryH2HMatchResult[]>;
+	getTournamentOfficialH2HSchedule(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number
+	): Promise<TournamentOfficialH2HHistory>;
 	getTournamentOfficialH2HHistory(
 		context: GraphQLContext,
 		tournamentId: number,
@@ -2935,6 +3011,40 @@ export const tournamentsRepository: TournamentsRepository = {
 			);
 		}
 		return results;
+	},
+
+	async getTournamentOfficialH2HSchedule(
+		context: GraphQLContext,
+		tournamentId: number,
+		eventId: number
+	): Promise<TournamentOfficialH2HHistory> {
+		if (!Number.isSafeInteger(eventId) || eventId < 1 || eventId > 38) {
+			throw new GraphQLError("Requested H2H schedule event is invalid", {
+				extensions: { code: "BAD_USER_INPUT" },
+			});
+		}
+		const result = await context.database.query<DbOfficialH2HHistoryRow>(
+			TOURNAMENT_OFFICIAL_H2H_SCHEDULE_SQL,
+			[context.currentSeason.seasonId, tournamentId, eventId]
+		);
+		if (result.rows.length > 5000) {
+			throw new GraphQLError("Official H2H schedule exceeds the match limit", {
+				extensions: { code: "LIVE_H2H_TOO_LARGE" },
+			});
+		}
+		return {
+			eventId,
+			availability: "READY",
+			matches: result.rows.map((row) => {
+				const match = mapTournamentOfficialH2HHistoryMatch(row);
+				return {
+					...match,
+					availability: "PENDING",
+					home: { ...match.home, availability: "PENDING", points: null, netPoints: null },
+					away: { ...match.away, availability: "PENDING", points: null, netPoints: null },
+				};
+			}),
+		};
 	},
 
 	async getTournamentOfficialH2HHistory(

@@ -94,6 +94,7 @@ const NON_PROPAGATING_LIMIT_ROOTS = new Set([
 	"myTournamentGameweekReview",
 	"myTournamentSeasonReview",
 	"tournamentOfficialH2HHistory",
+	"tournamentOfficialH2HSchedule",
 	"myTournamentSeasonReviewSection",
 ]);
 
@@ -1190,6 +1191,7 @@ export const ROOT_RATE_LIMIT_FLOORS = new Map<string, number>([
 	["tournamentSeasonSnapshot", 30],
 	["tournamentOfficialH2H", 30],
 	["tournamentOfficialH2HHistory", 5],
+	["tournamentOfficialH2HSchedule", 5],
 	["tournamentDetailDesk", 30],
 	["managedTournamentStatus", 2],
 	["myFplManagerReview", 8],
@@ -1373,7 +1375,9 @@ export const validateGraphQLPayloadLimits = (
 		rootNames.length > 0 &&
 		rootNames.every(
 			(field) =>
-				(field.name === "tournamentOfficialH2H" || field.name === "tournamentOfficialH2HHistory") &&
+				(field.name === "tournamentOfficialH2H" ||
+					field.name === "tournamentOfficialH2HHistory" ||
+					field.name === "tournamentOfficialH2HSchedule") &&
 				field.responseKey === field.name
 		);
 	const usesMyFplManagerReview =
