@@ -2842,3 +2842,86 @@ describe("tournamentsRepository.getEntryH2HMatchResults readiness cache", () => 
 		expect(matchReads).toBe(matchReadsAfterEmptyPublication);
 	});
 });
+
+describe("official H2H persisted schedule", () => {
+	const row = {
+		season_id: 2026,
+		official_match_id: 1001,
+		event_id: 10,
+		group_id: 1,
+		source_order: 0,
+		phase: "REGULAR",
+		knockout_name: null,
+		tiebreak: null,
+		is_bye: true,
+		home_entry_id: 123,
+		home_is_average: false,
+		home_entry_name: "Home",
+		home_player_name: "Manager",
+		home_net_points: 99,
+		home_event_points: 99,
+		away_entry_id: null,
+		away_is_average: true,
+		away_entry_name: null,
+		away_player_name: null,
+		away_net_points: 50,
+		away_event_points: null,
+	};
+	it("reads the selected season/event for the entire league and withholds scores", async () => {
+		let parameters: unknown[] = [];
+		const context = {
+			currentSeason: { seasonId: 2026 },
+			database: {
+				query: async (_sql: string, values: unknown[]) => {
+					parameters = values;
+					return {
+						rows: [
+							row,
+							{
+								...row,
+								official_match_id: 1002,
+								phase: "KNOCKOUT",
+								is_bye: false,
+								away_entry_id: 456,
+								away_is_average: false,
+								away_entry_name: "Away",
+							},
+						],
+					};
+				},
+			},
+		} as unknown as GraphQLContext;
+		const schedule = await tournamentsRepository.getTournamentOfficialH2HSchedule(context, 6, 10);
+		expect(parameters).toEqual([2026, 6, 10]);
+		expect(schedule.matches).toHaveLength(2);
+		expect(schedule.matches[0]?.away.isAverage).toBe(true);
+		expect(schedule.matches[1]?.phase).toBe("KNOCKOUT");
+		for (const match of schedule.matches) {
+			expect(match.availability).toBe("PENDING");
+			expect(match.home.points).toBeNull();
+			expect(match.away.netPoints).toBeNull();
+		}
+	});
+	it("fails instead of returning a truncated schedule", async () => {
+		const context = {
+			currentSeason: { seasonId: 2026 },
+			database: { query: async () => ({ rows: Array(5001).fill(row) }) },
+		} as unknown as GraphQLContext;
+		await expect(
+			tournamentsRepository.getTournamentOfficialH2HSchedule(context, 6, 10)
+		).rejects.toThrow("match limit");
+	});
+	it("propagates database failure instead of claiming the league has no fixtures", async () => {
+		const context = {
+			currentSeason: { seasonId: 2026 },
+			database: {
+				query: async () => {
+					throw new Error("read unavailable");
+				},
+			},
+		} as unknown as GraphQLContext;
+		await expect(
+			tournamentsRepository.getTournamentOfficialH2HSchedule(context, 6, 10)
+		).rejects.toThrow("read unavailable");
+	});
+});

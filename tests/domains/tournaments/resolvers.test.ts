@@ -667,3 +667,53 @@ describe("tournamentSeasonSnapshot query resolver", () => {
 		}
 	});
 });
+
+describe("official H2H schedule authorization", () => {
+	it("denies an unauthenticated schedule read before accessing the database", async () => {
+		let reads = 0;
+		const context = {
+			principal: null,
+			database: {
+				query: async () => {
+					reads++;
+					return { rows: [] };
+				},
+			},
+		} as unknown as GraphQLContext;
+		await expect(
+			tournamentsResolvers.Query.tournamentOfficialH2HSchedule(
+				null,
+				{ tournamentId: 6, eventId: 10 },
+				context
+			)
+		).rejects.toThrow("Tournament access denied");
+		expect(reads).toBe(0);
+	});
+	it("denies a non-member before reading schedule rows", async () => {
+		let reads = 0;
+		const context = {
+			principal: {
+				userId: "schedule-viewer",
+				source: "website",
+				fplEntryId: 123,
+				fplEntryVerifiedAt: "2026-01-01T00:00:00Z",
+			},
+			currentSeason: { seasonId: 2026 },
+			logger: { warn: () => undefined },
+			database: {
+				query: async () => {
+					reads++;
+					return { rows: [{ member: false, admin_entry_id: 456 }] };
+				},
+			},
+		} as unknown as GraphQLContext;
+		await expect(
+			tournamentsResolvers.Query.tournamentOfficialH2HSchedule(
+				null,
+				{ tournamentId: 6, eventId: 10 },
+				context
+			)
+		).rejects.toThrow("Tournament access denied");
+		expect(reads).toBe(1);
+	});
+});
