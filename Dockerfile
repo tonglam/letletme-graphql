@@ -12,19 +12,19 @@ RUN set -eux; \
 	case "$TARGETARCH" in \
 		amd64) \
 			alpine_arch=x86_64; \
-			libcrypto_sha256=1d111bc0ad6380fdda22e6513941dc2e7988d6b1621d535bed6b3fa5ef086fae; \
-			libssl_sha256=e8d3ea5e9750cb1f4c4b459d172630925fe6bc13c113c590ac36c78013821e62; \
+			libcrypto_sha256=3f5825ced5fde1c66a5376a3f6076b3c08538ad52d9ef23f069857e212d9175a; \
+			libssl_sha256=6801c740b9760b5b08da8db6367ebc18b2cc4dbaf371f7148429538b8bb04e23; \
 			;; \
 		arm64) \
 			alpine_arch=aarch64; \
-			libcrypto_sha256=094c5816644ade889f74387e8d91aad89dc9a05eda150494e3f91b80ffc15460; \
-			libssl_sha256=2b175c982f9ff9a80fc88fa587f6db0ae1c58eef4b3f7fe69e8f066be9ff1090; \
+			libcrypto_sha256=ede2ef7eca3b65a42e902aaf7890f9c5647dca0c55123a817179ad9f3bc6ef24; \
+			libssl_sha256=338c9f6154582b4b76455a59f95538bcea8df039c5c72916dd2d8d0d844c9583; \
 			;; \
 		*) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
 	esac; \
 	base_url="https://dl-cdn.alpinelinux.org/alpine/v3.22/main/$alpine_arch"; \
-	wget --no-verbose --output-document=/tmp/libcrypto3.apk "$base_url/libcrypto3-3.5.8-r0.apk"; \
-	wget --no-verbose --output-document=/tmp/libssl3.apk "$base_url/libssl3-3.5.8-r0.apk"; \
+	wget --no-verbose --output-document=/tmp/libcrypto3.apk "$base_url/libcrypto3-3.5.9-r0.apk"; \
+	wget --no-verbose --output-document=/tmp/libssl3.apk "$base_url/libssl3-3.5.9-r0.apk"; \
 	echo "$libcrypto_sha256  /tmp/libcrypto3.apk" | sha256sum -c -; \
 	echo "$libssl_sha256  /tmp/libssl3.apk" | sha256sum -c -; \
 	apk add --no-cache --repositories-file /dev/null /tmp/libcrypto3.apk /tmp/libssl3.apk; \
