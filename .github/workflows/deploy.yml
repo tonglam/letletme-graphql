@@ -111,10 +111,26 @@ jobs:
           image_ref="${IMAGE_NAME}@${digest}"
           echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 
+      - name: Install checksum-pinned Trivy from its official release
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy_0.70.0_Linux-64bit.tar.gz"
+          binary_dir="$RUNNER_TEMP/trivy-bin"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_0.70.0_Linux-64bit.tar.gz \
+            --output "$archive"
+          echo "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9  $archive" | sha256sum --check --strict
+          mkdir -p "$binary_dir"
+          tar -xzf "$archive" -C "$binary_dir" trivy
+          "$binary_dir/trivy" --version
+          echo "$binary_dir" >> "$GITHUB_PATH"
+
       - name: Scan immutable image before deployment
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.70.0
+          skip-setup-trivy: true
           scan-type: image
           image-ref: ${{ steps.image.outputs.image_ref }}
           format: table
