@@ -98,6 +98,17 @@ export const viewerEntryIdForPrincipal = (principal: Principal): number | null =
 export const hasPlatformAdminAccess = (principal: Principal): boolean =>
 	principal.source === "website" && principal.platformAdmin === true && hasVerifiedEntry(principal);
 
+export const hasMiniTournamentReadAccess = (principal: Principal): boolean =>
+	principal.source === "wechat_miniprogram" &&
+	principal.miniTournamentReadAdmin === true &&
+	hasVerifiedEntry(principal) &&
+	viewerEntryIdForPrincipal(principal) === principal.fplEntryId;
+
+const canReadTournamentAsAdmin = (principal: Principal, field: string): boolean =>
+	hasPlatformAdminAccess(principal) ||
+	((field.startsWith("tournament") || LIVE_PUBLICATION_AUTH_FIELDS.has(field)) &&
+		hasMiniTournamentReadAccess(principal));
+
 const requireViewerEntry = (principal: Principal, entryId: number | null): AuthorizationResult => {
 	if (!entryId || entryId !== viewerEntryIdForPrincipal(principal)) {
 		return {
@@ -283,7 +294,7 @@ const authorizeConditionalAccess = async ({
 					message: "User is not a member of this tournament",
 				};
 			}
-			if (hasPlatformAdminAccess(principal)) return { ok: true };
+			if (canReadTournamentAsAdmin(principal, field.name)) return { ok: true };
 			const isMember = await hasTournamentMembership(
 				dataClient,
 				tournamentId,
@@ -482,7 +493,7 @@ const authorizeRootField = async (
 				message: "User is not a member of this tournament",
 			};
 		}
-		if (!hasPlatformAdminAccess(principal)) {
+		if (!canReadTournamentAsAdmin(principal, field.name)) {
 			const isMember = await hasTournamentMembership(
 				dataClient,
 				tournamentId,

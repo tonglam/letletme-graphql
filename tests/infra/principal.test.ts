@@ -20,14 +20,14 @@ const addSignedHeader = (
 	);
 };
 
-const canonicalIngress = (headers = new Headers()): Headers => {
+const canonicalIngress = (headers = new Headers(), mini = false): Headers => {
 	const now = Math.floor(Date.now() / 1000);
 	addSignedHeader(headers, "X-Ingress-Context", {
 		v: 2,
 		aud: "letletme-graphql",
-		trafficClass: "web_browser",
+		trafficClass: mini ? "mini" : "web_browser",
 		subject: "a".repeat(64),
-		abuseSubject: null,
+		abuseSubject: mini ? "b".repeat(64) : null,
 		workload: "public-other",
 		iat: now,
 		exp: now + 60,
@@ -285,4 +285,47 @@ describe("Mini Program session authentication", () => {
 			})
 		).toBeNull();
 	});
+});
+
+test("binds a Mini tournament admin attestation to a valid linked account and its verified entry", async () => {
+	const now = Math.floor(Date.now() / 1000);
+	const verifiedAt = "2026-07-18T00:00:00.000Z";
+	const headers = canonicalIngress(new Headers({ Authorization: "Bearer mini-token" }), true);
+	addSignedHeader(headers, "X-User-Context", {
+		aud: "letletme-graphql-mini-tournament-read",
+		uid: "linked-web-user",
+		eid: 123,
+		evat: verifiedAt,
+		adm: true,
+		iat: now,
+		exp: now + 60,
+	});
+	const mini = {
+		userId: "mini-user",
+		source: "wechat_miniprogram" as const,
+		linkedWebUserId: "linked-web-user",
+		fplEntryId: 123,
+		fplEntryVerifiedAt: verifiedAt,
+		platformAdmin: false,
+	};
+	expect(
+		await getPrincipalFromHeaders(headers, {
+			validateMiniProgramSessionToken: async () => mini,
+		})
+	).toEqual({ ...mini, miniTournamentReadAdmin: true });
+	for (const invalid of [
+		null,
+		{ ...mini, linkedWebUserId: null },
+		{ ...mini, linkedWebUserId: "different-web-user" },
+		{ ...mini, fplEntryId: 456 },
+		{ ...mini, fplEntryVerifiedAt: null },
+	]) {
+		expect(
+			await getPrincipalFromHeaders(headers, {
+				validateMiniProgramSessionToken: async () => invalid,
+			})
+		).toEqual(invalid);
+	}
+	headers.delete("Authorization");
+	expect(await getPrincipalFromHeaders(headers)).toBeNull();
 });

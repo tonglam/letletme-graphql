@@ -26,6 +26,9 @@ export type Principal = {
 	fplEntryVerifiedAt: string | null;
 	/** Account-level role attested by the Website HMAC envelope. */
 	platformAdmin?: boolean;
+	/** Web account currently linked to the authenticated Mini Program account. */
+	linkedWebUserId?: string | null;
+	miniTournamentReadAdmin?: boolean;
 };
 
 type WebsiteEnvelope = {
@@ -39,6 +42,7 @@ type WebsiteEnvelope = {
 };
 
 type MiniProgramSessionRow = {
+	linked_web_user_id: string | null;
 	user_id: string | null;
 	fpl_entry_id: number | null;
 	fpl_entry_verified_at: Date | string | null;
@@ -65,7 +69,10 @@ const equalBase64Url = (left: string, right: string): boolean => {
 	return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 };
 
-export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
+export const verifyWebsitePrincipal = (
+	headers: Headers,
+	audience = "letletme-graphql"
+): Principal | null => {
 	if (!env.BACKEND_PROXY_SECRET) return null;
 
 	const contextHeader = headers.get("X-User-Context");
@@ -102,7 +109,7 @@ export const verifyWebsitePrincipal = (headers: Headers): Principal | null => {
 	]);
 	if (
 		!hasCanonicalFields ||
-		envelope.aud !== "letletme-graphql" ||
+		envelope.aud !== audience ||
 		typeof envelope.uid !== "string" ||
 		envelope.uid.length === 0 ||
 		typeof envelope.adm !== "boolean" ||
@@ -173,6 +180,7 @@ export const validateMiniProgramSessionToken = async (
 	const tokenHash = hashMiniProgramSessionToken(token);
 	const result = await requestDatabase.query<MiniProgramSessionRow>(
 		`SELECT COALESCE(account.id, s.user_id) AS user_id,
+		        account.linked_web_user_id,
 		        CASE
 		          WHEN account.id IS NOT NULL AND linked_user.fpl_entry_verified_at IS NOT NULL
 		            THEN linked_user.fpl_entry_id
@@ -204,6 +212,7 @@ export const validateMiniProgramSessionToken = async (
 	return {
 		userId: row.user_id,
 		source: "wechat_miniprogram",
+		linkedWebUserId: row.linked_web_user_id,
 		viewerEntryId: resolveMiniProgramViewerEntry(row),
 		fplEntryId: row.fpl_entry_id,
 		fplEntryVerifiedAt: row.fpl_entry_verified_at
@@ -218,17 +227,28 @@ export const getPrincipalFromHeaders = async (
 	validators: PrincipalValidators = { validateMiniProgramSessionToken },
 	requestDatabase?: QueryExecutor
 ): Promise<Principal | null> => {
-	if (!verifyIngressContext(headers)) return null;
+	const ingress = verifyIngressContext(headers);
+	if (!ingress) return null;
 	const token = getBearerToken(headers);
 	const websitePrincipal = verifyWebsitePrincipal(headers);
-	if (websitePrincipal) {
-		// A request carrying both credential families is ambiguous. Reject it
-		// instead of relying on parser order to choose an identity.
-		return token ? null : websitePrincipal;
-	}
+	if (websitePrincipal) return token ? null : websitePrincipal;
 	if (!token) return null;
 
-	return validators.validateMiniProgramSessionToken(token, requestDatabase);
+	const miniPrincipal = await validators.validateMiniProgramSessionToken(token, requestDatabase);
+	if (ingress.trafficClass !== "mini" || miniPrincipal?.source !== "wechat_miniprogram")
+		return miniPrincipal;
+
+	// This envelope can attest a read privilege, never establish an identity.
+	const attestation = verifyWebsitePrincipal(headers, "letletme-graphql-mini-tournament-read");
+	if (
+		attestation?.platformAdmin === true &&
+		miniPrincipal.linkedWebUserId === attestation.userId &&
+		miniPrincipal.fplEntryId === attestation.fplEntryId &&
+		miniPrincipal.fplEntryVerifiedAt === attestation.fplEntryVerifiedAt
+	) {
+		return { ...miniPrincipal, miniTournamentReadAdmin: true };
+	}
+	return miniPrincipal;
 };
 
 export const principalToAuthUser = (principal: Principal): AuthUser => ({
