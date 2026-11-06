@@ -455,6 +455,31 @@ describe("authorizeGraphQLRequest", () => {
 		}
 	});
 
+	it("lets attested Mini administrators view tournaments without granting management access", async () => {
+		const principal = {
+			...platformAdminPrincipal,
+			source: "wechat_miniprogram" as const,
+			platformAdmin: false,
+			miniTournamentReadAdmin: true,
+		};
+		const read = "query { tournamentDetailDesk(tournamentId: 9, entryId: 6953) { __typename } }";
+		expect(await authorize(read, {}, principal)).toEqual({ ok: true });
+		expect(
+			await authorize(read, {}, { ...principal, miniTournamentReadAdmin: false })
+		).toMatchObject({ ok: false, status: 403 });
+		expect(await authorize(read, {}, { ...principal, viewerEntryId: 123 })).toMatchObject({
+			ok: false,
+			status: 403,
+		});
+		expect(
+			await authorize(
+				"query { managedTournament(tournamentId: 9, entryId: 6953) { id } }",
+				{},
+				principal
+			)
+		).toMatchObject({ ok: false, status: 403 });
+	});
+
 	it("does not let a platform administrator impersonate another FPL entry", async () => {
 		for (const field of ["managedTournament", "managedTournamentStatus"]) {
 			const result = await authorize(

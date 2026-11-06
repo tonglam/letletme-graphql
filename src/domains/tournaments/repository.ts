@@ -1,5 +1,6 @@
 import { normalizeFplChip } from "../../contracts/fpl-chip";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
+import { hasMiniTournamentReadAccess } from "../../graphql/authorization";
 import type { GraphQLContext } from "../../graphql/context";
 import { GraphQLError } from "graphql";
 import { eventsService } from "../events/service";
@@ -2173,6 +2174,14 @@ const hasPlatformAdminAccess = (context: GraphQLContext, entryId: number): boole
 	context.principal.fplEntryId === entryId &&
 	Boolean(context.principal.fplEntryVerifiedAt);
 
+const canReadAllTournaments = (context: GraphQLContext, entryId: number): boolean =>
+	hasPlatformAdminAccess(context, entryId) ||
+	Boolean(
+		context.principal &&
+		context.principal.fplEntryId === entryId &&
+		hasMiniTournamentReadAccess(context.principal)
+	);
+
 export const tournamentsRepository: TournamentsRepository = {
 	getTournamentInfoUncached,
 	getTournamentInfosUncached,
@@ -2182,7 +2191,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		tournamentId: number,
 		entryId: number
 	): Promise<TournamentInfo | null> {
-		if (!hasPlatformAdminAccess(context, entryId)) {
+		if (!canReadAllTournaments(context, entryId)) {
 			const rosterMembership = await context.data
 				.read("competition.tournament_entries")
 				.select("entry_id")
@@ -2313,7 +2322,7 @@ export const tournamentsRepository: TournamentsRepository = {
 		// Mutable metadata is read directly for lightweight roots. Legacy callers
 		// that already pinned a core revision retain the existing bounded cache
 		// contract during the rolling migration.
-		const platformAdmin = hasPlatformAdminAccess(context, entryId);
+		const platformAdmin = canReadAllTournaments(context, entryId);
 		const cacheScope = platformAdmin ? "platform-admin" : "entry";
 		const cacheKey = context.dataRevision
 			? tournamentCacheKey(context, `${cacheScope}:visible-v2:${entryId}`)
@@ -2416,6 +2425,12 @@ export const tournamentsRepository: TournamentsRepository = {
 		context: GraphQLContext,
 		entryId: number
 	): Promise<TournamentInfo[]> {
+		if (
+			context.principal?.source === "wechat_miniprogram" &&
+			canReadAllTournaments(context, entryId)
+		) {
+			return tournamentsRepository.getEntryTournaments(context, entryId);
+		}
 		const [rosterMemberships, officialLeagueMemberships] = await Promise.all([
 			context.data
 				.read("competition.tournament_entries")

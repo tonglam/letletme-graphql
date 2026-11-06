@@ -2184,6 +2184,17 @@ describe("tournamentsRepository.getEntryTournaments", () => {
 		expect(await tournamentsRepository.getEntryTournaments(context, 6953)).toEqual([]);
 		expect(readTables).toEqual(["competition.tournaments"]);
 		expect(idFilterCalls).toBe(0);
+
+		readTables.length = 0;
+		context.principal = {
+			...context.principal!,
+			source: "wechat_miniprogram",
+			platformAdmin: false,
+			miniTournamentReadAdmin: true,
+		};
+		expect(await tournamentsRepository.getEntryParticipatingTournaments(context, 6953)).toEqual([]);
+		expect(readTables).toEqual(["competition.tournaments"]);
+		expect(idFilterCalls).toBe(0);
 	});
 
 	it("does not add the tournament owner predicate for a verified platform administrator", async () => {

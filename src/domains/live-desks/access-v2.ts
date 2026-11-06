@@ -5,6 +5,7 @@ import type { DataSqlContractProbe } from "../../contracts/data-sql-contract";
 import { GRAPHQL_DATA_CONTRACT_TOURNAMENT_ID } from "../../contracts/data-fixture-identities";
 import {
 	hasPlatformAdminAccess,
+	hasMiniTournamentReadAccess,
 	hasVerifiedEntry,
 	viewerEntryIdForPrincipal,
 } from "../../graphql/authorization";
@@ -85,7 +86,7 @@ export const assertLiveTournamentAccessV2 = async (
 	const principal = context.principal;
 	const viewerEntryId = principal ? viewerEntryIdForPrincipal(principal) : null;
 	if (!principal || !viewerEntryId || viewerEntryId !== entryId) throw forbidden();
-	if (hasPlatformAdminAccess(principal)) return;
+	if (hasPlatformAdminAccess(principal) || hasMiniTournamentReadAccess(principal)) return;
 	if (publicationMembership === true) return;
 	if (publicationMembership === false) throw forbidden();
 
