@@ -2,9 +2,11 @@ import { describe, expect, it } from "bun:test";
 import {
 	queryEntryLiveCompetitionBoardV2,
 	withBoardReadDelivery,
+	withCompetitionTotalsV2,
 	type EntryLiveCompetitionBoardRequest,
 	type EntryLiveCompetitionBoardV2,
 } from "../../../src/domains/live-desks/v2-board";
+import type { GraphQLContext } from "../../../src/graphql/context";
 import type { LeagueLiveManifestV2 } from "../../../src/domains/live-desks/league-v2";
 import type { LiveScoreV2 } from "../../../src/domains/entry-live/v2-service";
 
@@ -485,4 +487,78 @@ describe("live competition board cached delivery provenance", () => {
 		});
 		expect(degraded.rows[0]?.score?.delivery.reasonCodes).toContain("LEAGUE_PUBLICATION_FALLBACK");
 	});
+});
+
+it("ranks GW4 league totals before pagination and keeps missing baselines unranked", async () => {
+	const board: EntryLiveCompetitionBoardV2 = {
+		publication: { ...manifest, eventId: 9 },
+		servedFrom: "REDIS_CURRENT",
+		boardRevision: "board",
+		scoreCoreRevision: "score-core",
+		rows: [
+			{ ...row(1, 450, 48), startedEvent: 1 },
+			{ ...row(2, 350, 48), startedEvent: 4 },
+			{ ...row(3, 470, 48), startedEvent: 1 },
+		],
+		totalEntries: 3,
+		highestEventPoints: 52,
+		averageEventPoints: 52,
+	};
+	const context = {
+		data: {
+			read: (relation: string) => ({
+				select: () => ({
+					eq: (field: string, value: number) => ({
+						limit: () => {
+							expect([relation, field, value]).toEqual(["competition.tournaments", "id", 1]);
+							return {
+								data: [
+									{
+										group_mode: "points_races",
+										tournament_mode: "normal",
+										league_type: "classic",
+										knockout_mode: "no_knockout",
+										state: "active",
+										setup_status: "ready",
+										group_started_event_id: 4,
+										created_at: "2026-08-30T00:00:00Z",
+										updated_at: "2026-08-30T00:00:00Z",
+									},
+								],
+							};
+						},
+						in: (entryField: string, entries: number[]) => {
+							expect([relation, field, value, entryField, entries]).toEqual([
+								"competition.entry_event_results",
+								"event_id",
+								3,
+								"entry_id",
+								[1, 3],
+							]);
+							return { data: [{ entry_id: 1, overall_points: 141 }] };
+						},
+					}),
+				}),
+			}),
+		},
+	} as unknown as GraphQLContext;
+	const projected = await withCompetitionTotalsV2(context, board);
+	const page = queryEntryLiveCompetitionBoardV2(projected, {
+		...request("DESC"),
+		eventId: 9,
+		sort: "TOTAL_POINTS",
+		first: 2,
+	});
+	expect(page.rows.map((row) => [row.entry, row.score?.totalPoints])).toEqual([
+		[2, 350],
+		[1, 309],
+	]);
+	expect(projected.rows[2]?.score).toMatchObject({ totalPoints: null, totalScope: "UNKNOWN" });
+	expect(board.rows[0]?.score?.totalPoints).toBe(450);
+
+	const opening = await withCompetitionTotalsV2(context, {
+		...board,
+		publication: { ...board.publication, eventId: 4 },
+	});
+	expect(opening.rows.map((row) => row.score?.totalPoints)).toEqual([48, 48, 48]);
 });

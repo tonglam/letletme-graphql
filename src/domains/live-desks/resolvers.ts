@@ -23,6 +23,7 @@ import {
 import {
 	normalizeEntryLiveCompetitionBoardRequestV2,
 	queryEntryLiveCompetitionBoardV2,
+	withCompetitionTotalsV2,
 	readEntryLiveCompetitionBoardProcessLkgV2,
 	readEntryLiveCompetitionBoardWithPreviousV2,
 	type EntryLiveCompetitionBoardRequest,
@@ -430,7 +431,10 @@ const boardResponse = async (
 			)
 		);
 	}
-	const page = queryEntryLiveCompetitionBoardV2(board, request);
+	const page = queryEntryLiveCompetitionBoardV2(
+		await withCompetitionTotalsV2(context, board),
+		request
+	);
 	const read = { publication: board.publication, servedFrom: board.servedFrom };
 	return {
 		head: leagueHead(context, read, request.eventId, request.tournamentId),
