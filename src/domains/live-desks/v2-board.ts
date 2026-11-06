@@ -8,6 +8,7 @@ import {
 	type CanonicalFplChip,
 } from "../../contracts/fpl-chip";
 import type { GraphQLContext } from "../../graphql/context";
+import { GroupMode, tournamentsRepository } from "../tournaments/repository";
 import {
 	readLeagueLivePublicationPointerV2,
 	readLeagueLivePublicationV2,
@@ -92,6 +93,7 @@ export type EntryLiveCompetitionBoardRowV2 = {
 };
 
 type IndexedRow = EntryLiveCompetitionBoardRowV2 & {
+	startedEvent?: number | null;
 	searchText: string;
 	ownerAny: number[];
 	ownerStarter: number[];
@@ -590,6 +592,7 @@ const matches = (row: IndexedRow, request: EntryLiveCompetitionBoardRequest): bo
 };
 
 const publicRow = ({
+	startedEvent: _startedEvent,
 	searchText: _searchText,
 	ownerAny: _ownerAny,
 	ownerStarter: _ownerStarter,
@@ -670,6 +673,60 @@ const sortRows = (
 					})();
 		return primary || left.entry - right.entry;
 	});
+};
+
+export const withCompetitionTotalsV2 = async (
+	context: GraphQLContext,
+	board: EntryLiveCompetitionBoardV2
+): Promise<EntryLiveCompetitionBoardV2> => {
+	const { tournamentId, eventId } = board.publication;
+	const tournament = await tournamentsRepository.getTournamentInfoUncached(context, tournamentId);
+	if (!tournament) throw new Error("Live competition scoring configuration unavailable");
+	const start = tournament.groupStartedEventId;
+	if (tournament.groupMode !== GroupMode.POINTS_RACES || start === null || start <= 1) return board;
+
+	// Both live and final score projections already include transfer deductions.
+	// Subtract the cumulative score immediately before the league window.
+	const entries = board.rows.filter((row) => row.score && (row.startedEvent ?? 1) < start);
+	const baselines = new Map<number, number>();
+	if (eventId > start && entries.length > 0) {
+		const { data, error } = await context.data
+			.read("competition.entry_event_results")
+			.select("entry_id, overall_points")
+			.eq("event_id", start - 1)
+			.in(
+				"entry_id",
+				entries.map((row) => row.entry)
+			);
+		if (error) throw new Error("Live competition scoring baseline unavailable");
+		for (const row of (data ?? []) as Array<{ entry_id: number; overall_points: number }>) {
+			baselines.set(row.entry_id, row.overall_points);
+		}
+	}
+
+	const rows = board.rows.map((row): IndexedRow => {
+		if (!row.score) return row;
+		let totalPoints: number | null = null;
+		if (eventId === start) {
+			totalPoints = row.score.netEventPoints;
+		} else if (eventId > start && row.score.totalPoints !== null) {
+			const baseline = (row.startedEvent ?? 1) >= start ? 0 : baselines.get(row.entry);
+			if (baseline !== undefined) totalPoints = row.score.totalPoints - baseline;
+		}
+		return {
+			...row,
+			score: {
+				...row.score,
+				totalPoints,
+				totalScope: totalPoints === null ? "UNKNOWN" : "OVERALL",
+			},
+		};
+	});
+	return {
+		...board,
+		rows,
+		boardRevision: digest([board.boardRevision, start, rows.map((row) => row.score?.totalPoints)]),
+	};
 };
 
 export const queryEntryLiveCompetitionBoardV2 = (
@@ -825,7 +882,10 @@ const projectCompleteBoard = async (
 				},
 				entryFromIndex(indexRow)
 			);
-			projected[index] = rowFor(withBoardDelivery(value, servedFrom), 0, indexRow.overallRank);
+			projected[index] = {
+				...rowFor(withBoardDelivery(value, servedFrom), 0, indexRow.overallRank),
+				startedEvent: indexRow.startedEvent,
+			};
 		}
 	};
 	await Promise.all(
