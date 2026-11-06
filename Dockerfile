@@ -14,7 +14,7 @@ RUN set -eux; \
 			alpine_arch=x86_64; \
 			libcrypto_sha256=3f5825ced5fde1c66a5376a3f6076b3c08538ad52d9ef23f069857e212d9175a; \
 			libssl_sha256=6801c740b9760b5b08da8db6367ebc18b2cc4dbaf371f7148429538b8bb04e23; \
-			zlib_sha256=naf24e502645e2b392cae833856d776691ac21655362e5db69d7b89f147f76216; \
+			zlib_sha256=af24e502645e2b392cae833856d776691ac21655362e5db69d7b89f147f76216; \
 			;; \
 		arm64) \
 			alpine_arch=aarch64; \
