@@ -284,6 +284,31 @@ describe("live competition board selected-metric ranks", () => {
 		});
 	}
 
+	it("uses fewer official transfers to break total-points ties before pagination", () => {
+		const source = board();
+		const sameTotal = [5, 3, 3, null].map((totalTransfers, index) => ({
+			...row(index + 1, 50, 50),
+			totalTransfers,
+			score: { ...score(50, 50), totalPoints: 325 },
+		}));
+		const tied = { ...source, rows: sameTotal, totalEntries: sameTotal.length };
+		for (const direction of ["ASC", "DESC"] as const) {
+			const input = { ...totals, direction, first: 2, entryId: 1 };
+			const first = queryEntryLiveCompetitionBoardV2(tied, input);
+			const second = queryEntryLiveCompetitionBoardV2(tied, {
+				...input,
+				after: first.pageInfo.endCursor,
+			});
+			expect([...first.rows, ...second.rows].map((item) => [item.entry, item.liveRank])).toEqual([
+				[2, 1],
+				[3, 1],
+				[1, 3],
+				[4, 4],
+			]);
+			expect(first.viewerRow?.liveRank).toBe(3);
+		}
+	});
+
 	it("preserves a tie across pages and returns the same rank for the pinned viewer", () => {
 		const source = board();
 		const input = { ...totals, first: 3, entryId: 4 };
