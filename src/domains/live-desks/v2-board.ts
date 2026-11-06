@@ -94,6 +94,7 @@ export type EntryLiveCompetitionBoardRowV2 = {
 
 type IndexedRow = EntryLiveCompetitionBoardRowV2 & {
 	startedEvent?: number | null;
+	totalTransfers?: number | null;
 	searchText: string;
 	ownerAny: number[];
 	ownerStarter: number[];
@@ -593,6 +594,7 @@ const matches = (row: IndexedRow, request: EntryLiveCompetitionBoardRequest): bo
 
 const publicRow = ({
 	startedEvent: _startedEvent,
+	totalTransfers: _totalTransfers,
 	searchText: _searchText,
 	ownerAny: _ownerAny,
 	ownerStarter: _ownerStarter,
@@ -652,6 +654,11 @@ const filterHash = (request: EntryLiveCompetitionBoardRequest): string =>
 		teamCountRules: request.teamCountRules,
 	});
 
+// The publication carries FPL's last_deadline_total_transfers. This is a
+// separate tie-breaker from transfer-point deductions.
+const totalPointsTieBreak = (row: IndexedRow, sort: EntryLiveCompetitionBoardSort): number =>
+	sort === "TOTAL_POINTS" ? (row.totalTransfers ?? Number.MAX_SAFE_INTEGER) : 0;
+
 const sortRows = (
 	rows: readonly IndexedRow[],
 	request: EntryLiveCompetitionBoardRequest
@@ -671,7 +678,11 @@ const sortRows = (
 						if (b === null) return -1;
 						return (a - b) * direction;
 					})();
-		return primary || left.entry - right.entry;
+		return (
+			primary ||
+			totalPointsTieBreak(left, request.sort) - totalPointsTieBreak(right, request.sort) ||
+			left.entry - right.entry
+		);
 	});
 };
 
@@ -735,20 +746,22 @@ export const queryEntryLiveCompetitionBoardV2 = (
 ): EntryLiveCompetitionBoardPageV2 => {
 	// Rank the complete league before filtering or paging, including the pinned
 	// viewer. Copy rows so request-specific ranks never alter the cached board.
-	let previous: number | null = null;
+	let previous: { value: number; tieBreak: number } | null = null;
 	let rank = 0;
 	const filtered = sortRows(board.rows, request)
 		.map((row, index) => {
 			if (request.sort === "RANK" || request.sort === "ENTRY_NAME") return row;
 			const value = metric(row, request.sort);
 			if (value === null) return { ...row, liveRank: null };
-			if (previous === null || value !== previous) rank = index + 1;
-			previous = value;
+			const tieBreak = totalPointsTieBreak(row, request.sort);
+			if (previous?.value !== value || previous.tieBreak !== tieBreak) rank = index + 1;
+			previous = { value, tieBreak };
 			return { ...row, liveRank: rank };
 		})
 		.filter((row) => matches(row, request));
 	const sortRevision = digest({
 		content: board.boardRevision,
+		totalPointsTieBreak: request.sort === "TOTAL_POINTS" ? "fpl-transfers-v1" : undefined,
 		sort: request.sort,
 		direction: request.direction,
 	});
@@ -885,6 +898,7 @@ const projectCompleteBoard = async (
 			projected[index] = {
 				...rowFor(withBoardDelivery(value, servedFrom), 0, indexRow.overallRank),
 				startedEvent: indexRow.startedEvent,
+				totalTransfers: indexRow.totalTransfers,
 			};
 		}
 	};
