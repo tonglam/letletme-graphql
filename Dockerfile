@@ -3,7 +3,7 @@
 FROM oven/bun:1.4.2-alpine@sha256:d888c0ae6c86d7866ff10c5aafdd9077b36aee6455b33dd270fb93c0dd5cef6f AS base
 WORKDIR /app
 
-# The pinned Bun image contains Alpine 3.22.5's vulnerable OpenSSL and zlib packages.
+# The pinned Bun image contains vulnerable Alpine 3.22.5 OpenSSL, zlib and musl packages.
 # Fetch the patched packages from versioned artifact paths and verify their
 # checksums before installing them. Installing local artifacts with an empty
 # repository file keeps the image independent of mutable APK indexes.
@@ -15,12 +15,16 @@ RUN set -eux; \
 			libcrypto_sha256=3f5825ced5fde1c66a5376a3f6076b3c08538ad52d9ef23f069857e212d9175a; \
 			libssl_sha256=6801c740b9760b5b08da8db6367ebc18b2cc4dbaf371f7148429538b8bb04e23; \
 			zlib_sha256=af24e502645e2b392cae833856d776691ac21655362e5db69d7b89f147f76216; \
+			musl_sha256=359890bc7c4dc5fee7a85192de60a471c987e4664767288578beca60a44db2c8; \
+			musl_utils_sha256=0fb52d1d72f34cd69027258adca48db5d75b20872374c5f6bd00600f0279ddd6; \
 			;; \
 		arm64) \
 			alpine_arch=aarch64; \
 			libcrypto_sha256=ede2ef7eca3b65a42e902aaf7890f9c5647dca0c55123a817179ad9f3bc6ef24; \
 			libssl_sha256=338c9f6154582b4b76455a59f95538bcea8df039c5c72916dd2d8d0d844c9583; \
 			zlib_sha256=2d274cb1b2a36d0e8347d802e6dea8648cab952ea5fae1989ab72e725842a2c3; \
+			musl_sha256=d616c430bcbe0bf452b7f6ea2669f2cad14e85644a7599f4f495115d021742ef; \
+			musl_utils_sha256=70d21b7898d61993d528525c80c630077803e478727e00edb182d92bf6ac7395; \
 			;; \
 		*) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
 	esac; \
@@ -28,11 +32,15 @@ RUN set -eux; \
 	wget --no-verbose --output-document=/tmp/libcrypto3.apk "$base_url/libcrypto3-3.5.9-r0.apk"; \
 	wget --no-verbose --output-document=/tmp/libssl3.apk "$base_url/libssl3-3.5.9-r0.apk"; \
 	wget --no-verbose --output-document=/tmp/zlib.apk "$base_url/zlib-1.3.2-r1.apk"; \
+	wget --no-verbose --output-document=/tmp/musl.apk "$base_url/musl-1.2.5-r13.apk"; \
+	wget --no-verbose --output-document=/tmp/musl-utils.apk "$base_url/musl-utils-1.2.5-r13.apk"; \
 	echo "$libcrypto_sha256  /tmp/libcrypto3.apk" | sha256sum -c -; \
 	echo "$libssl_sha256  /tmp/libssl3.apk" | sha256sum -c -; \
 	echo "$zlib_sha256  /tmp/zlib.apk" | sha256sum -c -; \
-	apk add --no-cache --repositories-file /dev/null /tmp/libcrypto3.apk /tmp/libssl3.apk /tmp/zlib.apk; \
-	rm -f /tmp/libcrypto3.apk /tmp/libssl3.apk /tmp/zlib.apk
+	echo "$musl_sha256  /tmp/musl.apk" | sha256sum -c -; \
+	echo "$musl_utils_sha256  /tmp/musl-utils.apk" | sha256sum -c -; \
+	apk add --no-cache --repositories-file /dev/null /tmp/libcrypto3.apk /tmp/libssl3.apk /tmp/zlib.apk /tmp/musl.apk /tmp/musl-utils.apk; \
+	rm -f /tmp/libcrypto3.apk /tmp/libssl3.apk /tmp/zlib.apk /tmp/musl.apk /tmp/musl-utils.apk
 
 FROM base AS deps
 COPY bun.lock package.json ./
