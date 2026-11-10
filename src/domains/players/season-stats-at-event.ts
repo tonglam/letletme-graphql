@@ -1,7 +1,7 @@
 import type { GraphQLContext } from "../../graphql/context";
 import { isPlainRecord as isRecord } from "../../contracts/guards";
 import { gqlCacheKey } from "../../infra/cache-key";
-import { getCoreEventSnapshot } from "../../infra/data-snapshot";
+import { getCoreEventSnapshot, type CoreEventData } from "../../infra/data-snapshot";
 import { QUERY_CACHE_TTL_SECONDS } from "../../infra/query-cache";
 import { getCurrentSeason } from "../../infra/season";
 
@@ -156,34 +156,11 @@ const publicationContext = (
 
 const statsContextMemo = new WeakMap<object, Map<number, Promise<PlayerStatsContext>>>();
 
-const statsContextKey = (requestedEventId: number | null | undefined): number =>
-	typeof requestedEventId === "number" && Number.isSafeInteger(requestedEventId)
-		? requestedEventId
-		: 0;
-
 async function resolvePlayerStatsContextUncached(
 	context: GraphQLContext,
-	requestedEventId?: number | null
+	event: CoreEventData | null
 ): Promise<PlayerStatsContext> {
-	const [season, eventSnapshot] = await Promise.all([
-		getCurrentSeason(context),
-		getCoreEventSnapshot(context),
-	]);
-	const upperBound =
-		typeof requestedEventId === "number" &&
-		Number.isSafeInteger(requestedEventId) &&
-		requestedEventId > 0
-			? requestedEventId
-			: null;
-	const event =
-		eventSnapshot.currentEventId !== null &&
-		(upperBound === null || eventSnapshot.currentEventId <= upperBound)
-			? (eventSnapshot.events.find((candidate) => candidate.id === eventSnapshot.currentEventId) ??
-				null)
-			: ([...eventSnapshot.events]
-					.filter((candidate) => upperBound === null || candidate.id <= upperBound)
-					.filter((candidate) => candidate.finished || candidate.isCurrent)
-					.sort((left, right) => right.id - left.id)[0] ?? null);
+	const season = await getCurrentSeason(context);
 	if (!event) {
 		return unavailableContext(
 			season,
@@ -301,10 +278,29 @@ export async function resolvePlayerStatsContext(
 		memo = new Map();
 		statsContextMemo.set(scope, memo);
 	}
-	const key = statsContextKey(requestedEventId);
+	// The default and an explicit upper bound can resolve to the same event.
+	// Pin that event before memo lookup so sibling roots share one complete
+	// publication check, including while its SQL read is still in flight.
+	const eventSnapshot = await getCoreEventSnapshot(context);
+	const upperBound =
+		typeof requestedEventId === "number" &&
+		Number.isSafeInteger(requestedEventId) &&
+		requestedEventId > 0
+			? requestedEventId
+			: null;
+	const event =
+		eventSnapshot.currentEventId !== null &&
+		(upperBound === null || eventSnapshot.currentEventId <= upperBound)
+			? (eventSnapshot.events.find((candidate) => candidate.id === eventSnapshot.currentEventId) ??
+				null)
+			: ([...eventSnapshot.events]
+					.filter((candidate) => upperBound === null || candidate.id <= upperBound)
+					.filter((candidate) => candidate.finished || candidate.isCurrent)
+					.sort((left, right) => right.id - left.id)[0] ?? null);
+	const key = event?.id ?? 0;
 	const cached = memo.get(key);
 	if (cached) return cached;
-	const loading = resolvePlayerStatsContextUncached(context, requestedEventId);
+	const loading = resolvePlayerStatsContextUncached(context, event);
 	memo.set(key, loading);
 	return loading;
 }
