@@ -8,7 +8,9 @@ const httpRequestDurationSeconds = new Histogram({
 	name: "http_request_duration_seconds",
 	help: "Duration of HTTP requests in seconds",
 	labelNames: ["method", "route", "status"] as const,
-	buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.799, 0.8, 1, 1.9, 1.999, 2, 2.5, 5],
+	// Ops evaluates the p95 bucket upper bound. Keep a bucket immediately
+	// below each SLO threshold so a healthy value is not rounded into a breach.
+	buckets: [0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.799, 0.8, 0.999, 1, 1.9, 1.999, 2, 2.5, 5],
 });
 
 registry.registerMetric(httpRequestDurationSeconds);
@@ -133,7 +135,7 @@ const liveMatchReadDurationSeconds = new Histogram({
 	name: "live_match_read_duration_seconds",
 	help: "Live Matches V3 resolver read duration by view and serving source",
 	labelNames: ["view", "source"] as const,
-	buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.8, 1, 2],
+	buckets: [0.005, 0.01, 0.025, 0.049, 0.05, 0.099, 0.1, 0.149, 0.15, 0.249, 0.25, 0.5, 0.8, 1, 2],
 });
 
 const liveMatchPayloadBytes = new Histogram({
@@ -142,11 +144,16 @@ const liveMatchPayloadBytes = new Histogram({
 	labelNames: ["view", "stage"] as const,
 	buckets: [
 		1024,
+		3 * 1024 - 1,
+		3 * 1024,
+		4 * 1024 - 1,
 		4 * 1024,
 		16 * 1024,
 		30 * 1024,
 		64 * 1024,
+		90 * 1024 - 1,
 		90 * 1024,
+		128 * 1024 - 1,
 		128 * 1024,
 		256 * 1024,
 		1024 * 1024,
