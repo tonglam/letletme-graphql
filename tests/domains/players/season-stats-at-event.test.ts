@@ -96,6 +96,54 @@ const installPlayerStatsReads = (
 };
 
 describe("resolvePlayerStatsContext", () => {
+	it("shares one in-flight publication check for default and explicit bounds resolving to the same event", async () => {
+		const core = buildTestCoreData(3);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		context.requestScope = {};
+		installPlayerStatsReads(context, core);
+		const data = context.data;
+		let reads = 0;
+		context.data = {
+			read: (table: Parameters<typeof data.read>[0]) => {
+				reads++;
+				return data.read(table);
+			},
+		} as typeof data;
+		const results = await Promise.all([
+			resolvePlayerStatsContext(context),
+			resolvePlayerStatsContext({ ...context }, 3),
+			resolvePlayerStatsContext(context, 4),
+			resolvePlayerStatsContext(context, null),
+		]);
+		expect(reads).toBe(1);
+		expect(results[0]).toMatchObject({ asOfEventId: 3, status: "AVAILABLE" });
+		for (const result of results) expect(result).toBe(results[0]);
+	});
+
+	it("keeps historical events and independent requests on separate publication checks", async () => {
+		const core = buildTestCoreData(3);
+		const context = buildSnapshotContext(new TestRedis(buildCorePublication("2627", 7, core)));
+		context.requestScope = {};
+		installPlayerStatsReads(context, core);
+		const data = context.data;
+		let reads = 0;
+		context.data = {
+			read: (table: Parameters<typeof data.read>[0]) => {
+				reads++;
+				return data.read(table);
+			},
+		} as typeof data;
+		const [current, historical, independent] = await Promise.all([
+			resolvePlayerStatsContext(context),
+			resolvePlayerStatsContext(context, 1),
+			resolvePlayerStatsContext({ ...context, requestScope: {} }, 3),
+		]);
+		expect(reads).toBe(3);
+		expect(current.asOfEventId).toBe(3);
+		expect(historical.asOfEventId).toBe(1);
+		expect(independent).not.toBe(current);
+	});
+
 	it("uses the daily publication obligation plus grace for every observer cadence", () => {
 		const expectedBudget = 26 * 60 * 60 * 1000;
 		expect(resolvePlayerStatsFreshnessBudgetMs("ACTIVE_EVENT")).toBe(expectedBudget);
