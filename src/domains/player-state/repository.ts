@@ -418,7 +418,28 @@ export const PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL = `
 	WHERE stats.season_id = $1
 		AND player.element_type = $2
 		AND stats.event_id = ANY($3::integer[])
-	ORDER BY stats.event_id, stats.element_id
+		AND stats.element_id = ANY($4::integer[])
+	UNION
+	-- Keep one valid same-position row per covered event even if the
+	-- subject was absent and no ranking peer recorded a gameweek row.
+	SELECT witness.*
+	FROM unnest($3::integer[]) AS requested(event_id)
+	CROSS JOIN LATERAL (
+		SELECT stats.element_id, stats.event_id, stats.total_points,
+			stats.minutes, stats.starts AS started, stats.bonus
+		FROM fpl.player_gameweek_stats stats
+		JOIN fpl.players player
+			ON player.season_id = stats.season_id
+			AND player.element_id = stats.element_id
+		WHERE stats.season_id = $1
+			AND player.element_type = $2
+			AND stats.event_id = requested.event_id
+		-- Data constrains IDs and minutes; bonus can still be negative.
+			AND (stats.bonus IS NULL OR stats.bonus >= 0)
+		ORDER BY stats.element_id
+		LIMIT 1
+	) witness
+	ORDER BY event_id, element_id
 `;
 
 export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
@@ -471,7 +492,7 @@ export const PLAYER_STATE_DATA_SQL_CONTRACT: readonly DataSqlContractProbe[] = [
 	{
 		name: "player-state.current-gameweeks",
 		sql: PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL,
-		values: [2026, 1, [1]],
+		values: [2026, 1, [1], [1]],
 		runtime: "must-return-player-state-gameweeks",
 	},
 ];
@@ -875,6 +896,7 @@ type ProfilePreload = Readonly<{
 	shared: SharedProfileData;
 	datasetRevision: PlayerStateDatasetRevision;
 	executor: QueryExecutor;
+	cohortSubjectIds: readonly number[];
 }>;
 const profilePreloadMemo = new WeakMap<object, Map<number, ProfilePreload>>();
 
@@ -936,7 +958,8 @@ const loadCurrentCohort = (
 	seasonId: number,
 	position: number,
 	includeCurrent: boolean,
-	eventIds: number[]
+	eventIds: number[],
+	subjectIds: readonly number[]
 ): Promise<CurrentCohort> => {
 	const scope = context.requestScope ?? context;
 	let memo = currentCohortMemo.get(scope);
@@ -944,28 +967,38 @@ const loadCurrentCohort = (
 		memo = new Map();
 		currentCohortMemo.set(scope, memo);
 	}
-	const key = `${seasonId}:${position}:${includeCurrent ? "current" : "preseason"}:${eventIds.join(",")}`;
+	const key = `${seasonId}:${position}:${includeCurrent ? "current" : "preseason"}:${eventIds.join(",")}:${[...subjectIds].sort((a, b) => a - b).join(",")}`;
 	const existing = memo.get(key);
 	if (existing) return existing;
-	const loading = Promise.all([
-		!includeCurrent
-			? Promise.resolve({ rows: [] as CurrentPeerRow[] })
-			: executor.query<CurrentPeerRow>(PLAYER_STATE_CURRENT_PEERS_SQL, [seasonId, position]),
-		eventIds.length === 0
-			? Promise.resolve({ rows: [] as CurrentPeerGameweekRow[] })
-			: executor.query<CurrentPeerGameweekRow>(PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL, [
-					seasonId,
-					position,
-					eventIds,
-				]),
-	]).then(([peers, gameweeks]) => ({
-		peerRows: peers.rows
+	const loading = (async (): Promise<CurrentCohort> => {
+		const peers = includeCurrent
+			? await executor.query<CurrentPeerRow>(PLAYER_STATE_CURRENT_PEERS_SQL, [seasonId, position])
+			: { rows: [] };
+		const peerRows = peers.rows
 			.map(parsePlayerStateCurrentPeerRow)
-			.filter((row): row is CurrentPeerRow => row !== null),
-		gameweekRows: gameweeks.rows
-			.map(parsePlayerStateCurrentPeerGameweekRow)
-			.filter((row): row is CurrentPeerGameweekRow => row !== null),
-	}));
+			.filter((row): row is CurrentPeerRow => row !== null);
+		if (eventIds.length === 0) return { peerRows, gameweekRows: [] };
+		// Rank against the exact validated peer set used below. The subjects
+		// also need their own gameweeks even if they do not qualify as peers.
+		const neededIds = [
+			...new Set([
+				...subjectIds,
+				...peerRows
+					.filter((row) => (row.minutes ?? 0) >= CURRENT_PEER_MINUTES)
+					.map((row) => row.element_id),
+			]),
+		];
+		const gameweeks = await executor.query<CurrentPeerGameweekRow>(
+			PLAYER_STATE_CURRENT_PEER_GAMEWEEKS_SQL,
+			[seasonId, position, eventIds, neededIds]
+		);
+		return {
+			peerRows,
+			gameweekRows: gameweeks.rows
+				.map(parsePlayerStateCurrentPeerGameweekRow)
+				.filter((row): row is CurrentPeerGameweekRow => row !== null),
+		};
+	})();
 	memo.set(key, loading);
 	void loading.catch(() => {
 		if (memo?.get(key) === loading) memo.delete(key);
@@ -2062,7 +2095,13 @@ export const createPlayerStateRepository = (
 			profilePreloadMemo.set(scope, preload);
 		}
 		for (const playerId of missingIds) {
-			preload.set(playerId, { snapshot, shared, datasetRevision, executor });
+			preload.set(playerId, {
+				snapshot,
+				shared,
+				datasetRevision,
+				executor,
+				cohortSubjectIds: missingIds,
+			});
 		}
 		let profiles: Array<PlayerStateProfile | null>;
 		try {
@@ -2134,7 +2173,8 @@ export const createPlayerStateRepository = (
 						seasonId,
 						player.type,
 						asOfEventId !== null,
-						startedEventIds
+						startedEventIds,
+						preload?.cohortSubjectIds ?? [playerId]
 					)
 				: { peerRows: [], gameweekRows: [] };
 		const currentRow = seasonRows.find((row) => row.season_code === season) ?? null;
