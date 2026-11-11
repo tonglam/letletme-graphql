@@ -71,24 +71,21 @@ export type PostgresMarketMetadata = {
 	captureCount: number;
 };
 
+// A scalar date keeps both season and date in the primary-key scan condition.
 export const MARKET_POSTGRES_METADATA_SQL = `
 	WITH latest_date AS (
 		SELECT MAX(snapshot_date) AS snapshot_date
 		FROM fpl.player_market_snapshots
 		WHERE season_id = $1
-	), latest_batch AS (
-		SELECT snapshot.snapshot_date::text AS snapshot_date,
-			MAX(captured_at) AS captured_at,
-			COUNT(*)::integer AS row_count,
-			COUNT(DISTINCT captured_at)::integer AS capture_count
-		FROM fpl.player_market_snapshots snapshot
-		JOIN latest_date ON latest_date.snapshot_date = snapshot.snapshot_date
-		WHERE snapshot.season_id = $1
-		GROUP BY snapshot.snapshot_date
 	)
-	SELECT snapshot_date, captured_at, row_count, capture_count
-	FROM latest_batch
-	LIMIT 1
+	SELECT snapshot.snapshot_date::text AS snapshot_date,
+		MAX(snapshot.captured_at) AS captured_at,
+		COUNT(*)::integer AS row_count,
+		COUNT(DISTINCT snapshot.captured_at)::integer AS capture_count
+	FROM fpl.player_market_snapshots snapshot
+	WHERE snapshot.season_id = $1
+		AND snapshot.snapshot_date = (SELECT snapshot_date FROM latest_date)
+	GROUP BY snapshot.snapshot_date
 `;
 
 /** Decode the single latest market capture used as the Postgres authority. */
