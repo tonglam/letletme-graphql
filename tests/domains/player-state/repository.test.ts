@@ -458,6 +458,89 @@ describe("Player State repository", () => {
 		).toHaveLength(1);
 	});
 
+	it("reads selected subjects and eligible peers while preserving coverage for absent subjects", async () => {
+		const base = makeExecutor().executor;
+		const peerRows: QueryResultRow[] = currentSummaryRows.map((row) => ({
+			...row,
+			minutes: row.element_id === 20 ? 900 : 100,
+		}));
+		peerRows.push({ ...currentSummaryRows[2], element_id: 40, minutes: 900 });
+		const weekRows = [
+			...currentGameweekRows,
+			...currentGameweekRows
+				.filter((row) => row.element_id === 30)
+				.map<QueryResultRow>((row) => ({
+					...row,
+					element_id: 40,
+				})),
+		]
+			.filter((row) => row.event_id !== 8 && (row.event_id !== 7 || row.element_id === 30))
+			.concat({
+				element_id: 30,
+				event_id: 8,
+				total_points: 1,
+				minutes: 90,
+				started: true,
+				bonus: -1,
+			});
+		const gameweekCalls: Array<readonly unknown[]> = [];
+		const buildRepository = (sparse: boolean) =>
+			createPlayerStateRepository({
+				loadCoreSnapshot: async () => snapshot(),
+				executor: {
+					query: async <Row extends QueryResultRow>(text: string, values?: readonly unknown[]) => {
+						let rows: QueryResultRow[];
+						if (text.includes("player-state:current-peers")) {
+							rows = peerRows;
+						} else if (text.includes("player-state:current-gameweeks")) {
+							if (sparse) gameweekCalls.push(values ?? []);
+							// GW7 is covered by a valid non-ranking peer. GW8 has only
+							// an invalid row and must stay uncovered in both projections.
+							rows = sparse
+								? weekRows.filter((row) => row.element_id !== 30 || row.event_id === 7)
+								: weekRows;
+						} else {
+							return base.query<Row>(text, values);
+						}
+						return { rows: rows as Row[], rowCount: rows.length };
+					},
+				},
+			});
+		const full = await buildRepository(false).getPlayerStateProfiles(
+			makeContext(new TestRedis()),
+			[10, 20],
+			5
+		);
+		const sparse = await buildRepository(true).getPlayerStateProfiles(
+			makeContext(new TestRedis()),
+			[10, 20],
+			5
+		);
+
+		expect(gameweekCalls).toHaveLength(1);
+		expect(gameweekCalls[0]?.[3]).toEqual([10, 20, 40]);
+		for (const playerId of [10, 20]) {
+			const profile = sparse.get(playerId);
+			const baseline = full.get(playerId);
+			const role = profile?.dimensions.find((row) => row.kind === "AVAILABILITY_ROLE");
+			expect(role?.metrics.find((row) => row.code === "ROLE_STARTS_LAST_5")).toMatchObject({
+				value: 3,
+				sampleSize: 4,
+			});
+			expect(profile?.dimensions.find((row) => row.kind === "FPL_OUTPUT")).toEqual(
+				baseline?.dimensions.find((row) => row.kind === "FPL_OUTPUT")
+			);
+			const coverage = profile?.coverage.sources.find(
+				(row) => row.provider === "FPL" && row.scope === "CURRENT"
+			);
+			const fullCoverage = baseline?.coverage.sources.find(
+				(row) => row.provider === "FPL" && row.scope === "CURRENT"
+			);
+			expect(coverage?.analysisStatus).toBe(fullCoverage?.analysisStatus);
+			expect(coverage?.reasonCodes).toEqual(fullCoverage?.reasonCodes);
+		}
+	});
+
 	it("uses the season projection and exposes current plus historical Understat coverage", async () => {
 		const redis = new TestRedis();
 		const { executor, queries } = makeExecutor();
